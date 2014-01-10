@@ -1,5 +1,4 @@
-package.path = package.path .. ";src/?.lua"
-local ffi = require 'src/ffiex'
+local ffi = require 'luact.ffiex'
 
 ffi.path "/usr/local/include/luajit-2.0"
 ffi.path "/Applications/Xcode.app/Contents/Developer/usr/lib/llvm-gcc/4.2.1/include"

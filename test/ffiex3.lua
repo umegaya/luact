@@ -1,5 +1,5 @@
-package.path = package.path .. ";src/?.lua"
-local ffi = require 'src/ffiex'
+local ffi = require 'luact.ffiex'
 ffi.cdef [[
 #include <memory.h>
+#include <time.h>
 ]]
