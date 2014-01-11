@@ -63,3 +63,7 @@ thread.fetch(function (thread_list, size)
 		pi[0] = 0 --> indicate worker thread to stop
 	end
 end)
+
+thread.sleep(3.0)
+thread.fin()
+

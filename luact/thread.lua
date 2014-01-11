@@ -35,6 +35,7 @@ typedef struct {
 } thread_args_t;
 ]]
 
+ffi.lcpp_cdef = nil
 
 -- metatype
 ffi.metatype("thread_manager_t", {
@@ -111,6 +112,12 @@ end
 _M.fin = function ()
 	if threads then
 		if threads.list then
+			for i=0,threads.used-1,1 do
+				local t = threads.list[i]
+				C.pthread_join(t.pt, rv)
+				C.lua_close(t.L)
+				memory.free(t)
+			end
 			memory.free(threads.list)
 		end
 		memory.free(threads)
