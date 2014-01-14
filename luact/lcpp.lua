@@ -311,35 +311,29 @@ end
 -- PARSER
 -- ------------
 
+local LCPP_TOKENIZE_COMMENT = {
+	string = false,
+	keywords = { 
+		MLCOMMENT = "^/%*.-%*/",
+		SLCOMMENT = "^//.-\n",
+		STRING_LITERAL = '^"[^"]*"',
+	},
+}
 -- hint: LuaJIT ffi does not rely on us to remove the comments, but maybe other usecases
 local function removeComments(input)
-		input = string.gsub(input, "//.-\n", "\n") -- remove sl comments
-		-- remove multiline comments in a way that it does not break __LINE__ macro
-		if lcpp.FAST then
-			input = string.gsub(input, "/%*.-%*/", "") -- remove ml comments (stupid method)
+	local out = {}
+	for k, v, start, end_ in tokenizer(input, LCPP_TOKENIZE_COMMENT) do
+		if k == "MLCOMMENT" then
+			local newlineCount = findn(input:sub(start, end_), "\n")
+			local newlines = string.rep("\n", newlineCount)
+			table.insert(out, newlines)
+		elseif k == "SLCOMMENT" then 
+			table.insert(out, "\n")
 		else
-			local offset = 0
-			local output = {}
-			local starti, endi, match, lastendi
-			while offset do
-				starti, endi, match = input:find("/%*(.-)%*/", offset, false)
-				if starti then
-					lastendi = endi
-					local newlineCount = findn(match, "\n")
-					local newlines = string.rep("\n", newlineCount)
-					table.insert(output, input:sub(offset+1, starti-1))
-					table.insert(output, newlines)
-					offset = endi
-				else
-					offset = nil
-					table.insert(output, input:sub((lastendi or 0) + 1))
-				end
-			end
-			input = table.concat(output)
-			--error(input)
+			table.insert(out, input:sub(start, end_))
 		end
-
-		return input
+	end
+	return table.concat(out)
 end
 
 -- screener: revmoce comments, trim, ml concat...
@@ -402,7 +396,13 @@ local function apply(state, input)
 					elseif type(macro) == "number" then
 						repl = tostring(macro)
 					elseif type(macro) == "function" then
-						table.insert(functions, macro)	-- we apply functions in a later step
+						local decl = input:sub(start):gsub("^[_%a][_%w]%s*%b()", "%1")
+						repl = macro(decl)
+						expand = true
+						table.insert(out, repl)
+						table.insert(out, input:sub(end_ + #decl))
+						break
+						--table.insert(functions, macro)	-- we apply functions in a later step
 					end
 					expand = true
 				end
@@ -412,9 +412,6 @@ local function apply(state, input)
 			end
 		end
 		input = table.concat(out)
-		for _, func in pairs(functions) do	-- TODO: looks sucky (but works quite nice)
-			input = func(input)
-		end
 		if not expand then
 			break
 		end
@@ -667,11 +664,10 @@ local function parseExpr(state, input)
 	return result
 end
 
--- apply macros chaining and string ops "##" and "#"
+-- apply string ops "##"
 local function prepareMacro(state, input)
 	if type(input) ~= "string" then return input end
 	repeat
-		input = state:apply(input)
 		local out = {}
 		local concat
 		for k, v, start, end_ in tokenizer(input, LCPP_TOKENIZE_MACRO) do
@@ -868,6 +864,15 @@ function lcpp.test(suppressMsg)
 		/*
 		 assert(false, "multi-line comment not removed")
 		 */
+		/* pathological case which contains single line comment start in multiline comments.
+		 * e.g. this multiline comment should be finish next line.
+		 * http://foobar.com */ // comment
+		/* if singleline comment processes first, sometimes indicator of end of multiline loss */ #define THIS_SHOULD_ENABLE 111 /*
+			continuous multiline comment after macro definition
+		//*/
+		///* this removed.
+		assert(THIS_SHOULD_ENABLE == 111, "pathological multiline comment test")
+
 
 		#define TRUE
 		#define LEET 0x1337
@@ -938,9 +943,12 @@ function lcpp.test(suppressMsg)
 		#define FOOBAR(x) testfunc(x)
 		assert(FOOBAR(1) == "[1]", msg)
 		#define testfunc(x)
+		#define FOOBAZ(x) testfunc(x)
 		assert(check_argnum(FOOBAR(1)) == 0, msg)
+		assert(check_argnum(FOOBAZ(1)) == 0, msg)
 		#undef testfunc
 		assert(FOOBAR(1) == "[1]", msg)
+		assert(FOOBAZ(1) == "[1]", msg)
 
 
 		msg = "indentation test"
@@ -1046,6 +1054,10 @@ function lcpp.test(suppressMsg)
 		#define msg_concat(msg1, msg2) msg1 ## msg2
 		assert("I, am, lcpp" == msg_concat("I, am", ", lcpp"), "processing macro argument which includes ,")
 
+		#define FUNC__ARG 500
+		#define __ARG 100
+		#define FUNC(x) FUNC##x
+		assert(FUNC(__ARG) == 500, "create new macro symbol by concat")
 	]]
 	lcpp.FAST = false	-- enable full valid output for testing
 	local testlua = lcpp.compile(testlcpp)
@@ -1100,19 +1112,7 @@ lcpp.enable = function()
 				return output	
 			end
 			ffi.lcpp_cdef_backup = ffi.cdef
-			ffi.cdef = function(input) 
-				local filename,cnt = input:gsub("#include <([%a%.]*)>", "%1")
-				if false then
-					local tmp = input
-					input = ffi.lcpp(input)
-					local f = io.open("_" .. filename, 'w')
-					f:write(input)
-					f:close()
-					return ffi.lcpp_cdef_backup(input) 
-				else
-					return ffi.lcpp_cdef_backup(ffi.lcpp(input))
-				end
-			end
+			ffi.cdef = function(input) return ffi.lcpp_cdef_backup(ffi.lcpp(input)) end
 		end
 	end
 end

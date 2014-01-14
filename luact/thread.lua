@@ -129,7 +129,8 @@ _M.create = function (proc, args)
 	local L = C.luaL_newstate()
 	assert(L ~= nil)
 	C.luaL_openlibs(L)
-	assert(C.luaL_loadstring(L, ([[
+	local r
+	r = C.luaL_loadstring(L, ([[
 	local ffi = require("luact.ffiex")
 	local thread = require("luact.thread")
 	local main = load(%q)
@@ -139,9 +140,14 @@ _M.create = function (proc, args)
 		return main(args.original, args.shm)
 	end
 	__mainloop__ = tonumber(ffi.cast("intptr_t", ffi.cast("void *(*)(void *)", mainloop)))
-	]]):format(string.dump(proc))) == 0)
-	local r = C.lua_pcall(L, 0, 1, 0)
-	assert(r == 0, (r == 0) and "" or ffi.string(C.lua_tolstring(L, -1, nil)))
+	]]):format(string.dump(proc)))
+	if r ~= 0 then
+		assert(false, "luaL_loadstring:" .. tostring(r) .. "|" .. ffi.string(C.lua_tolstring(L, -1, nil)))
+	end
+	r = C.lua_pcall(L, 0, 1, 0)
+	if r ~= 0 then
+		assert(false, "lua_pcall:" .. tostring(r) .. "|" .. ffi.string(C.lua_tolstring(L, -1, nil)))
+	end
 
 	C.lua_getfield(L, ffi.defs.LUA_GLOBALSINDEX, "__mainloop__")
 	local mainloop = C.lua_tointeger(L, -1);

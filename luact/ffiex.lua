@@ -71,15 +71,13 @@ ffi.csrc = function (src)
 	local ppsrc = lcpp.compile()
 end
 
--- basic compiler definition
--- TODO : get predefine from gcc's output?
-ffi.define { __GNUC__ = 4 }
-if ffi.arch == "x64" then
-	ffi.define { __x86_64__ = true }
-else
-	ffi.define { __i386__ = true }
-end
+-- add compiler predefinition
+local p = io.popen('echo | gcc -E -dM -')
+local predefs = p:read('*a')
+ffi.cdef(predefs)
 if ffi.os == 'OSX' then
---	ffi.define { __OSX_AVAILABLE_STARTING = "" }
+	-- luajit cannot parse objective-C code correctly
+	-- e.g.  int      atexit_b(void (^)(void)) ; ^!!
+	ffi.undef({"__BLOCKS__"})
 end
 return ffi
