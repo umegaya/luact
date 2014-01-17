@@ -62,19 +62,96 @@ ffi.defs = setmetatable({}, {
 				t[k] = r()
 				return  t[k]
 			end
+		elseif type(def) == 'function' then
+			error("currently, functional macro not worked as it should:" .. k)
 		end
 		t[k] = def
 		return def
 	end
 })
-ffi.csrc = function (src)
-	local ppsrc = lcpp.compile()
+
+local generate_cdefs = function (code)
+	-- matching extern%s+[symbol]%s+[symbol]%b()
+	local current = 0
+	local decl = ""
+	repeat
+		local _, offset = string.find(code, '\n', current+1, true)
+		local line = code:sub(current+1, offset)
+		local match,count = line:gsub('.-(extern.+%b()).*', '%1')
+		if count > 0 then
+			decl = (decl .. match .. ";\n")
+		end
+		current = offset
+	until not current
+	if #decl > 0 then
+		--print('decl = ' .. decl)
+		ffi.cdef(decl)
+	end
+end
+local build = function (name, src)
+	local opts = table.concat((ffi.opts or {"-fPIC"}), " ") .. " -I" .. table.concat(searchPath, " -I")
+	local obj
+	if src then
+		-- dummy compile to inject macro definition for external use
+		ffi.cdef(src)
+		-- generate cdefs from source code
+		generate_cdefs(src)
+		-- generate so filename/create tmp file to compile
+		obj = './' .. name .. '.so'
+		name = obj..'.c'
+		local f = io.open(name, 'w')
+		f:write(src)
+		f:close()
+	else
+		-- dummy compile to inject macro definition for external use
+		ffi.cdef(src)
+		-- generate cdefs from source code
+		local f = io.open(name, 'r')
+		generate_cdefs(f:read('*a'))
+		f:close()
+		-- generate so filename
+		obj = './' .. name:gsub('%.c$', '.so')
+	end
+	local ok, r = pcall(io.popen, ('gcc -shared -o %s %s %s'):format(obj, opts, name))
+	if ok then
+		local out = r:read('*a')
+		if src then
+			os.remove(name)
+		end		
+		return obj,out
+	else
+		if src then
+			os.remove(name)
+		end
+		return nil, r
+	end
+end
+ffi.copt = function (opts)
+	local found = false
+	for _,opt in ipairs(opts) do
+		if opt:find("-fPIC") then
+			found = true
+		end
+	end
+	if not found then
+		table.insert(opts, "-fPIC")
+	end
+	ffi.opts = opts
+end
+ffi.csrc = function (name, src)
+	local path,err = build(name, src)
+	if path then
+		return ffi.load(path),err
+	else
+		error(err)
+	end
 end
 
 -- add compiler predefinition
 local p = io.popen('echo | gcc -E -dM -')
 local predefs = p:read('*a')
 ffi.cdef(predefs)
+p:close()
 if ffi.os == 'OSX' then
 	-- luajit cannot parse objective-C code correctly
 	-- e.g.  int      atexit_b(void (^)(void)) ; ^!!
