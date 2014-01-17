@@ -1,4 +1,7 @@
 -- actor main loop
--- this must not be closure because it passed to another thread by using string.dump.
-return function (args)
+local memory = require 'luact.memory'
+
+
+return function (args, shmp)
+	shmp = ffi.new('workerdata_t')
 end
