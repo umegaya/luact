@@ -1,4 +1,5 @@
 local _M = {}
+local ffi = require 'luact.ffiex'
 
 _M.n_cpu = function ()
 	local c = 0
@@ -20,17 +21,23 @@ _M.n_cpu = function ()
 	return tonumber(c)
 end
 
--- TODO : how we import gcc's __sync_XXXX into luaJIT?
+-- atomic builtins
+local synclib = ffi.csrc("synclib", [[
+extern int fetch_add(int *p, int add) {
+	return __sync_fetch_and_add(p, add);
+}
+extern int cas(int *v, int compare, int willbe) {
+	return __sync_val_compare_and_swap(v, compare, willbe);
+}
+]])
+
+-- n:int *, add:int
 _M.sync_fetch_add = function (n, add)
-	n[0] = n[0] + add
-	return n[0]
+	return synclib.fetch_add(n, add)
 end
+-- n:int *, add:int
 _M.sync_cas = function (value, compare, willbe)
-	if value[0] == compare then
-		local tmp = value[0]
-		value[0] = willbe
-		return tmp
-	end
+	return synclib.cas(value, compare, willbe);
 end
 
 return _M
