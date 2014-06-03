@@ -1,7 +1,5 @@
 local util = require 'luact.util'
 local thread = require 'luact.thread'
-local serde = require 'luact.serde'
-local actor = require 'luact.actor'
 local _M = {}
 local shms = {}
 
@@ -19,7 +17,7 @@ end
 _M.config = {
 	worker = util.n_cpu()
 }
-_M.__call = function (self, source)
+function _M.__call(self, source)
 	if is_actor(source) then return source end
 	actor.uuid(source)
 	local th, q = get_worker()

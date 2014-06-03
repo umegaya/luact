@@ -1,7 +1,13 @@
 -- actor main loop
+local ffi = require 'ffiex'
 local memory = require 'luact.memory'
 
+ffi.cdef [[
+typedef struct {
+	
+} worker_t;
+]]
 
 return function (args, shmp)
-	shmp = ffi.new('workerdata_t')
+	shmp = memory.alloc_typed('worker_t')
 end

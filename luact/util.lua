@@ -1,7 +1,7 @@
 local _M = {}
-local ffi = require 'luact.ffiex'
+local ffi = require 'ffiex'
 
-_M.n_cpu = function ()
+function _M.n_cpu()
 	local c = 0
 	-- FIXME: I dont know about windows... just use only 1 core.
 	if jit.os == 'Windows' then return 1 end
@@ -22,6 +22,7 @@ _M.n_cpu = function ()
 end
 
 -- atomic builtins
+--[[
 local synclib = ffi.csrc("synclib", [[
 extern int fetch_add(int *p, int add) {
 	return __sync_fetch_and_add(p, add);
@@ -29,15 +30,18 @@ extern int fetch_add(int *p, int add) {
 extern int cas(int *v, int compare, int willbe) {
 	return __sync_val_compare_and_swap(v, compare, willbe);
 }
-]])
+, {
+	cc = "gcc", 
+	extra = {"-O2", "-Wall"},
+})
 
 -- n:int *, add:int
-_M.sync_fetch_add = function (n, add)
+function _M.sync_fetch_add(n, add)
 	return synclib.fetch_add(n, add)
 end
 -- n:int *, add:int
-_M.sync_cas = function (value, compare, willbe)
+function _M.sync_cas(value, compare, willbe)
 	return synclib.cas(value, compare, willbe);
 end
-
+]]--
 return _M
