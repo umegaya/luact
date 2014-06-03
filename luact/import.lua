@@ -19,7 +19,8 @@ ffi.metatype('c_parsed_info_t', {
 		init = function (t)
 			t.size = 2
 			t.used = 0
-			t.list = memory.alloc_typed('c_parsed_cache_t', t.size)
+			t.list = assert(memory.alloc_typed('c_parsed_cache_t', t.size), 
+				"fail to allocate import cache:"..t.size)
 		end,
 		fin = function (t)
 			if t.list ~= ffi.NULL then
@@ -42,8 +43,14 @@ ffi.metatype('c_parsed_info_t', {
 		add = function (t, name, cdecl, macro)
 			--> initialize parsed information
 			if t.size <= t.used then
-				t.list = memory.realloc_typed("c_parsed_cache_t", t.size * 2)
-				t.size = (t.size * 2)
+				local p = memory.realloc_typed("c_parsed_cache_t", t.size * 2)
+				if p then
+					t.list = p
+					t.size = (t.size * 2)
+				else
+					print('importer:add:realloc fails:'..tostring(t.size * 2))
+					return nil
+				end
 			end
 			local e = t.list[t.used]
 			e.cdecl = memory.strdup(cdecl)
@@ -58,7 +65,7 @@ ffi.metatype('c_parsed_info_t', {
 function _M.initialize(cache)
 	if not cache then
 		_master = true
-		_cache = memory.alloc_typed('c_parsed_info_t')
+		_cache = assert(memory.alloc_typed('c_parsed_info_t'), "fail to alloc cache")
 		_cache:init()
 	else
 		_master = false
@@ -112,6 +119,11 @@ function _M.import(name, cdecls, macros, paths, from)
 		_macro = inject_macros(state, macros or {})
 		--> initialize parsed information
 		c = _cache:add(name, _cdecl, _macro)
+		if not c then --> still fails because of allocation
+			ffi.cdef(ffi.string(_macro))
+			ffi.lcpp_cdef_backup(ffi.string(_cdecl))
+			return
+		end
 	end
 	ffi.cdef(ffi.string(c.macro))
 	ffi.lcpp_cdef_backup(ffi.string(c.cdecl))

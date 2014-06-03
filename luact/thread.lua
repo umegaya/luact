@@ -72,7 +72,8 @@ function _M.init_cdef(cache)
 		__index = {
 			init = function (t)
 				t.size, t.used = tonumber(util.n_cpu()), 0
-				t.list = memory.alloc_typed("thread_handle_t*", t.size)
+				t.list = assert(memory.alloc_typed("thread_handle_t*", t.size), 
+					"fail to allocation thread list")
 				PT.pthread_mutex_init(t.mtx, nil)
 				PT.pthread_mutex_init(t.import_mtx, nil)
 			end,
@@ -93,6 +94,9 @@ function _M.init_cdef(cache)
 				PT.pthread_mutex_lock(t.mtx)
 				if t.size <= t.used then
 					t:expand(t.size * 2)
+					if t.size <= t.used then
+						return nil
+					end
 				end
 				t.list[t.used] = thread
 				t.used = (t.used + 1)
@@ -131,11 +135,16 @@ function _M.init_cdef(cache)
 				PT.pthread_mutex_unlock(t.mtx)
 				return r
 			end,
-			__expand = function (t, newsize)
-				-- only called from mutex locked block
-				t.list = memory.realloc_typed("thread_handle_t", t.list, newsize)
-				assert(t.list)
-				t.size = newsize
+			expand = function (t, newsize)
+				-- only called from mutex locked bloc
+				local p = memory.realloc_typed("thread_handle_t", newsize)
+				if p then
+					t.list = p
+					t.size = newsize
+				else
+					print('expand thread list fails:'..newsize)
+				end
+				return p
 			end,
 		}
 	})
@@ -217,8 +226,7 @@ function _M.create(proc, args)
 	assert(PT.pthread_create(t, nil, ffi.cast("thread_proc_t", mainloop), argp) == 0)
 	th.pt = t[0]
 	th.L = L
-	threads:insert(th)
-	return th
+	return threads:insert(th) and th or nil
 end
 
 -- destroy thread.
