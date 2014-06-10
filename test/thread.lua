@@ -4,7 +4,9 @@ local util = require 'luact.util'
 local memory = require 'luact.memory'
 local thread = require 'luact.thread'
 
-thread.init()
+thread.initialize({
+	cdef_cache_dir = './tmp/cdefs'
+})
 
 print('----- test1 -----')
 local args = memory.alloc_typed('int', 3)

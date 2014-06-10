@@ -19,7 +19,7 @@ local malloc_info_list = setmetatable({}, {
 ffi.cdef [[
 	void *malloc(size_t);
 	void free(void *);
-	void realloc(void *, size_t);
+	void *realloc(void *, size_t);
 	char *strncpy(char *, const char *, size_t);
 ]]
 
@@ -38,7 +38,7 @@ end
 function _M.strdup(str)
 	local p = _M.alloc_typed('char', #str + 1)
 	if p then
-		C.strncpy(p, str, #str + 1)
+		ffi.copy(p, str)
 	end
 	return p
 end

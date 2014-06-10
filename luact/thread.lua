@@ -1,12 +1,13 @@
 --package.path=("../ffiex/?.lua;" .. package.path)
 local ffi = require 'ffiex'
 local memory = require 'luact.memory'
-local importer = require 'luact.import'
+local loader = require 'luact.loader'
 local util = require 'luact.util'
-local _M = { defs = {} }
+local fs = require 'luact.fs'
+
+local _M = {}
 local C = ffi.C
-ffi.NULL = ffi.new('void*')
-local PT = ffi.load("pthread")
+local PT = ffi.load('pthread')
 
 -- cdefs
 ffi.cdef [[
@@ -19,53 +20,59 @@ ffi.cdef [[
 ]]
 
 function _M.init_cdef(cache)
-	importer.initialize(cache)
+	loader.initialize(cache)
 
-	importer.import("thread.lua", {
+	loader.load("thread.lua.pthread", {
 		--> from pthread
 		"pthread_t", "pthread_mutex_t", 
 		"pthread_mutex_lock", "pthread_mutex_unlock", 
 		"pthread_mutex_init", "pthread_mutex_destroy",
 		"pthread_create", "pthread_join", "pthread_self",
 		"pthread_equal", 
+		--> from time
+		"nanosleep",
+	}, {}, "pthread", [[
+		#include <pthread.h>
+		#include <time.h>
+	]])
+
+	local ffi_state = loader.load("thread.lua.luaAPI", {
 		--> from luauxlib, lualib
 		"luaL_newstate", "luaL_openlibs",
 		"luaL_loadstring", "lua_pcall", "lua_tolstring",
 		"lua_getfield", "lua_tointeger",
 		"lua_settop", "lua_close", 
-		--> from time
-		"nanosleep",
 	}, {
 		"LUA_GLOBALSINDEX",
-	}, {
-		"/usr/local/include/luajit-2.0",
-	}, [[
-		#include <pthread.h>
+	}, nil, [[
 		#include <lauxlib.h>
 		#include <lualib.h>
-		#include <time.h>
 	]])
 
-	ffi.lcpp_cdef_backup[[
-	typedef void *(*thread_proc_t)(void *);
-	typedef struct {
-		pthread_t pt;
-		lua_State *L;
-		void *shm[1];
-	} thread_handle_t;
-	typedef struct {
-		thread_handle_t **list;
-		int size, used;
-		pthread_mutex_t mtx[1];
-		pthread_mutex_t import_mtx[1];
-	} thread_manager_t;
-	typedef struct {
-		thread_manager_t *manager;
-		c_parsed_info_t *parsed;
-		void *original;
-		void **shm;
-	} thread_args_t;
+	ffi.cdef [[
+		typedef void *(*thread_proc_t)(void *);
+		typedef struct {
+			pthread_t pt;
+			lua_State *L;
+			void *shm[1];
+		} thread_handle_t;
+		typedef struct {
+			thread_handle_t **list;
+			int size, used;
+			pthread_mutex_t mtx[1];
+			pthread_mutex_t load_mtx[1];
+		} thread_manager_t;
+		typedef struct {
+			thread_manager_t *manager;
+			c_parsed_info_t *parsed;
+			void *original;
+			void **shm;
+		} thread_args_t;
 	]]
+
+	_M.defs = {
+		LUA_GLOBALSINDEX = ffi_state.defs.LUA_GLOBALSINDEX
+	}
 
 	--> metatype
 	ffi.metatype("thread_manager_t", {
@@ -75,7 +82,7 @@ function _M.init_cdef(cache)
 				t.list = assert(memory.alloc_typed("thread_handle_t*", t.size), 
 					"fail to allocation thread list")
 				PT.pthread_mutex_init(t.mtx, nil)
-				PT.pthread_mutex_init(t.import_mtx, nil)
+				PT.pthread_mutex_init(t.load_mtx, nil)
 			end,
 			fin = function (t)
 				if t.list then
@@ -88,7 +95,7 @@ function _M.init_cdef(cache)
 					memory.free(t.list)
 				end
 				PT.pthread_mutex_destroy(t.mtx)
-				PT.pthread_mutex_destroy(t.import_mtx)
+				PT.pthread_mutex_destroy(t.load_mtx)
 			end,
 			insert = function (t, thread)
 				PT.pthread_mutex_lock(t.mtx)
@@ -152,9 +159,6 @@ function _M.init_cdef(cache)
 	--> preserve parser result for faster startup of second thread
 	_M.c_parsed_info = c_parsed_info
 	_M.req,_M.rem = ffi.new('struct timespec[1]'), ffi.new('struct timespec[1]')
-
-	--> unload ffiex cache (after that no more ffiex method call)
-	ffi.main_ffi_state = nil 
 end
 
 
@@ -164,21 +168,30 @@ local threads
 
 -- methods
 -- initialize thread module. created threads are initialized with manager
-function _M.init(manager, cache)
-	if manager and cache then
-		_M.init_cdef(ffi.cast("c_parsed_info_t*", cache))
-		threads = ffi.cast("thread_manager_t*", manager)
-	else
-		_M.init_cdef()
-		threads = memory.alloc_typed("thread_manager_t")
-		threads:init()
+function _M.initialize(opts)
+	_M.apply_options(opts or {})
+	_M.init_cdef()
+	threads = memory.alloc_typed("thread_manager_t")
+	threads:init()
+end
+function _M.apply_options(opts)
+	_M.opts = opts
+	if opts.cdef_cache_dir then
+		util.mkdir(opts.cdef_cache_dir)
+		loader.set_cache_dir(opts.cdef_cache_dir)
 	end
 end
 
-function _M.import(name, cdecls, macros, paths, from)
-	PT.pthread_mutex_lock(threads.import_mtx)
-	pcall(importer.import, name, cdecls, macros, paths, from)
-	PT.pthread_mutex_unlock(threads.import_mtx)	
+function _M.init_worker(manager, cache)
+	assert(manager and cache)
+	_M.init_cdef(ffi.cast("c_parsed_info_t*", cache))
+	threads = ffi.cast("thread_manager_t*", manager)
+end
+
+function _M.load(name, cdecls, macros, lib, from)
+	PT.pthread_mutex_lock(threads.load_mtx)
+	loader.load(name, cdecls, macros, lib, from)
+	PT.pthread_mutex_unlock(threads.load_mtx)	
 end
 
 -- finalize. no need to call from worker
@@ -186,7 +199,7 @@ function _M.fin()
 	if threads then
 		threads:fin()
 		memory.free(threads)
-		importer.finalize()
+		loader.finalize()
 	end
 end
 
@@ -197,12 +210,11 @@ function _M.create(proc, args)
 	C.luaL_openlibs(L)
 	local r
 	r = C.luaL_loadstring(L, ([[
-	local ffi = require("ffiex")
 	local thread = require("luact.thread")
 	local main = load(%q)
 	local mainloop = function (p)
 		local args = ffi.cast("thread_args_dummy_t*", p)
-		thread.init(args.manager, args.cache)
+		thread.init_worker(args.manager, args.cache)
 		return main(args.original, args.shm)
 	end
 	__mainloop__ = tonumber(ffi.cast("intptr_t", ffi.cast("void *(*)(void *)", mainloop)))
@@ -215,14 +227,14 @@ function _M.create(proc, args)
 		assert(false, "lua_pcall:" .. tostring(r) .. "|" .. ffi.string(C.lua_tolstring(L, -1, nil)))
 	end
 
-	C.lua_getfield(L, ffi.defs.LUA_GLOBALSINDEX, "__mainloop__")
+	C.lua_getfield(L, _M.defs.LUA_GLOBALSINDEX, "__mainloop__")
 	local mainloop = C.lua_tointeger(L, -1)
 	C.lua_settop(L, -2)
 
 	local th = memory.alloc_typed("thread_handle_t", 1)
 	th.shm[0] = nil
 	local t = ffi.new("pthread_t[1]")
-	local argp = ffi.new("thread_args_t", {threads, importer.get_cache_ptr(), args, th.shm})
+	local argp = ffi.new("thread_args_t", {threads, loader.get_cache_ptr(), args, th.shm})
 	assert(PT.pthread_create(t, nil, ffi.cast("thread_proc_t", mainloop), argp) == 0)
 	th.pt = t[0]
 	th.L = L
@@ -268,10 +280,8 @@ end
 -- nanosleep
 function _M.sleep(sec)
 	-- convert to nsec
-	local round = math.floor(sec)
 	local req, rem = _M.req, _M.rem
-	req[0].tv_sec = round
-	req[0].tv_nsec = math.floor((sec - round) * (1000 * 1000 * 1000))
+	util.sec2timespec(sec, _M.req)
 	while C.nanosleep(req, rem) ~= 0 do
 		local tmp = req
 		req = rem
