@@ -106,14 +106,14 @@ function _M.setsockbuf(rb, wb)
 end
 
 function _M.sec2timespec(sec, ts)
-	ts = ts or ffi.new('struct timespec')
+	ts = ts or ffi.new('struct timespec[1]')
 	local round = math.floor(sec)
 	ts[0].tv_sec = round
 	ts[0].tv_nsec = math.floor((sec - round) * (1000 * 1000 * 1000))
 	return ts
 end
 function _M.sec2timeval(sec, ts)
-	ts = ts or ffi.new('struct timeval')
+	ts = ts or ffi.new('struct timeval[1]')
 	local round = math.floor(sec)
 	ts[0].tv_sec = round
 	ts[0].tv_usec = math.floor((sec - round) * (1000 * 1000))

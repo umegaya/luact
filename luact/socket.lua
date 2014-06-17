@@ -300,6 +300,7 @@ function _M.setsockopt(fd, opts)
 		-- print('fd = ' .. fd, 'set as non block('..C.fcntl(fd, F_GETFL)..')')
 	end
 	if opts.timeout > 0 then
+		assert(false, "i dont set timeout for opts!!!!"..opts.timeout)
 		local timeout = util.sec2timeval(tonumber(opts.timeout))
 		if C.setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, timeout, ffi.sizeof('struct timeval')) < 0 then
 			print(ERROR,SOCKOPT,("setsockopt (sndtimeo) errno=%d"):format(ffi.errno()));
@@ -311,15 +312,15 @@ function _M.setsockopt(fd, opts)
 		end
 	end
 	if opts.wblen.data > 0 then
-		print(("%d, set wblen to %u\n"):format(fd, opts.wblen));
-		if C.setsockopt(fd, SOL_SOCKET, SO_SNDBUF, opts.wblen.p, ffi.sizeof(opts.wblen.data)) < 0 then
+		print(("%d, set wblen to %u\n"):format(fd, tonumber(opts.wblen)));
+		if C.setsockopt(fd, SOL_SOCKET, SO_SNDBUF, opts.wblen.p, ffi.sizeof(opts.wblen.p)) < 0 then
 			print(ERROR,SOCKOPT,"setsockopt (sndbuf) errno=%d", errno);
 			return -4
 		end
 	end
 	if opts.rblen.data > 0 then
-		print(("%d, set rblen to %u\n"):format(fd, opts.wblen));
-		if C.setsockopt(fd, SOL_SOCKET, SO_RCVBUF, opts.rblen.p, ffi.sizeof(opts.rblen.data)) < 0 then
+		print(("%d, set rblen to %u\n"):format(fd, tonumber(opts.wblen.data)));
+		if C.setsockopt(fd, SOL_SOCKET, SO_RCVBUF, opts.rblen.p, ffi.sizeof(opts.rblen.p)) < 0 then
 			print(ERROR,SOCKOPT,"setsockopt (rcvbuf) errno=%d", errno);
 			return -5
 		end
