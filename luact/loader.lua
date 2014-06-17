@@ -158,19 +158,36 @@ function inject_macros(state, symbols)
 		elseif type(src) == "string" then
 			macro_decl = (macro_decl .. "#define "..sym..' ("' .. src .. '")\n')
 		else
-			assert(false, "function type macro not supported:"..state.lcpp_macro_sources[sym])
+			assert(false, sym..": not supported type:"..type(src))
 		end
 	end
 	return macro_decl
 end
 
+function merge_nice_to_have(cdecls_or_macros)
+	if type(cdecls_or_macros.nice_to_have) ~= 'table' then
+		return cdecls_or_macros
+	else
+		local ret = {}
+		for _,elem in ipairs(cdecls_or_macros) do
+			table.insert(ret, elem)
+		end
+		for _,elem in ipairs(cdecls_or_macros.nice_to_have) do
+			table.insert(ret, elem)
+		end
+		return ret
+	end
+end
+
 function _M.unsafe_load(name, cdecls, macros, lib, from)
 	local c = _cache:find(name)
+	tmp_cdecls = merge_nice_to_have(cdecls)
+	tmp_macros = merge_nice_to_have(macros)
 	if not c then
 		_M.ffi_state:parse(from)
-		local _cdecl = parser.inject(_M.ffi_state.tree, cdecls, ffi.imported_csymbols)
+		local _cdecl = parser.inject(_M.ffi_state.tree, tmp_cdecls, ffi.imported_csymbols)
 		--> initialize macro definition
-		local _macro = inject_macros(_M.ffi_state, macros or {})
+		local _macro = inject_macros(_M.ffi_state, tmp_macros or {})
 		--> initialize parsed information
 		c = assert(_cache:add(name, _cdecl, _macro), "fail to cache:"..name)
 	else
@@ -186,6 +203,10 @@ function _M.unsafe_load(name, cdecls, macros, lib, from)
 		clib = ffi.C
 	end
 	for _,decl in ipairs(cdecls) do
+		local s,e = decl:find('%s+')
+		if s then
+			decl = decl:sub(e+1)
+		end
 		local ok, r = pcall(getmetatable(clib).__index, clib, decl)
 		if not ok then
 			ok, r = pcall(ffi.sizeof, decl) 

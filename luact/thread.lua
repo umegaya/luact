@@ -173,6 +173,7 @@ function _M.initialize(opts)
 	_M.init_cdef()
 	threads = memory.alloc_typed("thread_manager_t")
 	threads:init()
+	_M.main = true
 end
 function _M.apply_options(opts)
 	_M.opts = opts
@@ -190,8 +191,9 @@ end
 
 function _M.load(name, cdecls, macros, lib, from)
 	PT.pthread_mutex_lock(threads.load_mtx)
-	loader.load(name, cdecls, macros, lib, from)
+	local ret = {loader.load(name, cdecls, macros, lib, from)}
 	PT.pthread_mutex_unlock(threads.load_mtx)	
+	return unpack(ret)
 end
 
 -- finalize. no need to call from worker

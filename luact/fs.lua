@@ -53,17 +53,22 @@ function _M.dir.create(path, readonly)
 	end
 end
 
+function _M.fileno(io)
+	return C.fileno(io)
+end
+
 ---------------------------------------------------
 -- main module
 ---------------------------------------------------
 function _M.init_cdef() 
 	loader.load('fs.lua', { 
 		"opendir", "readdir", "closedir", "DIR", "luact_dir_t",
-		"stat", "mkdir", "struct stat"
+		"stat", "mkdir", "struct stat", "fileno",
 	}, {}, nil, [[
 		#include <dirent.h>
 		#include <sys/stat.h>
 		#include <unistd.h>
+		#include <stdio.h>
 		typedef struct luact_dir {
 			DIR *dir;
 		} luact_dir_t;

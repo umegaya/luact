@@ -2,27 +2,40 @@ local ffi = require 'ffiex'
 local poller = require 'luact.poller'
 local util = require 'luact.util'
 local memory = require 'luact.memory'
-local C = ffi.C
+local errno = require 'luact.errno'
+local socket = require 'luact.socket'
 
+local C = ffi.C
 local _M = {}
 
+local HANDLER_TYPE_TCP, HANDLER_TYPE_TCP_LISTENER
+
 --> cdef
-local EAGAIN = ffi.defs.EAGAIN
-local EWOULDBLOCK = ffi.defs.EWOULDBLOCK
-local ENOTCONN = ffi.defs.ENOTCONN
+local EAGAIN = errno.EAGAIN
+local EWOULDBLOCK = errno.EWOULDBLOCK
+local ENOTCONN = errno.ENOTCONN
+local EINPROGRESS = errno.EINPROGRESS
+
 ffi.cdef [[
 typedef struct luact_tcp_context {
-	struct sockaddr_in addr;
-	socklen_t alen[1];
+	luact_addrinfo_t addrinfo;
 } luact_tcp_context_t;
 ]]
 
 
+--> helper function
 function tcp_connect(io)
-	local ctx = io:ctx('luact_tcp_context_t')
-	local n = C.connect(io:fd(), ctx.addr, ctx.alen[0])
+	local ctx = io:ctx('luact_tcp_context_t*')
+	local n = C.connect(io:fd(), ctx.addrinfo.addrp, ctx.addrinfo.alen[0])
 	if n < 0 then
-		error(('tcp connect fails(%d) on %d'):format(ffi.errno(), io:fd()))
+		local eno = errno.errno()
+		if eno == EINPROGRESS then
+			-- print('EINPROGRESS:to:', socket.inet_namebyhost(ctx.addrinfo.addrp))
+			io:wait_write()
+			return
+		else
+			error(('tcp connect fails(%d) on %d'):format(eno, io:nfd()))
+		end
 	end
 end
 
@@ -34,9 +47,9 @@ end
 --> handlers
 function tcp_read(io, ptr, len)
 ::retry::
-	local n = C.read(io:fd(), ptr, len)
+	local n = C.recv(io:fd(), ptr, len, 0)
 	if n < 0 then
-		local eno = ffi.errno()
+		local eno = errno.errno()
 		if eno == EAGAIN or eno == EWOULDBLOCK then
 			io:wait_read()
 			goto retry
@@ -44,7 +57,7 @@ function tcp_read(io, ptr, len)
 			tcp_connect(io)
 			goto retry
 		else
-			error(('tcp read fails(%d) on %d'):format(eno, io:fd()))
+			error(('tcp read fails(%d) on %d'):format(eno, io:nfd()))
 		end
 	end
 	return n
@@ -52,9 +65,10 @@ end
 
 function tcp_write(io, ptr, len)
 ::retry::
-	local n = C.write(io:fd(), ptr, len)
+	local n = C.send(io:fd(), ptr, len, 0)
 	if n < 0 then
-		local eno = ffi.errno()
+		local eno = errno.errno()
+		-- print(io:fd(), 'write fails', n, eno)
 		if eno == EAGAIN or eno == EWOULDBLOCK then
 			io:wait_write()
 			goto retry
@@ -62,76 +76,79 @@ function tcp_write(io, ptr, len)
 			tcp_connect(io)
 			goto retry
 		else
-			error(('tcp write fails(%d) on %d'):format(eno, io:fd()))
+			error(('tcp write fails(%d) on %d'):format(eno, io:nfd()))
 		end
 	end
 	return n
 end
 
+local ctx
 function tcp_accept(io)
 ::retry::
-	local n = C.accept(io:fd(), ctx.addr, ctx.alen)
+	-- print('tcp_accept:', io:fd())
+	if not ctx then
+		ctx = memory.alloc_typed('luact_tcp_context_t')
+	end
+	local n = C.accept(io:fd(), ctx.addrinfo.addrp, ctx.addrinfo.alen)
 	if n < 0 then
-		local eno = ffi.errno()
+		local eno = errno.errno()
 		if eno == EAGAIN or eno == EWOULDBLOCK then
 			io:wait_read()
 			goto retry
 		else
-			error(('tcp write fails(%d) on %d'):format(eno, io:fd()))
+			error(('tcp accept fails(%d) on %d'):format(eno, io:nfd()))
+		end
+	else
+		-- apply same setting as server 
+		if socket.setsockopt(n, io:ctx('luact_sockopt_t*')) < 0 then
+			C.close(n)
+			goto retry
 		end
 	end
-	return tcp_server_socket(n, ctx)
+	local tmp = ctx
+	ctx = nil
+	return tcp_server_socket(n, tmp)
 end
 
 function tcp_gc(io)
+	memory.free(io:ctx('void*'))
 	C.close(io:fd())
 end
 
 
-local HANDLER_TYPE_TCP = 1
-local HANDLER_TYPE_TCP_LISTENER = 2
-poller.add_hundler(HANDLER_TYPE_TCP, tcp_read, tcp_write, tcp_gc)
-poller.add_hundler(HANDLER_TYPE_TCP_LISTENER, tcp_accept, nil, tcp_gc)
+HANDLER_TYPE_TCP = poller.add_handler(tcp_read, tcp_write, tcp_gc)
+HANDLER_TYPE_TCP_LISTENER = poller.add_handler(tcp_accept, nil, tcp_gc)
 
 --> TODO : configurable
 function _M.configure(opts)
 	_M.opts = opts
 end
 
-function _M.connect(addr)
-	local fd = C.socket(AF_INET, SOCK_STREAM, 0)
+function _M.connect(addr, opts)
 	local ctx = memory.alloc_typed('luact_tcp_context_t')
-	ctx.alen[0] = util.inet_hostbyname(addr, ctx.addr, ffi.sizeof(ctx.addr))
+	local fd = socket.create_stream(addr, opts, ctx.addrinfo)
+	if not fd then error('fail to create socket:'..errno.errno()) end
 	return poller.newio(fd, HANDLER_TYPE_TCP, ctx)
 end
 
-
-local TCP_LISTEN_BACKLOG = (512)
---[[ 
-	if os somaxconn is less than TCP_LISTEN_BACKLOG, increase value by
-	linux:	sudo /sbin/sysctl -w net.core.somaxconn=NBR_TCP_LISTEN_BACKLOG
-			(and sudo /sbin/sysctl -w net.core.netdev_max_backlog=3000)
-	osx:	sudo sysctl -w kern.ipc.somaxconn=NBR_TCP_LISTEN_BACKLOG
-	(from http://docs.codehaus.org/display/JETTY/HighLoadServers)
-]]
-if ffi.os == "Linux" then
-io.popen(('sudo /sbin/sysctl -w net.core.somaxconn=%d'):format(TCP_LISTEN_BACKLOG))
-elseif ffi.os == "OSX" then
-io.popen(('sudo /sbin/sysctl -w kern.ipc.somaxconn=%d'):format(TCP_LISTEN_BACKLOG))
-end
-function _M.listen(addr)
-	local fd = C.socket(AF_INET, SOCK_STREAM, 0)
-	local reuse = ffi.new('int[1]', 1)
-	if C.setsockopt(fd, ffi.defs.SOL_SOCKET, ffi.defs.SO_REUSEADDR, reuse, ffi.sizeof(reuse)) < 0 then
-		error('fail to listen:setsockopt:'..ffi.errno())
+function _M.listen(addr, opts)
+	local ai = memory.managed_alloc_typed('luact_addrinfo_t')
+	local fd = socket.create_stream(addr, opts, ai)
+	if not fd then error('fail to create socket:'..errno.errno()) end
+	if socket.set_reuse_addr(fd, true) then
+		C.close(fd)
+		error('fail to listen:set_reuse_addr:'..errno.errno())
 	end
-	local sa = memory.managed_alloc_typed('struct sockaddr_in[1]')
-	local alen = util.inet_hostbyname(addr, sa, ffi.sizeof(sa))
-	if C.bind(fd, sa, alen) < 0 then
-		error('fail to listen:bind:'..ffi.errno())
+	if C.bind(fd, ai.addrp, ai.alen[0]) < 0 then
+		C.close(fd)
+		error('fail to listen:bind:'..errno.errno())
 	end
-	C.listen(fd, TCP_LISTEN_BACKLOG)
-	return poller.newio(HANDLER_TYPE_TCP_LISTENER, fd)
+	if C.listen(fd, poller.maxconn) < 0 then
+		C.close(fd)
+		error('fail to listen:listen:'..errno.errno())
+	end
+	print('listen:', fd, addr)
+	return poller.newio(fd, HANDLER_TYPE_TCP_LISTENER, opts)
 end
 
 return _M

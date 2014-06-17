@@ -48,10 +48,10 @@ end
 
 --> ffi related utils
 local C = ffi.C
+local RLIMIT_NOFILE, RLIMIT_CORE
 function _M.init_cdef()
-	loader.load('util.lua', {
-		"getrlimit", 
-		"setrlimit",
+	local ffi_state = loader.load('util.lua', {
+		"getrlimit", "setrlimit", "struct timespec", "struct timeval",
 	}, {
 		"RLIMIT_NOFILE",
 		"RLIMIT_CORE",
@@ -59,35 +59,65 @@ function _M.init_cdef()
 		#include <sys/time.h> 
 		#include <sys/resource.h>
 	]])
+
+	RLIMIT_CORE = ffi_state.defs.RLIMIT_CORE
+	RLIMIT_NOFILE = ffi_state.defs.RLIMIT_NOFILE
 end
 
 function _M.maxfd(set_to)
 	if set_to then
 		--> set max_fd to *set_to*
-		C.setrlimit(ffi.defs.RLIMIT_NOFILE, ffi.new('struct rlimit', {set_to, set_to}))
+		C.setrlimit(RLIMIT_NOFILE, ffi.new('struct rlimit', {set_to, set_to}))
 		return set_to
 	else
 		--> returns current max_fd
-		return C.getrlimit(ffi.defs.RLIMIT_NOFILE)
+		return C.getrlimit(RLIMIT_NOFILE)
 	end
 end
 
+function _M.maxconn(set_to)
+--[[ 
+	if os somaxconn is less than TCP_LISTEN_BACKLOG, increase value by
+	linux:	sudo /sbin/sysctl -w net.core.somaxconn=NBR_TCP_LISTEN_BACKLOG
+			(and sudo /sbin/sysctl -w net.core.netdev_max_backlog=3000)
+	osx:	sudo sysctl -w kern.ipc.somaxconn=NBR_TCP_LISTEN_BACKLOG
+	(from http://docs.codehaus.org/display/JETTY/HighLoadServers)
+]]
+	if ffi.os == "Linux" then
+	io.popen(('sudo /sbin/sysctl -w net.core.somaxconn=%d'):format(set_to))
+	elseif ffi.os == "OSX" then
+	io.popen(('sudo sysctl -w kern.ipc.somaxconn=%d'):format(set_to))
+	end
+	return set_to
+end
+
+function _M.setsockbuf(rb, wb)
+	--[[ TODO: change rbuf/wbuf max /*
+	* 	you may change your system setting for large wb, rb. 
+	*	eg)
+	*	macosx: sysctl -w kern.ipc.maxsockbuf=8000000 & 
+	*			sysctl -w net.inet.tcp.sendspace=4000000 sysctl -w net.inet.tcp.recvspace=4000000 
+	*	linux:	/proc/sys/net/core/rmem_max       - maximum receive window
+    *			/proc/sys/net/core/wmem_max       - maximum send window
+    *			(but for linux, below page will not recommend manual tuning because default it set to 4MB)
+	*	see http://www.psc.edu/index.php/networking/641-tcp-tune for detail
+	*/]]
+	return rb, wb
+end
+
 function _M.sec2timespec(sec, ts)
+	ts = ts or ffi.new('struct timespec')
 	local round = math.floor(sec)
 	ts[0].tv_sec = round
 	ts[0].tv_nsec = math.floor((sec - round) * (1000 * 1000 * 1000))
+	return ts
 end
-
-local AF_INET = ffi.defs.AF_INET
-function _M.inet_hostbyname(addr, addrp, len)
-	local s,e,host,port = addr:find('([%w%.%_]+):([0-9]+)')
-	if not s then error('invalid address format:'..addr) end
-	local sa = ffi.cast('struct sockaddr_in*', addrp)
-	local hp = C.gethostbyname(host)
-	sa.sin_family = AF_INET
-	sa.sin_addr.s_addr = C.htonl(hp.h_addr_list[0])
-	sa.sin_port = C.htons(port)
-	return ffi.sizeof('struct sockaddr_in')
+function _M.sec2timeval(sec, ts)
+	ts = ts or ffi.new('struct timeval')
+	local round = math.floor(sec)
+	ts[0].tv_sec = round
+	ts[0].tv_usec = math.floor((sec - round) * (1000 * 1000))
+	return ts
 end
 
 return _M

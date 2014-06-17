@@ -3,10 +3,15 @@ local ffi = require 'ffiex'
 local thread = require 'luact.thread'
 local memory = require 'luact.memory'
 local util = require 'luact.util'
+local fs = require 'luact.fs'
 
 local _M = {}
-local poller_cdecl, poller_index, event_index = nil, {}, {}
+local C = ffi.C
+local poller_cdecl, poller_index, io_index = nil, {}, {}
+local iolist = ffi.NULL
 local handlers = {}
+
+-- ffi.__DEBUG_CDEF__ = true
 
 
 ---------------------------------------------------
@@ -15,16 +20,14 @@ local handlers = {}
 ---------------------------------------------------
 ---------------------------------------------------
 local read_handlers, write_handlers, gc_handlers= {}, {}, {}
-local handler_type_cdata = {}
 
---> ctype metatable
-function _M.add_handler(type, reader, writer, gc)
-	assert(not handler_type_cdata[type], "handler already registered:"..tostring(type))
-	handler_type_cdata[type] = ffi.new('int', type)
-	read_handlers[type] = reader
-	write_handlers[type] = writer
-	gc_handlers[type] = gc
+function _M.add_handler(reader, writer, gc)
+	table.insert(read_handlers, reader)
+	table.insert(write_handlers, writer)
+	table.insert(gc_handlers, gc)
+	return #read_handlers
 end
+
 
 ---------------------------------------------------
 ---------------------------------------------------
@@ -36,8 +39,8 @@ function init_library(opts)
 	-- system which depends on kqueue for polling
 	---------------------------------------------------
 	if ffi.os == "OSX" then
-	local ffi_state,clib = thread.import("poller.lua", {
-		"kqueue", "kevent", "socklen_t", "sockaddr_in", 
+	local ffi_state,clib = thread.load("poller.lua", {
+		"kqueue", "func kevent", "struct kevent", "socklen_t", "sockaddr_in", 
 	}, {
 		"EV_ADD", "EV_ENABLE", "EV_DISABLE", "EV_DELETE", "EV_RECEIPT", "EV_ONESHOT",
 		"EV_CLEAR", "EV_EOF", "EV_ERROR",
@@ -80,11 +83,13 @@ function init_library(opts)
 		return ([[
 			typedef int luact_fd_t;
 			typedef struct kevent luact_event_t;
-			typedef luact_event_t luact_io_t;
+			typedef struct luact_io {
+				luact_event_t ev;
+				unsigned char kind, padd[3];
+			} luact_io_t;
 			typedef struct poller {
 				bool alive;
 				luact_fd_t kqfd;
-				luact_io_t iolist[%d]:
 				luact_event_t changes[%d];
 				int nchanges;
 				luact_event_t events[%d];
@@ -96,7 +101,7 @@ function init_library(opts)
 	end
 
 	local EVFILT_READ = ffi_state.defs.EVFILT_READ
-	local EVFILE_WRITE = ffi_state.defs.EVFILT_WRITE
+	local EVFILT_WRITE = ffi_state.defs.EVFILT_WRITE
 
 	local EV_ADD = ffi_state.defs.EV_ADD
 	local EV_ONESHOT = ffi_state.defs.EV_ONESHOT
@@ -114,117 +119,143 @@ function init_library(opts)
 		};
 	]]
 	--> luact_event_t
-	function event_index.init(t, fd, type, ctx)
-		t.flags = bit.band(EV_ADD, EV_ONESHOT)
-		t.ident = fd
-		local ctxp = assert(memory.alloc_typed('luact_context_t'), "malloc fails")
-		ctxp.type = type
-		ctxp.ctx = ctx or ffi.NULL
-		t.udata = ffi.cast('void *', ctxp)
+	function io_index.init(t, fd, type, ctx)
+		t.ev.filter = EVFILT_READ
+		t.ev.flags = bit.bor(EV_ADD, EV_ONESHOT)
+		assert(bit.band(t.ev.flags, EV_DELETE) or t.ev.ident == 0, 
+			"already used event buffer:"..tonumber(t.ev.ident))
+		t.ev.ident = fd
+		t.ev.udata = ctx and ffi.cast('void *', ctx) or ffi.NULL
+		t.kind = type
 	end
-	function event_index.read(t, ptr, len)
+	function io_index.fin(t)
+		t.ev.flags = EV_DELETE
+		gc_handlers[t:type()](t)
+	end
+	function io_index.read(t, ptr, len)
 		return read_handlers[t:type()](t, ptr, len)
 	end
-	function event_index.wait_read(t)
-		t.filter = EVFILT_READ
-		ffi.copy(t, coroutine.yield(t))
+	function io_index.wait_read(t)
+		t.ev.filter = EVFILT_READ
+		-- print('wait_read', t.ev.ident)
+		local r = coroutine.yield(t)
+		-- print('wait_read returns', t.ev.ident)
+		t.ev.fflags = r.fflags
+		t.ev.data = r.data
 	end
-	function event_index.write(t, ptr, len)
+	function io_index.write(t, ptr, len)
 		return write_handlers[t:type()](t, ptr, len)
 	end
-	function event_index.wait_write(t)
-		t.filter = EVFILT_WRITE
-		ffi.copy(t, coroutine.yield(t))
+	function io_index.wait_write(t)
+		t.ev.filter = EVFILT_WRITE
+		-- print('wait_write', t.ev.ident)
+		local r = coroutine.yield(t)
+		-- print('wait_write returns', t.ev.ident)
+		t.ev.fflags = r.fflags
+		t.ev.data = r.data
 	end
-	function event_index.add_to(t, poller)
-		assert(bit.band(t.flags, EV_ADD), "invalid event flag")
-		local n = C.kqueue(poller.kqfd, t, 1, nil, 0, nil)
+	function io_index.add_to(t, poller)
+		assert(bit.band(t.ev.flags, EV_ADD) ~= 0, "invalid event flag")
+		local n = C.kevent(poller.kqfd, t.ev, 1, nil, 0, poller.timeout)
+		-- print(poller.kqfd, n, t.ev.ident, t.ev.filter)
 		if n ~= 0 then
-			print('kqueue event change error:'..ffi.errno())
+			print('kqueue event add error:'..ffi.errno().."\n"..debug.traceback())
 			return false
 		end
 		return true
 	end
-	function event_index.remove_from(t, poller)
-		assert(bit.band(t.flags, EV_DELETE), "invalid event flag")
-		local n = C.kqueue(poller.kqfd, t, 1, nil, 0, nil)
+	function io_index.remove_from(t, poller)
+		t.ev.flags = EV_DELETE
+		local n = C.kevent(poller.kqfd, t.ev, 1, nil, 0, poller.timeout)
+		-- print(poller.kqfd, n, t.ident)
 		if n ~= 0 then
-			print('kqueue event change error:'..ffi.errno())
+			print('kqueue event remove error:'..ffi.errno().."\n"..debug.traceback())
 			return false
 		end
 		gc_handlers[t:type()](t)
-		if t.udata ~= ffi.NULL then
-			memory.free(t.udata)
-		end
 	end
-	function event_index.fd(t)
-		return t.ident
+	function io_index.fd(t)
+		return t.ev.ident
 	end
-	function event_index.type(t)
-		return tonumber(ffi.cast('luact_context_t*', t.udata).type)
+	function io_index.nfd(t)
+		return tonumber(t.ev.ident)
 	end
-	function event_index.ctx(t, type)
-		return ffi.cast(type, ffi.cast('luact_context_t*', t.udata).ctx)
+	function io_index.type(t)
+		return tonumber(t.kind)
 	end
-	function event_index.by(t, poller, cb)
+	function io_index.ctx(t, ct)
+		return t.ev.udata ~= ffi.NULL and ffi.cast(ct, t.ev.udata) or nil
+	end
+	function io_index.by(t, poller, cb)
 		return poller:add(t, cb)
 	end
 
 
 	--> luact_poller_t
-	function poller_index.init(t)
-		t.kqfd = assert(C.kqueue() < 0, "kqueue create fails")
+	local function run(t, co, ev, io)
+		local ok, rev = pcall(co, ev)
+		if ok then
+			if rev then
+				if rev:add_to(t) then
+					return
+				end
+			end
+		else
+			print('abort by error:', rev)
+		end
+		io:fin()
+	end
+
+	function poller_index.init(t, maxfd)
+		t.kqfd = C.kqueue()
+		assert(t.kqfd >= 0, "kqueue create fails:"..ffi.errno())
+		print('kqfd:', tonumber(t.kqfd))
+		t.maxfd = maxfd
+		t.nevents = maxfd
+		t.nchanges = maxfd
 		t.alive = true
 		t:set_timeout(0.05) --> default 50ms
 	end
 	function poller_index.fin(t)
 		C.close(t.poller_fd)
 	end
-	function poller_index.add(t, ev, co)
-		if not ev:add_to(t) then return false end
-		handlers[tonumber(ev.ident)] = (
-			(type(co) == "function") and coroutine.wrap(co) or co
-		)
-		local p = t.iolist + ev:fd()	
-		ffi.copy(p, ev, ffi.sizeof(ev))
-		co(p)
+	function poller_index.add(t, io, co)
+		co = ((type(co) == "function") and coroutine.wrap(co) or co)
+		handlers[tonumber(io:fd())] = co
+		run(t, co, io, io)
 		return true
 	end
-	function poller_index.remove(t, ev)
-		if not ev:remove_from(t) then return false end
-		local fd = ev:nfd()
-		handlers[fd] = nil
-		ffi.fill(t.iolist + fd, ffi.sizeof(ev)) --> bzero
+	function poller_index.remove(t, io)
+		if not io:remove_from(t) then return false end
+		handlers[tonumber(io:fd())] = nil
 		return true
 	end
 	function poller_index.set_timeout(t, sec)
 		util.sec2timespec(sec, t.timeout)
 	end
 	function poller_index.wait(t)
-		local n = C.kqueue(t.kqfd, nil, 0, t.events, t.nevents, t.timeout)
+		local n = C.kevent(t.kqfd, nil, 0, t.events, t.nevents, t.timeout)
 		if n < 0 then
 			print('kqueue error:'..ffi.errno())
 			return
 		end
+		--if n > 0 then
+		--	print('n = ', n)
+		--end
 		for i=0,n-1,1 do
 			local ev = t.events + i
 			local fd = tonumber(ev.ident)
 			local co = assert(handlers[fd], "handler should exist for fd:"..tostring(fd))
-			local rev = co(ev)
-			if rev then
-				rev:add_to(t)
-			else
-				t:remove(ev)
-			end
+			run(t, co, ev, iolist + fd)
 		end
+	end
+	function poller_index.newio(t, fd, type, ctx)
+		return newio(t, fd, type, ctx)
 	end
 	function poller_index.start(t)
-		while t:alive() do
+		while t.alive do
 			t:wait()
 		end
-	end
-	function poller_index.alive(t)
-		return t.alive
 	end
 	function poller_index.stop(t)
 		t.alive = false
@@ -264,25 +295,40 @@ end
 function _M.initialize(opts)
 	-- system dependent initialization
 	init_library(opts)
-	
-	-- system dependent initialization
+
+	--> change system limits	
 	_M.maxfd = util.maxfd(opts.maxfd or 1024)
+	_M.maxconn = util.maxconn(opts.maxconn or 512)
+	_M.rmax, _M.wmax = util.setsockbuf(opts.rmax, opts.wmax)
+
+	--> generate run time cdef
 	ffi.cdef(poller_cdecl(_M.maxfd))
 	ffi.metatype('luact_poller_t', { __index = poller_index })
-	ffi.metatype('luact_event_t', { __index = event_index })
-	ffi.metatype('luact_io_t', { __index = event_index })
+	ffi.metatype('luact_io_t', { __index = io_index })
+
+	--> TODO : share it between threads (but thinking of cache coherence, may better seperated)
+	iolist = opts.iolist or memory.alloc_fill_typed('luact_io_t', _M.maxfd)
 	return true
+end
+
+function _M.finalize()
+	if iolist ~= ffi.NULL then
+		memory.free(iolist)
+	end
 end
 
 function _M.new()
 	local p = memory.alloc_typed('luact_poller_t')
-	p.maxfd = _M.maxfd
-	p:init()
+	p:init(_M.maxfd)
 	return p
 end
 
 function _M.newio(fd, type, ctx)
-	local io = memory.alloc_typed('luact_io_t')
+	--for i=0,_M.maxfd-1,1  do
+	--	assert(iolist[i].ev.ident == 0ULL, 
+	--		"not filled by zero at: "..i.."("..tostring(iolist[i])..")="..tostring(iolist[i].ev.ident))
+	--end
+	local io = iolist[fd]
 	io:init(fd, type, ctx)
 	return io
 end

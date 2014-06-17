@@ -23,6 +23,22 @@ ffi.cdef [[
 	char *strncpy(char *, const char *, size_t);
 ]]
 
+function _M.alloc_fill(sz, fill)
+	local p = ffi.gc(C.malloc(sz), nil)
+	if p ~= ffi.NULL then
+		ffi.fill(p, sz, fill)
+		return p
+	end
+	return nil
+end
+
+function _M.alloc_fill_typed(ct, sz, fill)
+	local malloc_info = malloc_info_list[ct]
+	local p = _M.alloc_fill((sz or 1) * malloc_info.sz, fill)
+	if not p then return p end
+	return ffi.cast(malloc_info.t, p)
+end
+
 function _M.alloc(sz)
 	local p = ffi.gc(C.malloc(sz), nil)
 	return p ~= ffi.NULL and p or nil
