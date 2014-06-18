@@ -29,11 +29,8 @@ function _M.init_cdef(cache)
 		"pthread_mutex_init", "pthread_mutex_destroy",
 		"pthread_create", "pthread_join", "pthread_self",
 		"pthread_equal", 
-		--> from time
-		"nanosleep",
 	}, {}, "pthread", [[
 		#include <pthread.h>
-		#include <time.h>
 	]])
 
 	local ffi_state = loader.load("lua.lua", {
@@ -155,10 +152,6 @@ function _M.init_cdef(cache)
 			end,
 		}
 	})
-
-	--> preserve parser result for faster startup of second thread
-	_M.c_parsed_info = c_parsed_info
-	_M.req,_M.rem = ffi.new('struct timespec[1]'), ffi.new('struct timespec[1]')
 end
 
 
@@ -281,14 +274,7 @@ end
 
 -- nanosleep
 function _M.sleep(sec)
-	-- convert to nsec
-	local req, rem = _M.req, _M.rem
-	util.sec2timespec(sec, _M.req)
-	while C.nanosleep(req, rem) ~= 0 do
-		local tmp = req
-		req = rem
-		rem = tmp
-	end
+	util.sleep(sec)
 end
 
 return _M

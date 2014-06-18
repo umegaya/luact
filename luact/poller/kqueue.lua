@@ -9,7 +9,6 @@ local iolist = ffi.NULL
 local handlers
 local read_handlers, write_handlers, gc_handlers, error_handlers
 
-local log
 ---------------------------------------------------
 -- import necessary cdefs
 ---------------------------------------------------
@@ -97,9 +96,9 @@ function io_index.read(t, ptr, len)
 end
 function io_index.wait_read(t)
 	t.ev.filter = EVFILT_READ
-	if log then print('wait_read', t.ev.ident) end
+	-- if log then print('wait_read', t:fd()) end
 	local r = coroutine.yield(t)
-	if log then print('wait_read returns', t.ev.ident) end
+	-- if log then print('wait_read returns', t:fd()) end
 	t.ev.fflags = r.fflags
 	t.ev.data = r.data
 end
@@ -108,12 +107,11 @@ function io_index.write(t, ptr, len)
 end
 function io_index.wait_write(t)
 	t.ev.filter = EVFILT_WRITE
-	if log then print('wait_write', t.ev.ident) end
+	-- if log then print('wait_write', t:fd()) end
 	local r = coroutine.yield(t)
-	if log then print('wait_write returns', t.ev.ident, r) end
+	-- if log then print('wait_write returns', t:fd()) end
 	t.ev.fflags = r.fflags
 	t.ev.data = r.data
-	if log then print('wait_write end', t.ev.ident, r, debug.traceback()) end
 end
 function io_index.add_to(t, poller)
 	assert(bit.band(t.ev.flags, EV_ADD) ~= 0, "invalid event flag")
@@ -180,7 +178,7 @@ function poller_index.init(t, maxfd)
 	t:set_timeout(0.05) --> default 50ms
 end
 function poller_index.fin(t)
-	C.close(t.poller_fd)
+	C.close(t.kqfd)
 end
 function poller_index.add(t, io, co)
 	co = ((type(co) == "function") and coroutine.wrap(co) or co)

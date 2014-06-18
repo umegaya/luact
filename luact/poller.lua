@@ -58,11 +58,17 @@ function _M.finalize()
 	if iolist ~= ffi.NULL then
 		memory.free(iolist)
 	end
+	for _,p in ipairs(_M.pollerlist) do
+		p:fin()
+		memory.free(p)
+	end
 end
 
+_M.pollerlist = {}
 function _M.new()
 	local p = memory.alloc_typed('luact_poller_t')
 	p:init(_M.maxfd)
+	table.insert(_M.pollerlist, p)
 	return p
 end
 

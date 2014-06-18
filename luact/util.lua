@@ -51,7 +51,7 @@ local C = ffi.C
 local RLIMIT_NOFILE, RLIMIT_CORE
 function _M.init_cdef()
 	local ffi_state = loader.load('util.lua', {
-		"getrlimit", "setrlimit", "struct timespec", "struct timeval",
+		"getrlimit", "setrlimit", "struct timespec", "struct timeval", "nanosleep",
 	}, {
 		"RLIMIT_NOFILE",
 		"RLIMIT_CORE",
@@ -62,6 +62,8 @@ function _M.init_cdef()
 
 	RLIMIT_CORE = ffi_state.defs.RLIMIT_CORE
 	RLIMIT_NOFILE = ffi_state.defs.RLIMIT_NOFILE
+
+	_M.req,_M.rem = ffi.new('struct timespec[1]'), ffi.new('struct timespec[1]')
 end
 
 function _M.maxfd(set_to)
@@ -118,6 +120,17 @@ function _M.sec2timeval(sec, ts)
 	ts[0].tv_sec = round
 	ts[0].tv_usec = math.floor((sec - round) * (1000 * 1000))
 	return ts
+end
+-- nanosleep
+function _M.sleep(sec)
+	-- convert to nsec
+	local req, rem = _M.req, _M.rem
+	_M.sec2timespec(sec, _M.req)
+	while C.nanosleep(req, rem) ~= 0 do
+		local tmp = req
+		req = rem
+		rem = tmp
+	end
 end
 
 return _M
