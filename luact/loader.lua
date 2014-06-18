@@ -178,6 +178,24 @@ function merge_nice_to_have(cdecls_or_macros)
 		return ret
 	end
 end
+function merge_regex(tree, macros)
+	if type(macros.regex) ~= 'table' then
+		return macros
+	else
+		local ret = {}
+		for _,elem in ipairs(macros) do
+			table.insert(ret, elem)
+		end
+		for _,pattern in ipairs(macros.regex) do
+			for k,v in pairs(_M.ffi_state.lcpp_defs) do
+				if k:find(pattern) and type(v) ~= 'function' then
+					table.insert(ret, k)
+				end
+			end
+		end
+		return ret
+	end
+end
 
 function _M.unsafe_load(name, cdecls, macros, lib, from)
 	local c = _cache:find(name)
@@ -187,7 +205,8 @@ function _M.unsafe_load(name, cdecls, macros, lib, from)
 		_M.ffi_state:parse(from)
 		local _cdecl = parser.inject(_M.ffi_state.tree, tmp_cdecls, ffi.imported_csymbols)
 		--> initialize macro definition
-		local _macro = inject_macros(_M.ffi_state, tmp_macros or {})
+		tmp_macros = merge_regex(_M.ffi_state.tree, tmp_macros)
+		local _macro = inject_macros(_M.ffi_state, tmp_macros)
 		--> initialize parsed information
 		c = assert(_cache:add(name, _cdecl, _macro), "fail to cache:"..name)
 	else
@@ -239,12 +258,13 @@ loader fails by error:
 
 %s
 
-it may caused by outdated cdef cache. 
-so luact will remove cache dir. 
-try restart to recreate cdef cache.
+%s
 ###########################
 
 ]]
+local caution = [[it may caused by outdated cdef cache. 
+so luact will remove cache dir. 
+try restart to recreate cdef cache.]]
 function _M.load(name, cdecls, macros, lib, from)
 	local i = 0
 	local ret = {pcall(_M.unsafe_load, name, cdecls, macros, lib, from)}
@@ -252,8 +272,10 @@ function _M.load(name, cdecls, macros, lib, from)
 		local err = table.remove(ret, 1)
 		if _M.cache_dir then
 			local util = require 'luact.util'
-			print(msg:format(err .. "\n" .. debug.traceback()))
+			print(msg:format(err .. "\n" .. debug.traceback(), caution))
 			util.rmdir(_M.cache_dir)
+		else
+			print(msg:format(err .. "\n" .. debug.traceback(), ""))
 		end
 		os.exit(-1)
 	end

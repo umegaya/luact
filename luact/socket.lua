@@ -1,4 +1,5 @@
 local loader = require 'luact.loader'
+local ffi = require 'ffiex'
 local memory = require 'luact.memory'
 local util = require 'luact.util'
 
@@ -333,9 +334,7 @@ function _M.set_reuse_addr(fd, reuse)
 	if C.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reuse, ffi.sizeof(reuse)) < 0 then
 		error('fail to setsockopt:reuseaddr:'..ffi.errno())
 	end
-	print('reuse addr:', SO_REUSEPORT, _M.port_reusable())
 	if _M.port_reusable() then
-		print('add reuse port')
 		if C.setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, reuse, ffi.sizeof(reuse)) < 0 then
 			error('fail to setsockopt:reuseport:'..ffi.errno())
 		end

@@ -5,6 +5,7 @@ local NCLIENTS = 1000
 local NITER = 100
 local opts = {
 	maxfd = (2 * NCLIENTS) + 100, -- client / server socket for NCLIENTS + misc
+	maxconn = NCLIENTS, 
 	cdef_cache_dir = './tmp/cdefs'
 }
 thread.initialize(opts)
@@ -37,9 +38,7 @@ tcp.listen('0.0.0.0:8888'):by(p, function (s)
 	end
 end)
 
-print('connect client')
-
-local client_msg = "hello, poller"
+local client_msg = ("hello,luact poll"):rep(16)
 for i=0,NCLIENTS-1,1 do
 	tcp.connect('127.0.0.1:8888'):by(p, function (s)
 		local ptr,len = ffi.new('char[256]')
@@ -67,8 +66,6 @@ end
 print('start', p)
 
 p:start()
-print('start2')
 assert(limit <= finish and limit <= cfinish, "not all client/server finished but poller terminated")
-print('start3')
 poller.finalize()
 print('success')

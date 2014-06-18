@@ -4,21 +4,23 @@ local thread = require 'luact.thread'
 local memory = require 'luact.memory'
 local util = require 'luact.util'
 local fs = require 'luact.fs'
+local signal = require 'luact.signal'
 -- ffi.__DEBUG_CDEF__ = true
 
 local _M = {}
 local iolist = ffi.NULL
 local handlers = {}
-local read_handlers, write_handlers, gc_handlers = {}, {}, {}
+local read_handlers, write_handlers, gc_handlers, error_handlers = {}, {}, {}, {}
 
 
 ---------------------------------------------------
 -- module body
 ---------------------------------------------------
-function _M.add_handler(reader, writer, gc)
+function _M.add_handler(reader, writer, gc, err)
 	table.insert(read_handlers, reader)
 	table.insert(write_handlers, writer)
 	table.insert(gc_handlers, gc)
+	table.insert(error_handlers, err)
 	return #read_handlers
 end
 
@@ -27,6 +29,9 @@ function _M.initialize(opts)
 	_M.maxfd = util.maxfd(opts.maxfd or 1024)
 	_M.maxconn = util.maxconn(opts.maxconn or 512)
 	_M.rmax, _M.wmax = util.setsockbuf(opts.rmax, opts.wmax)
+
+	--> tweak signal handler
+	signal.ignore("SIGPIPE")
 
 	-- system dependent initialization (it should define luact_poller_t, luact_io_t)
 	local poller = opts.poller or (
@@ -40,7 +45,10 @@ function _M.initialize(opts)
 		opts = opts,
 		poller = _M, 
 		handlers = handlers,
-		read_handlers = read_handlers, write_handlers = write_handlers, gc_handlers = gc_handlers
+		read_handlers = read_handlers, 
+		write_handlers = write_handlers, 
+		gc_handlers = gc_handlers, 
+		error_handlers = error_handlers,
 	})
 
 	return true
@@ -59,10 +67,6 @@ function _M.new()
 end
 
 function _M.newio(fd, type, ctx)
-	--for i=0,_M.maxfd-1,1  do
-	--	assert(iolist[i].ev.ident == 0ULL, 
-	--		"not filled by zero at: "..i.."("..tostring(iolist[i])..")="..tostring(iolist[i].ev.ident))
-	--end
 	local io = iolist[fd]
 	io:init(fd, type, ctx)
 	return io

@@ -1,5 +1,6 @@
 local ffi = require 'ffiex'
 local poller = require 'luact.poller'
+local thread = require 'luact.thread'
 local util = require 'luact.util'
 local memory = require 'luact.memory'
 local errno = require 'luact.errno'
@@ -12,9 +13,13 @@ local HANDLER_TYPE_TCP, HANDLER_TYPE_TCP_LISTENER
 
 --> cdef
 local EAGAIN = errno.EAGAIN
+local EPIPE = errno.EPIPE
 local EWOULDBLOCK = errno.EWOULDBLOCK
 local ENOTCONN = errno.ENOTCONN
+local ECONNREFUSED = errno.ECONNREFUSED
+local ECONNRESET = errno.ECONNRESET
 local EINPROGRESS = errno.EINPROGRESS
+local EINVAL = errno.EINVAL
 
 ffi.cdef [[
 typedef struct luact_tcp_context {
@@ -25,6 +30,7 @@ typedef struct luact_tcp_context {
 
 --> helper function
 function tcp_connect(io)
+::retry::
 	local ctx = io:ctx('luact_tcp_context_t*')
 	local n = C.connect(io:fd(), ctx.addrinfo.addrp, ctx.addrinfo.alen[0])
 	if n < 0 then
@@ -33,6 +39,10 @@ function tcp_connect(io)
 			-- print('EINPROGRESS:to:', socket.inet_namebyhost(ctx.addrinfo.addrp))
 			io:wait_write()
 			return
+		elseif eno == ECONNREFUSED then
+			print('TODO: server listen backlog may exceed: try reconnection', eno)
+			thread.sleep(0.1) -- TODO : use lightweight sleep by timer facility
+			goto retry
 		else
 			error(('tcp connect fails(%d) on %d'):format(eno, io:nfd()))
 		end
@@ -75,6 +85,19 @@ function tcp_write(io, ptr, len)
 		elseif eno == ENOTCONN then
 			tcp_connect(io)
 			goto retry
+		elseif eno == EPIPE then
+			--[[ EPIPE: 
+				http://www.freebsd.org/cgi/man.cgi?query=listen&sektion=2
+				If a connection
+			    request arrives with the queue full the client may	receive	an error with
+			    an	indication of ECONNREFUSED, or,	in the case of TCP, the	connection
+			    will be *silently* dropped.
+				I guess if try to write to such an connection, EPIPE may occur.
+				because if I increasing listen backlog size, EPIPE not happen.
+			]]
+			thread.sleep(0.1) -- TODO : use lightweight sleep by timer facility
+			tcp_connect(io)
+			goto retry
 		else
 			error(('tcp write fails(%d) on %d'):format(eno, io:nfd()))
 		end
@@ -114,7 +137,6 @@ function tcp_gc(io)
 	memory.free(io:ctx('void*'))
 	C.close(io:fd())
 end
-
 
 HANDLER_TYPE_TCP = poller.add_handler(tcp_read, tcp_write, tcp_gc)
 HANDLER_TYPE_TCP_LISTENER = poller.add_handler(tcp_accept, nil, tcp_gc)

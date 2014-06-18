@@ -1,4 +1,3 @@
-local opts = ...
 local thread = require 'luact.thread'
 local ffi = require 'ffiex'
 local util = require 'luact.util'
@@ -7,10 +6,10 @@ local memory = require 'luact.memory'
 local _M = {}
 local C = ffi.C
 local iolist = ffi.NULL
-local handlers = opts.handlers
-local read_handlers, write_handlers, gc_handlers = 
-	opts.read_handlers, opts.write_handlers, opts.gc_handlers
+local handlers
+local read_handlers, write_handlers, gc_handlers, error_handlers
 
+local log
 ---------------------------------------------------
 -- import necessary cdefs
 ---------------------------------------------------
@@ -98,9 +97,9 @@ function io_index.read(t, ptr, len)
 end
 function io_index.wait_read(t)
 	t.ev.filter = EVFILT_READ
-	-- print('wait_read', t.ev.ident)
+	if log then print('wait_read', t.ev.ident) end
 	local r = coroutine.yield(t)
-	-- print('wait_read returns', t.ev.ident)
+	if log then print('wait_read returns', t.ev.ident) end
 	t.ev.fflags = r.fflags
 	t.ev.data = r.data
 end
@@ -109,11 +108,12 @@ function io_index.write(t, ptr, len)
 end
 function io_index.wait_write(t)
 	t.ev.filter = EVFILT_WRITE
-	-- print('wait_write', t.ev.ident)
+	if log then print('wait_write', t.ev.ident) end
 	local r = coroutine.yield(t)
-	-- print('wait_write returns', t.ev.ident)
+	if log then print('wait_write returns', t.ev.ident, r) end
 	t.ev.fflags = r.fflags
 	t.ev.data = r.data
+	if log then print('wait_write end', t.ev.ident, r, debug.traceback()) end
 end
 function io_index.add_to(t, poller)
 	assert(bit.band(t.ev.flags, EV_ADD) ~= 0, "invalid event flag")
@@ -155,6 +155,7 @@ end
 ---------------------------------------------------
 -- luact_poller metatable definition
 ---------------------------------------------------
+
 local function run(t, co, ev, io)
 	local ok, rev = pcall(co, ev)
 	if ok then
@@ -172,7 +173,7 @@ end
 function poller_index.init(t, maxfd)
 	t.kqfd = C.kqueue()
 	assert(t.kqfd >= 0, "kqueue create fails:"..ffi.errno())
-	print('kqfd:', tonumber(t.kqfd))
+	-- print('kqfd:', tonumber(t.kqfd))
 	t.maxfd = maxfd
 	t.nevents = maxfd
 	t.alive = true
@@ -215,19 +216,11 @@ function poller_index.newio(t, fd, type, ctx)
 	return newio(t, fd, type, ctx)
 end
 function poller_index.start(t)
-	local exec
-	print('psart1', t.alive)
 	while t.alive do
-		if not exec then
-			print('exec')
-			exec = true
-		end
 		t:wait()
 	end
-	print('psart2')
 end
 function poller_index.stop(t)
-	print('stop')
 	t.alive = false
 end
 
@@ -250,7 +243,7 @@ poller_cdecl = function (maxfd)
 			struct timespec timeout[1];
 			int maxfd;
 		} luact_poller_t;
-	]]):format(maxfd, maxfd, maxfd)
+	]]):format(maxfd)
 end
 
 function _M.initialize(args)
@@ -259,6 +252,7 @@ function _M.initialize(args)
 	read_handlers = args.read_handlers
 	write_handlers = args.write_handlers
 	gc_handlers = args.gc_handlers
+	error_handlers = args.error_handlers
 
 	--> generate run time cdef
 	ffi.cdef(poller_cdecl(args.poller.maxfd))

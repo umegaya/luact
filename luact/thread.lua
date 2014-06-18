@@ -22,7 +22,7 @@ ffi.cdef [[
 function _M.init_cdef(cache)
 	loader.initialize(cache)
 
-	loader.load("thread.lua.pthread", {
+	loader.load("pthread.lua", {
 		--> from pthread
 		"pthread_t", "pthread_mutex_t", 
 		"pthread_mutex_lock", "pthread_mutex_unlock", 
@@ -36,7 +36,7 @@ function _M.init_cdef(cache)
 		#include <time.h>
 	]])
 
-	local ffi_state = loader.load("thread.lua.luaAPI", {
+	local ffi_state = loader.load("lua.lua", {
 		--> from luauxlib, lualib
 		"luaL_newstate", "luaL_openlibs",
 		"luaL_loadstring", "lua_pcall", "lua_tolstring",
