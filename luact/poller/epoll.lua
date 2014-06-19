@@ -5,7 +5,7 @@ local memory = require 'luact.memory'
 
 local _M = {}
 local C = ffi.C
-local udatalist, handlers, iolist
+local udatalist, handlers, gc_handlers, iolist
 
 
 ---------------------------------------------------
@@ -140,7 +140,19 @@ function poller_index.wait(t)
 		local ev = t.events + i
 		local fd = tonumber(ev.data.fd)
 		local co = assert(handlers[fd], "handler should exist for fd:"..tostring(fd))
-		t:run(co, ev, iolist + fd)
+		local ok, rev = pcall(co, ev)
+		if ok then
+			if rev then
+				if rev:add_to(t) then
+					goto next
+				end
+			end
+		else
+			print('abort by error:', rev)
+		end
+		local io = iolist + fd
+		io:fin()
+		::next::
 	end
 end
 
@@ -170,6 +182,7 @@ end
 
 function _M.initialize(args)
 	handlers = args.handlers
+	gc_handlers = args.gc_handlers
 	--> generate run time cdef
 	ffi.cdef(poller_cdecl(args.poller.maxfd))
 	ffi.metatype('luact_poller_t', { __index = poller_index })

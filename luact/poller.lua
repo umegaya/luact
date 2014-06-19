@@ -31,24 +31,20 @@ function io_index.by(t, poller, cb)
 	return poller:add(t, cb)
 end
 
-function poller_index.run(t, co, ev, io)
-	local ok, rev = pcall(co, ev)
+function poller_index.add(t, io, co)
+	co = ((type(co) == "function") and coroutine.wrap(co) or co)
+	handlers[tonumber(io:fd())] = co
+	local ok, rev = pcall(co, io)
 	if ok then
 		if rev then
 			if rev:add_to(t) then
-				return
+				return true
 			end
 		end
 	else
 		print('abort by error:', rev)
 	end
 	io:fin()
-	gc_handlers[io:type()](io)
-end
-function poller_index.add(t, io, co)
-	co = ((type(co) == "function") and coroutine.wrap(co) or co)
-	handlers[tonumber(io:fd())] = co
-	t:run(co, io, io)
 	return true
 end
 function poller_index.remove(t, io)
@@ -100,7 +96,7 @@ function _M.initialize(opts)
 	)
 	iolist = require ("luact.poller."..poller).initialize({
 		opts = opts,
-		handlers = handlers, 
+		handlers = handlers, gc_handlers = gc_handlers, 
 		poller = _M, 
 		poller_index = poller_index, 
 		io_index = io_index,

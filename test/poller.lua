@@ -38,6 +38,8 @@ tcp.listen('0.0.0.0:8888'):by(p, function (s)
 	end
 end)
 
+local start = os.clock()
+
 local client_msg = ("hello,luact poll"):rep(16)
 for i=0,NCLIENTS-1,1 do
 	tcp.connect('127.0.0.1:8888'):by(p, function (s)
@@ -65,6 +67,8 @@ end
 
 print('start', p)
 p:loop()
+
+print('end', os.clock() - start, 'sec')
 assert(limit <= finish and limit <= cfinish, "not all client/server finished but poller terminated")
 poller.finalize()
 print('success')
