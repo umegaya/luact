@@ -149,7 +149,7 @@ function _M.finalize()
 	end
 end
 
-function inject_macros(state, symbols)
+local function inject_macros(state, symbols)
 	local macro_decl = ""
 	for _,sym in pairs(symbols) do
 		local src = state.defs[sym]
@@ -164,7 +164,7 @@ function inject_macros(state, symbols)
 	return macro_decl
 end
 
-function merge_nice_to_have(cdecls_or_macros)
+local function merge_nice_to_have(cdecls_or_macros)
 	if type(cdecls_or_macros.nice_to_have) ~= 'table' then
 		return cdecls_or_macros
 	else
@@ -178,7 +178,7 @@ function merge_nice_to_have(cdecls_or_macros)
 		return ret
 	end
 end
-function merge_regex(tree, macros)
+local function merge_regex(tree, macros)
 	if type(macros.regex) ~= 'table' then
 		return macros
 	else

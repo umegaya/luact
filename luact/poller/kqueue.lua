@@ -5,9 +5,7 @@ local memory = require 'luact.memory'
 
 local _M = {}
 local C = ffi.C
-local iolist = ffi.NULL
-local handlers
-local read_handlers, write_handlers, gc_handlers, error_handlers
+local handlers, iolist
 
 ---------------------------------------------------
 -- import necessary cdefs
@@ -63,7 +61,7 @@ local EV_DELETE = ffi_state.defs.EV_DELETE
 ---------------------------------------------------
 -- ctype metatable definition
 ---------------------------------------------------
-local poller_cdecl, poller_index, io_index = nil, {}, {}
+local poller_cdecl, poller_index, io_index, event_index = nil, {}, {}, {}
 
 ---------------------------------------------------
 -- luact_io metatable definition
@@ -89,10 +87,6 @@ function io_index.init(t, fd, type, ctx)
 end
 function io_index.fin(t)
 	t.ev.flags = EV_DELETE
-	gc_handlers[t:type()](t)
-end
-function io_index.read(t, ptr, len)
-	return read_handlers[t:type()](t, ptr, len)
 end
 function io_index.wait_read(t)
 	t.ev.filter = EVFILT_READ
@@ -101,9 +95,6 @@ function io_index.wait_read(t)
 	-- if log then print('wait_read returns', t:fd()) end
 	t.ev.fflags = r.fflags
 	t.ev.data = r.data
-end
-function io_index.write(t, ptr, len)
-	return write_handlers[t:type()](t, ptr, len)
 end
 function io_index.wait_write(t)
 	t.ev.filter = EVFILT_WRITE
@@ -136,38 +127,17 @@ end
 function io_index.fd(t)
 	return t.ev.ident
 end
-function io_index.nfd(t)
-	return tonumber(t.ev.ident)
-end
 function io_index.type(t)
 	return tonumber(t.kind)
 end
 function io_index.ctx(t, ct)
 	return t.ev.udata ~= ffi.NULL and ffi.cast(ct, t.ev.udata) or nil
 end
-function io_index.by(t, poller, cb)
-	return poller:add(t, cb)
-end
 
 
 ---------------------------------------------------
 -- luact_poller metatable definition
 ---------------------------------------------------
-
-local function run(t, co, ev, io)
-	local ok, rev = pcall(co, ev)
-	if ok then
-		if rev then
-			if rev:add_to(t) then
-				return
-			end
-		end
-	else
-		print('abort by error:', rev)
-	end
-	io:fin()
-end
-
 function poller_index.init(t, maxfd)
 	t.kqfd = C.kqueue()
 	assert(t.kqfd >= 0, "kqueue create fails:"..ffi.errno())
@@ -180,25 +150,14 @@ end
 function poller_index.fin(t)
 	C.close(t.kqfd)
 end
-function poller_index.add(t, io, co)
-	co = ((type(co) == "function") and coroutine.wrap(co) or co)
-	handlers[tonumber(io:fd())] = co
-	run(t, co, io, io)
-	return true
-end
-function poller_index.remove(t, io)
-	if not io:remove_from(t) then return false end
-	handlers[tonumber(io:fd())] = nil
-	return true
-end
 function poller_index.set_timeout(t, sec)
 	util.sec2timespec(sec, t.timeout)
 end
 function poller_index.wait(t)
 	local n = C.kevent(t.kqfd, nil, 0, t.events, t.nevents, t.timeout)
-	if n < 0 then
-		print('kqueue error:'..ffi.errno())
-		return
+	if n <= 0 then
+		-- print('kqueue error:'..ffi.errno())
+		return n
 	end
 	--if n > 0 then
 	--	print('n = ', n)
@@ -207,20 +166,10 @@ function poller_index.wait(t)
 		local ev = t.events + i
 		local fd = tonumber(ev.ident)
 		local co = assert(handlers[fd], "handler should exist for fd:"..tostring(fd))
-		run(t, co, ev, iolist + fd)
+		t:run(co, ev, iolist + fd)
 	end
 end
-function poller_index.newio(t, fd, type, ctx)
-	return newio(t, fd, type, ctx)
-end
-function poller_index.start(t)
-	while t.alive do
-		t:wait()
-	end
-end
-function poller_index.stop(t)
-	t.alive = false
-end
+
 
 ---------------------------------------------------
 -- main poller ctype definition
@@ -245,20 +194,13 @@ poller_cdecl = function (maxfd)
 end
 
 function _M.initialize(args)
-	--> copy handlers in poller (as upvalues for above)
 	handlers = args.handlers
-	read_handlers = args.read_handlers
-	write_handlers = args.write_handlers
-	gc_handlers = args.gc_handlers
-	error_handlers = args.error_handlers
-
 	--> generate run time cdef
 	ffi.cdef(poller_cdecl(args.poller.maxfd))
-	ffi.metatype('luact_poller_t', { __index = poller_index })
-	ffi.metatype('luact_io_t', { __index = io_index })
+	ffi.metatype('luact_poller_t', { __index = util.merge_table(args.poller_index, poller_index) })
+	ffi.metatype('luact_io_t', { __index = util.merge_table(args.io_index, io_index) })
 
-	--> TODO : share it between threads (but thinking of cache coherence, may better seperated)
-	iolist = args.opts.iolist or memory.alloc_fill_typed('luact_io_t', args.opts.maxfd)
+	iolist = args.opts.iolist or memory.alloc_fill_typed('luact_io_t', args.poller.maxfd)
 	return iolist
 end
 

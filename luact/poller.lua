@@ -10,18 +10,75 @@ local signal = require 'luact.signal'
 local _M = {}
 local iolist = ffi.NULL
 local handlers = {}
+local handler_id_seed = 0
 local read_handlers, write_handlers, gc_handlers, error_handlers = {}, {}, {}, {}
+local HANDLER_TYPE_POLLER
+local io_index, poller_index = {}, {}
 
+---------------------------------------------------
+-- system independent poller object's API
+---------------------------------------------------
+function io_index.read(t, ptr, len)
+	return read_handlers[t:type()](t, ptr, len)
+end
+function io_index.write(t, ptr, len)
+	return write_handlers[t:type()](t, ptr, len)
+end
+function io_index.nfd(t)
+	return tonumber(t:fd())
+end
+function io_index.by(t, poller, cb)
+	return poller:add(t, cb)
+end
+
+function poller_index.run(t, co, ev, io)
+	local ok, rev = pcall(co, ev)
+	if ok then
+		if rev then
+			if rev:add_to(t) then
+				return
+			end
+		end
+	else
+		print('abort by error:', rev)
+	end
+	io:fin()
+	gc_handlers[io:type()](io)
+end
+function poller_index.add(t, io, co)
+	co = ((type(co) == "function") and coroutine.wrap(co) or co)
+	handlers[tonumber(io:fd())] = co
+	t:run(co, io, io)
+	return true
+end
+function poller_index.remove(t, io)
+	if not io:remove_from(t) then return false end
+	handlers[tonumber(io:fd())] = nil
+	return true
+end
+function poller_index.loop(t)
+	while t.alive do
+		t:wait()
+	end
+end
+function poller_index.stop(t)
+	t.alive = false
+end
+function poller_index.io(t)
+	return _M.newio(t:fd(), HANDLER_TYPE_POLLER, t)
+end
 
 ---------------------------------------------------
 -- module body
 ---------------------------------------------------
+local function nop() end
 function _M.add_handler(reader, writer, gc, err)
-	table.insert(read_handlers, reader)
-	table.insert(write_handlers, writer)
-	table.insert(gc_handlers, gc)
-	table.insert(error_handlers, err)
-	return #read_handlers
+	handler_id_seed = handler_id_seed + 1
+	read_handlers[handler_id_seed] = reader or nop
+	write_handlers[handler_id_seed] = writer or nop
+	gc_handlers[handler_id_seed] = gc or nop
+	error_handlers[handler_id_seed] = err or nop
+	return handler_id_seed
 end
 
 function _M.initialize(opts)
@@ -43,14 +100,11 @@ function _M.initialize(opts)
 	)
 	iolist = require ("luact.poller."..poller).initialize({
 		opts = opts,
+		handlers = handlers, 
 		poller = _M, 
-		handlers = handlers,
-		read_handlers = read_handlers, 
-		write_handlers = write_handlers, 
-		gc_handlers = gc_handlers, 
-		error_handlers = error_handlers,
+		poller_index = poller_index, 
+		io_index = io_index,
 	})
-
 	return true
 end
 
@@ -78,5 +132,21 @@ function _M.newio(fd, type, ctx)
 	return io
 end
 
+--> handler for poller itself
+local function poller_read(io, ptr, len)
+	local p = io:ctx('luact_poller_t*')
+::retry::
+	if p:wait() == 0 then
+		io:wait_read()
+		goto retry
+	end
+end
+local function poller_gc(io)
+	local p = io:ctx('luact_poller_t*')
+	p:fin()
+	memory.free(p)
+end
+
+HANDLER_TYPE_POLLER = _M.add_handler(poller_read, nil, poller_gc)
 
 return _M

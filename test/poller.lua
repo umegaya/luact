@@ -64,7 +64,7 @@ for i=0,NCLIENTS-1,1 do
 end
 
 print('start', p)
-p:start()
+p:loop()
 assert(limit <= finish and limit <= cfinish, "not all client/server finished but poller terminated")
 poller.finalize()
 print('success')
