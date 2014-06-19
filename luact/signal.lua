@@ -7,11 +7,9 @@ local C = ffi.C
 local _M = {}
 local ffi_state
 
-loader.add_lazy_init(_M)
-
 local SIG_IGN
 
-function _M.init_cdef()
+loader.add_lazy_initializer(function ()
 	ffi_state = loader.load("signal.lua", {
 		"signal", "sigaction", "sigemptyset", "sig_t", 
 	}, {
@@ -25,7 +23,7 @@ function _M.init_cdef()
 
 	--> that is really disappointing, but macro SIG_IGN is now cannot processed correctly. 
 	SIG_IGN = ffi.cast("sig_t", 1)
-end
+end)
 
 function _M.ignore(signo)
 	signo = (type(signo) == 'number' and signo or _M[signo])

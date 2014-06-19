@@ -88,11 +88,12 @@ function tcp_write(io, ptr, len)
 		elseif eno == EPIPE then
 			--[[ EPIPE: 
 				http://www.freebsd.org/cgi/man.cgi?query=listen&sektion=2
-				If a connection
-			    request arrives with the queue full the client may	receive	an error with
-			    an	indication of ECONNREFUSED, or,	in the case of TCP, the	connection
-			    will be *silently* dropped.
-				I guess if try to write to such an connection, EPIPE may occur.
+				> If a connection
+			    > request arrives with the queue full the client may	receive	an error with
+			    > an	indication of ECONNREFUSED, or,	in the case of TCP, the	connection
+			    > will be *silently* dropped.
+				
+				so I guess if try to write to such an connection, EPIPE may occur.
 				because if I increasing listen backlog size, EPIPE not happen.
 			]]
 			thread.sleep(0.1) -- TODO : use lightweight sleep by timer facility

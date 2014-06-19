@@ -4,8 +4,6 @@ local loader = require 'luact.loader'
 local C = ffi.C
 local _M = {}
 
-loader.add_lazy_init(_M)
-
 ---------------------------------------------------
 -- dir submodule
 ---------------------------------------------------
@@ -60,7 +58,7 @@ end
 ---------------------------------------------------
 -- main module
 ---------------------------------------------------
-function _M.init_cdef() 
+loader.add_lazy_initializer(function () 
 	loader.load('fs.lua', { 
 		"opendir", "readdir", "closedir", "DIR", "luact_dir_t",
 		"stat", "mkdir", "struct stat", "fileno",
@@ -82,6 +80,6 @@ function _M.init_cdef()
 			end
 		end
 	})
-end
+end)
 
 return _M

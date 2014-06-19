@@ -4,8 +4,6 @@ local loader = require 'luact.loader'
 local C = ffi.C
 local _M = {}
 
-loader.add_lazy_init(_M)
-
 --> add NULL symbol
 ffi.NULL = ffi.new('void*')
 
@@ -49,7 +47,7 @@ end
 --> ffi related utils
 local C = ffi.C
 local RLIMIT_NOFILE, RLIMIT_CORE
-function _M.init_cdef()
+loader.add_lazy_initializer(function ()
 	local ffi_state = loader.load('util.lua', {
 		"getrlimit", "setrlimit", "struct timespec", "struct timeval", "nanosleep",
 	}, {
@@ -64,7 +62,7 @@ function _M.init_cdef()
 	RLIMIT_NOFILE = ffi_state.defs.RLIMIT_NOFILE
 
 	_M.req,_M.rem = ffi.new('struct timespec[1]'), ffi.new('struct timespec[1]')
-end
+end)
 
 function _M.maxfd(set_to)
 	if set_to then

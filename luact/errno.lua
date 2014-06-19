@@ -1,15 +1,18 @@
 local loader = require 'luact.loader'
 local ffi = require 'ffiex'
 local _M = {}
+local ffi_state
 
-local ffi_state = loader.load("errno.lua", {}, {
-	"EAGAIN", "EWOULDBLOCK", "ENOTCONN", "EINPROGRESS", "EPIPE", 
-	regex = {
-		"^E%w+"
-	}
-}, nil, [[
-	#include <errno.h>
-]])
+loader.add_lazy_initializer(function ()
+	ffi_state = loader.load("errno.lua", {}, {
+		"EAGAIN", "EWOULDBLOCK", "ENOTCONN", "EINPROGRESS", "EPIPE", 
+		regex = {
+			"^E%w+"
+		}
+	}, nil, [[
+		#include <errno.h>
+	]])
+end)
 
 function _M.errno()
 	return ffi.errno()

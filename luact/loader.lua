@@ -122,14 +122,14 @@ function _M.initialize(cache, loader_ffi_state)
 		_cache:init(_M.cache_dir)
 	end
 	--> initialize lazy init module
-	for _,mod in ipairs(_M.lazy_init_modules) do
-		mod.init_cdef()
+	for _,init in ipairs(_M.lazy_initializers) do
+		init()
 	end
 end
 
-_M.lazy_init_modules = {}
-function _M.add_lazy_init(module)
-	table.insert(_M.lazy_init_modules, module)
+_M.lazy_initializers = {}
+function _M.add_lazy_initializer(initializer)
+	table.insert(_M.lazy_initializers, initializer)
 end
 
 function _M.set_cache_dir(path)

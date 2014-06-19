@@ -2,6 +2,7 @@
 local ffi = require 'ffiex'
 local memory = require 'luact.memory'
 local loader = require 'luact.loader'
+local errno = require 'luact.errno'
 local util = require 'luact.util'
 local fs = require 'luact.fs'
 
