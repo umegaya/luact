@@ -8,8 +8,8 @@ luact.start({
 			return 'hoge'..n
 		end,
 	}
-	local a2 = luact "./test/tools/test_actor.lua"
-	local a3 = luact "ffiex"
+	local a2 = luact.load "./test/tools/test_actor.lua"
+	local a3 = luact.require "ffiex"
 
 	assert(a1.hoge(2) == 'hoge2')
 	assert(a2:fuga(3) == 4)
@@ -20,3 +20,11 @@ luact.start({
 end)
 
 return true
+
+--[[
+
+
+
+
+
+]]
