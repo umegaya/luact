@@ -1,7 +1,7 @@
 local buf = require 'luact.buf'
-local exception = require 'lib.pulpo.exception'
-local memory = require 'lib.pulpo.memory'
-local gen = require 'lib.pulpo.generics'
+local exception = require 'pulpo.exception'
+local memory = require 'pulpo.memory'
+local gen = require 'pulpo.generics'
 local raise = exception.raise
 local event = pulpo.event
 

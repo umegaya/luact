@@ -1,7 +1,8 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact"
+	cache_dir = "/tmp/luact",
+	n_core = 1, exclusive = true,
 }, function ()
 	local a1 = luact {
 		hoge = function (n)
@@ -20,11 +21,3 @@ luact.start({
 end)
 
 return true
-
---[[
-
-
-
-
-
-]]
