@@ -1,6 +1,13 @@
-local sleeper
+local ffi = require 'ffiex.init'
+
+local clock = require 'luact.clock'
+
+local pulpo = require 'pulpo.init'
+local memory = require 'pulpo.memory'
+local socket = require 'pulpo.socket'
 local exception = require 'pulpo.exception'
 local _M = {}
+local C = ffi.C
 
 -- constant
 _M.THREAD_BIT_SIZE = 12
@@ -22,15 +29,20 @@ typedef union luact_uuid {
 		uint64_t local_id;
 		uint32_t machine_id;
 	} tag;
+	struct luact_id_tag2 {
+		uint32_t local_id[2];
+		uint32_t machine_id;
+	} tag2;
 } luact_uuid_t;
 ]]):format(_M.THREAD_BIT_SIZE, _M.SERIAL_BIT_SIZE, _M.TIMESTAMP_BIT_SIZE - 32))
 
 -- vars
 local idgen = {
-	seed = ffi.new('luact_uuid_t'), free = {}, 
+	seed = ffi.new('luact_uuid_t'), 
+	availables = {}, 
 	new = function (self)
-		if #self.free > 0 then
-			buf = table.remove(self.free)
+		if #self.availables > 0 then
+			buf = table.remove(self.availables)
 		else
 			buf = ffi.new('luact_uuid_t')
 			buf.detail.machine_id = self.seed.detail.machine_id
@@ -39,7 +51,7 @@ local idgen = {
 		return buf
 	end,
 	free = function (self, uuid)
-		table.insert(self.free, uuid)
+		table.insert(self.availables, uuid)
 	end,
 }
 local epoc
@@ -52,13 +64,13 @@ end
 
 -- module function 
 function _M.initialize(mt, startup_at, local_address)
-	epoc = startup_at and tonumber(startup_at) or math.floor(pulpo.util.clock() * 1000)
+	epoc = startup_at and tonumber(startup_at) or math.floor(clock.get() * 1000) -- current time in millis
 	ffi.metatype('luact_uuid_t', {
 		__index = setmetatable({
 			__timestamp = function (t) return (epoc + bit.lshift(t.detail.timestamp_hi, 32) + t.detail.timestamp_lo) end,
 			__set_timestamp = function (t, tv)
-				t.detail.timestamp_hi = bit.rshift(tv, 32)
-				t.detail.timestamp_lo = bit.band(tv, 0xFFFFFFFF)
+				t.detail.timestamp_hi = tv / (2 ^ 32)
+				t.detail.timestamp_lo = tv % 0xFFFFFFFF
 			end,
 			__thread_id = function (t) return t.data.thread_id end,
 			__local_id = function (t) return t.tag.local_id end,
@@ -73,7 +85,7 @@ function _M.initialize(mt, startup_at, local_address)
 			end,
 		}, mt), 
 		__tostring = function (t)
-			return string.format('%x:%x', t.tag.local_id, t.tag.machine_id)
+			return _M.tostring(t)
 		end,
 		__gc = mt and mt.__gc or function (t)
 			idgen:free(t)
@@ -85,17 +97,18 @@ function _M.initialize(mt, startup_at, local_address)
 		if local_address then
 			v[0] = tonumber(local_address, 16)
 		else
-			local addr = pulpo.socket.getifaddr()
-			assert(addr.sa_family == ffi.defs.AF_INET, exception.new("invalid", "address", "family", addr.sa_family))
-			v[0] = ffi.cast('struct sockaddr_in*', addr).sin_addr.in_addr
+			local addr = socket.getifaddr(nil, ffi.defs.AF_INET)
+			-- print(addr, addr.sa_family, ffi.defs.AF_INET, ffi.defs.AF_INET6)
+			assert(addr.sa_family == ffi.defs.AF_INET, 
+				exception.new("invalid", "address", "family", addr.sa_family))
+			v[0] = socket.htonl(ffi.cast('struct sockaddr_in*', addr).sin_addr.s_addr)
 		end
+		logger.notice('node_address:', ('%x'):format(v[0]))
 		return 'uint32_t', v
 	end)
 	_M.node_address = node_address[0]
 	idgen.seed.detail.machine_id = _M.node_address
 	idgen.seed.detail.thread_id = pulpo.thread_id
-	-- initialize sleeper
-	sleeper = require 'luact.sleep'
 	-- TODO : register machine_id/ip address pair to consul.
 
 end
@@ -104,7 +117,7 @@ function _M.new()
 	if idgen.seed.detail.serial >= _M.MAX_SERIAL_ID then
 		local current = idgen.seed:__timestamp()
 		repeat
-			sleeper.sleep(0.01)
+			clock.sleep(0.01)
 			idgen.seed:__set_timestamp(msec_timestamp())
 		until current ~= idgen.seed:__timestamp()
 		idgen.seed.detail.serial = 0
@@ -114,6 +127,9 @@ function _M.new()
 	local buf = idgen:new()
 	buf.detail.serial = idgen.seed.detail.serial
 	buf:__set_timestamp(msec_timestamp())
+	if _M.DEBUG then
+		logger.info('new uuid:', buf, debug.traceback())
+	end
 	return buf
 end
 function _M.from(ptr)
@@ -123,8 +139,17 @@ end
 function _M.owner_of(uuid)
 	return uuid:__addr() == _M.node_address
 end
+function _M.owner_thread_of(uuid)
+	return _M.owner_of(uuid) and uuid:__thread_id() == pulpo.thread_id
+end
 function _M.free(uuid)
 	idgen:free(uuid)
+end
+
+local sprintf_workmem_size = 32
+local sprintf_workmem = memory.alloc_typed('char', sprintf_workmem_size)
+function _M.tostring(uuid)
+	return ('%08x:%08x:%08x'):format(uuid.tag2.local_id[0], uuid.tag2.local_id[1], uuid.tag.machine_id)
 end
 
 return _M

@@ -4,6 +4,7 @@ luact.start({
 	cache_dir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 }, function ()
+	local luact = require 'luact.init'
 	local a1 = luact {
 		hoge = function (n)
 			return 'hoge'..n

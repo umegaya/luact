@@ -4,7 +4,7 @@
 		{"l", "long", "%w+"},
 	}
 ]]
-return function (args, opts_defs)
+return function (args, opts_defs, DEBUG)
 	local ret = {}
 	for i=1,#args,1 do
 		local a = args[i]
@@ -35,4 +35,10 @@ return function (args, opts_defs)
 			ret[def[2]] = (found[4] and found[4](unpack(vv)) or vv[1])
 		end
 	end
+	if DEBUG then
+		for k,v in pairs(ret) do
+			print('opts', k, v)
+		end
+	end
+	return ret
 end

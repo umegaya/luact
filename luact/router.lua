@@ -1,117 +1,128 @@
 local msgidgen = require 'luact.msgid'
-local conn -- luact.conn
 local dht = require 'luact.dht'
+local conn = require 'luact.conn'
+local uuid = require 'luact.uuid'
+
+local tentacle = require 'pulpo.tentacle'
 
 local _M = {}
+local NOTICE_BIT = 2
+local NOTICE_MASK = bit.lshift(1, NOTICE_BIT)
+local EXCLUDE_NOTICE_MASK = bit.lshift(1, NOTICE_BIT) - 1
+_M.SYS = 0
 _M.CALL = 1
 _M.SEND = 2
-_M.NOTICE_CALL = 3
-_M.NOTICE_SEND = 4
-_M.RESPONSE = 5
+_M.RESPONSE = 3
+_M.NOTICE_SYS = 4
+_M.NOTICE_CALL = 5
+_M.NOTICE_SEND = 6
 
 local coromap = {}
-local local_thread_connections = setmetatable({}, {
-	__index = function (t, id)
-		local conn = conn.get_by_thread_id(id)
-		rawset(t, id, conn)
-		return conn
-	end,
-})
 
-local IDX_KIND = 1
-local IDX_UUID = 2
-local IDX_MSGID = 3
-local IDX_METHOD = 4
-local IDX_ARGS = 5
+local KIND = 1
+local UUID = 2
+local MSGID = 3
+local METHOD = 4
+local ARGS = 5
+
+local function dest_assinged_this_thread(msg)
+	return uuid.owner_thread_of(msg[UUID])
+end
 
 function _M.internal(conn, message)
-	local kind = message[IDX_KIND]
-	if kind == CALL then
-		if dest_assinged_this_thread(message) then
-			tentacle(function (sock, msg)
-				sock:resp(msg[IDX_MSGID], actor.dispatch_call(msg))
-			end, conn, message)
-		else
-			tentacle(function (sock, msg)
-				sock:resp(msg[IDX_MSGID], pcall(msg[IDX_UUID][msg[IIDX_METHOD]], unpack(msg[IDX_ARGS])))
-			end, conn, message)
-		end
-	elseif kind == SEND then
-		if dest_assinged_this_thread(message) then
-			tentacle(function (sock, msg)
-				sock:resp(msg[IDX_MSGID], actor.dispatch_send(msg))
-			end, conn, message)
-		else
-			tentacle(function (sock, msg)
-				sock:resp(msg[IDX_MSGID], pcall(msg[IDX_UUID][msg[IIDX_METHOD]], msg[IDX_UUID], unpack(msg[IDX_ARGS])))
-			end, conn, message)
-		end
-	elseif kind == NOTICE_CALL then
-		if dest_assinged_this_thread(message) then
-			tentacle(function (msg)
-				actor.dispatch_call(msg)
-			end, message)
-		else
-			tentacle(function (msg)
-				pcall(msg[IDX_UUID][msg[IIDX_METHOD]], unpack(msg[IDX_ARGS]))
-			end)
-		end
-	elseif kind == NOTICE_SEND then
-		if dest_assinged_this_thread(message) then
-			tentacle(function (msg)
-				actor.dispatch_send(msg)
-			end, message)
-		else
-			tentacle(function (sock, msg)
-				pcall(msg[IDX_UUID][msg[IIDX_METHOD]], msg[IDX_UUID], unpack(msg[IDX_ARGS]))
-			end)
-		end
-	elseif kind == RESPONSE then
-		local msgid = parsed:msgid()
+	local k = message[KIND]
+	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
+	if kind == RESPONSE then
+		local msgid = message:msgid()
 		co = coromap[msgid]
 		if co then
-			coroutine.resume(co, unpack(msg[IDX_ARGS]))
+			coroutine.resume(co, unpack(msg[ARGS]))
 			coromap[msgid] = nil
 		end
+	elseif dest_assinged_this_thread(message) then
+		if not notice then
+			if kind == SYS then
+				tentacle(function (sock, msg)
+					sock:resp(msg[MSGID], actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+				end, conn, message)
+			elseif kind == CALL then
+				tentacle(function (sock, msg)
+					sock:resp(msg[MSGID], actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+				end, conn, message)
+			elseif kind == SEND then
+				tentacle(function (sock, msg)
+					sock:resp(msg[MSGID], actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+				end, conn, message)
+			end
+		else
+			if kind == SYS then
+				tentacle(function (msg)
+					actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+				end, message)
+			elseif kind == CALL then
+				tentacle(function (msg)
+					actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+				end, message)
+			elseif kind == SEND then
+				tentacle(function (msg)
+					actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+				end, message)
+			end
+		end
+	elseif notice then
+		tentacle(function (msg)
+			pcall(msg[UUID][msg[METHOD]], unpack(msg[ARGS]))
+		end)
+	else
+		tentacle(function (sock, msg)
+			sock:resp(msg[MSGID], pcall(msg[UUID][msg[METHOD]], unpack(msg[ARGS])))
+		end, conn, message)
 	end	
 end
 
 function _M.external(conn, message, from_untrusted)
-	local kind = parsed[IDX_KIND]
+	local k = message[KIND]
+	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if from_untrusted then
-		if parsed[IDX_METHOD][1] == '_' then
-			sock:resp(message[IDX_MSGID], false, "calling protected method from untrusted region")
+		if message[METHOD][1] == '_' then
+			sock:resp(message[MSGID], false, "calling protected method from untrusted region")
 			return
 		end
 	end
-	if kind == _M.CALL or kind == _M.SEND then
-		pulpo.tentacle(function (sock, msg)
-			sock:resp(msg[IDX_MSGID], 
-				pcall(dht[msg[IDX_DEFS.UUID]][msg[IDX_METHOD]], unpack(msg[IDX_ARGS]))
-			)
-		end, conn, message)
-	elseif kind == _M.NOTICE then
-		pulpo.tentacle(function (msg)
-			pcall(dht[msg[IDX_UUID]][msg[IDX_METHOD]], unpack(msg[IDX_ARGS]))
-		end, message)
-	elseif kind == _M.RESPONSE then
-		local msgid = parsed:msgid()
+	if kind == _M.RESPONSE then
+		local msgid = message:msgid()
 		co = coromap[msgid]
 		if co then
-			coroutine.resume(co, unpack(parsed[IDX_ARGS]))
+			coroutine.resume(co, unpack(parsed[ARGS]))
 			coromap[msgid] = nil
+		end
+	elseif not notice then
+		if kind == _M.CALL then
+			tentacle(function (sock, msg)
+				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS])))
+			end, conn, message)
+		elseif kind == _M.SEND then
+			tentacle(function (sock, msg)
+				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS])))
+			end, conn, message)	
+		end
+	else
+		if kind == _M.CALL then
+			tentacle(function (msg)
+				pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS]))
+			end, message)
+		elseif kind == _M.SEND then
+			tentacle(function (msg)
+				pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS]))
+			end, message)
 		end
 	end
 end
 
-function _M.regist(co)
+function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
 	return msgid
-end
-
-function _M.initialize(cmdl_arg)
-	conn = require 'luact.conn'
 end
 
 return _M

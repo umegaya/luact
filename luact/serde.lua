@@ -1,3 +1,5 @@
+local ffi = require 'ffiex.init'
+
 local _M = {}
 local kind = {
 	serpent = 1,

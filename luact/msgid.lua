@@ -1,4 +1,6 @@
 local uuid = require 'luact.uuid'
+local ffi = require 'ffiex.init'
+local pulpo = require 'pulpo.init'
 local bit = require 'bit'
 local _M = {}
 

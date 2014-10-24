@@ -1,4 +1,5 @@
 local actor = require 'luact.actor'
+local clock = require 'luact.clock'
 local _M = {}
 
 local supervisor_index = {}
@@ -8,35 +9,36 @@ _M.opts = {
 	count = 1,
 	distribute = false,
 }
-function supervisor_index:sys_event(event, ...)
-	if event == 'destroy' then
+-- hook system event
+function supervisor_index:__sys_event__(event, ...)
+	if event == actor.sys_event.LINK_DEAD then
 		self:restart_child(...)
-		return
+		return true -- handled. default behavior will skip
 	end
-	actor.default_sys_event(self, event, ...)
 end
-function supervisor_index:restart_child(died_actor, reason)
+function supervisor_index:restart_child(died_actor_id, reason)
 	if not self.restart then
-		self.first_restart = pulpo.util.clock()
+		self.first_restart = clock.get()
 		self.restart = 1
 	else
 		self.restart = self.restart + 1
-		if pulpo.util.clock() - self.first_restart < self.opts.maxt then
+		local now = clock.get()
+		if now - self.first_restart < self.opts.maxt then
 			if self.restart >= self.opts.maxr then
-				actor.destroy(self.__actor)
+				actor.destroy(actor.id_of(self))
 				return
 			else
-				self.first_restart = pulpo.util.clock()
+				self.first_restart = now
 				self.restart = 1
 			end
 		end
 	end
 	-- TODO : if error caused, this supervisor died. preparing supervisor of supervisors?
-	actor.new_link_with_id(self.__actor, died_actor, self.ctor, unpack(self.args))
+	actor.new_link_with_id(actor.id_of(self), died_actor_id, self.ctor, unpack(self.args))
 end
 function supervisor_index:start_children()
 	while #self.children < self.opts.count do
-		local child = actor.new_link(self.__actor, self.ctor, unpack(self.args))
+		local child = actor.new_link(actor.id_of(self), self.ctor, unpack(self.args))
 		table.insert(self.children, child)
 	end
 end

@@ -1,24 +1,62 @@
 -- external modules
 local uuid = require 'luact.uuid'
+uuid.DEBUG = true
 local vid = require 'luact.vid'
-local conn -- luact.conn
 local dht = require 'luact.dht'
+local conn = require 'luact.conn'
+
 local exception = require 'pulpo.exception'
+
+local _M = {}
+_M.sys_event = {
+	LINK_DEAD = "link_dead",
+	LINK = "link",
+	UNLINK = "unlink",
+}
 
 -- local function
 --[[
 	manages relation of actor
 --]]
-local proxy = {}
-function proxy.new()
+local actormap = {}
+local actor_mt = {}
+function actor_mt.new(id, event_handler)
+	-- TODO : allocate from cache if available.
 	return setmetatable({
-		links = {}
+		uuid = id,
+		links = {},
+		event = event_handler,
 	}, proxy)
 end
-function proxy.cleanup(p, reason)
- 	for i=#p.links,1,-1 do
-		local link = table.remove(p.links, i)
-		link:notify_sys_event('destroy', id, reason)
+function actor_mt:cleanup(reason)
+ 	for i=#self.links,1,-1 do
+		local link = table.remove(self.links, i)
+		link:notify___sys_event__(_M.sys_event.LINK_DEAD, self.uuid, reason) -- do not wait response
+	end
+	-- TODO : cache this (to reduce GC)
+end
+-- called with actor:__sys__event
+function try_to_hook_sys_event(body, event, ...)
+	local ok, r = pcall(body.__sys_event__, body, event, ...)
+	return ok and r
+end
+function actor_mt:event__(body, event, ...)
+	logger.info('sys_event', self.uuid, body, event, ...)
+	if try_to_hook_sys_event(body, event, ...) then
+		return
+	end
+	if event == _M.sys_event.LINK_DEAD then
+		-- by default, if linked actor dead, you also dies.
+		_M.destroy(self.uuid)
+	elseif event == _M.sys_event.LINK then
+		table.insert(self.links, ({...})[1])
+	elseif event == _M.sys_event.UNLINK then
+		local unlinked = ({...})[1]
+		for idx,link in ipairs(self.links) do
+			if link == unlinked then
+				table.remove(self.link, idx)
+			end
+		end
 	end
 end
 
@@ -26,10 +64,10 @@ end
 	make uuid cdata itself message-sendable
 --]]
 local prefixes = {
-	async_ 		= 0x00000001,
+	notify_ 	= 0x00000001,
 	timed_ 		= 0x00000002,
-	mcast_ 		= 0x00000004,
-	protected_ 	= 0x00000008,
+	async_		= 0x00000004, -- TODO
+	__sys_ 		= 0x00000008,
 }
 local patterns = {}
 for k,v in pairs(prefixes) do
@@ -51,14 +89,12 @@ local function parse_method_name(name)
 			end
 		end
 	until not match 
-	if name[1] == '_' then
-		flag = bit.bor(flag, prefixes.protected_)
-	end
 	return name,flag
 end	
+
 local function uuid_caller_proc(t, ...)
-	local c = conn.get(t.__uuid)
-	return c:send(t.uuid:__serial(), t.method, t.flag, ...)
+	local c = conn.get(t.uuid)
+	return c:dispatch(t, ...)
 end
 local uuid_caller_mt = {
 	__call = uuid_caller_proc,
@@ -68,7 +104,8 @@ local uuid_metatable = {
 	__index = function (t, k)
 		local methods = rawget(methods_cache, t:__serial())
 		if not methods then
-			rawset(methods_cache, t:__serial(), {})
+			methods = {}
+			rawset(methods_cache, t:__serial(), methods)
 		end
 		local v = rawget(methods, k)
 		if not v then
@@ -90,8 +127,8 @@ local uuid_metatable = {
 	make vid cdata itself message-sendable
 --]]
 local function vid_caller_proc(t, ...)
-	local c = conn.get_by_url(t.vid[1])
-	return c:send(t.vid[2], t.__method, t.__flag, ...)
+	local c = conn.get_by_url(t.vid.url)
+	return c:vdispatch(t, ...)
 end
 local vid_caller_mt = {
 	__call = vid_caller_proc,
@@ -101,6 +138,7 @@ local vid_metatable = {
 		local name, flag = parse_method_name(k)
 		-- TODO : cache this?
 		-- TODO : need to compare speed with closure generation
+		-- TODO : seems to be directly related with sender variations, like conn:send, conn:call, conn:sys, ... 
 		v = setmetatable({method = name, flag = flag, vid = t}, vid_caller_mt)
 		rawset(t, k, v)
 		return v
@@ -108,8 +146,7 @@ local vid_metatable = {
 }
 
 -- vars
-local _M = {}
-local bodies, proxies = {}, {}
+local bodymap = {}
 
 -- module function
 function _M.initialize(cmdl_args)
@@ -122,48 +159,25 @@ function _M.initialize(cmdl_args)
 			register = _M.register,
 		}
 	end)
-	conn = require 'luact.conn'
-end
-
---[[
-	current system events are:
-	'destroy' (actor, reason) : *actor* died by *reason*
-	'link' (actor) : please link *actor* to receiver
---]]
-function _M.default_sys_event(receiver, event, ...)
-	logger.info('sysevent', receiver, event, ...)
-	if event == 'destroy' then
-		_M.destroy(receiver)
-	elseif event == 'link' then
-		table.insert(proxies[receiver.serial].link, select(1, ...))
-	end
-end
-
---[[
-	supply least necessary method or property to object.
---]]
-local function actorize(uuid, object)
-	object.__actor = uuid
-	object.sys_event = object.sys_event or _M.default_sys_event
 end
 
 --[[
 	actor creation/deletion
 --]]
 function _M.new(ctor, ...)
-	return _M.new_link(nil, nil, ctor, ...)
+	return _M.new_link_with_id(nil, nil, ctor, ...)
 end
 function _M.new_link(to, ctor, ...)
-	return _M.new_link(to, nil, ctor, ...)
+	return _M.new_link_with_id(to, nil, ctor, ...)
 end
 function _M.new_link_with_id(to, id, ctor, ...)
 	id = id or uuid.new()
 	local s = id:__serial()
 	if to then to:sys_event('link', id) end
-	if not proxies[s] then
-		proxies[s] = proxy.new()
-	end
-	bodies[s] = actorize(id, ctor(...))
+	local body,event_handler = ctor(...)
+	local a = actor_mt.new(id, event_handler)
+	actormap[body] = a
+	bodymap[s] = body
 	return id
 end
 function _M.register(name, ctor, ...)
@@ -180,7 +194,7 @@ function _M.register(name, ctor, ...)
 end
 --[[
 	create remote actor reference from its name
-	eg. ssh+json-rpc://myservice.com:10000/user/id0001
+	eg. ssh+json://myservice.com:10000/user/id0001
 --]]
 function _M.ref(name)
 	return vid.new(name)
@@ -188,22 +202,39 @@ end
 
 function _M.destroy(id, reason)
 	local s = id:__serial()
-	local p = proxies[s]
-	if p then
-		local a = bodies[s]
-		-- body only exists the node which create it.
-		if a then
-			bodies[s] = nil
-			if a.destroy then
-				a:destroy(reason)
-			end
+	local a = bodymap[s]
+	-- body only exists the node which create it.
+	if a then
+		bodymap[s] = nil
+		local p = actormap[a]
+		if p then
+			p:cleanup(reason)
+			actormap[a] = nil
 		end
-		p:cleanup(reason)
+		if a.destroy then
+			a:destroy(reason)
+		end
 	end
 end
 function _M.body_of(id)
-	return bodies[id:__serial()]
+	return bodymap[id:__serial()]
+end
+function _M.id_of(object)
+	return actormap[object].uuid
+end
+_M.proxy_of = id_of
+function _M.dispatch_send(uuid, method, ...)
+	local b = _M.body_of(uuid)
+	return pcall(b[method], b, ...)
+end
+function _M.dispatch_call(uuid, method, ...)
+	local b = _M.body_of(uuid)
+	return pcall(b[method], ...)
+end
+function _M.dispatch_sys(uuid, method, ...)
+	local b = _M.body_of(uuid)
+	local p = actormap[b]
+	return pcall(p[method], p, b, ...)
 end
 
 return _M
-
