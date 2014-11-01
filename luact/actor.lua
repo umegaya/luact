@@ -9,6 +9,7 @@ local exception = require 'pulpo.exception'
 
 local _M = {}
 _M.sys_event = {
+	DESTROY = "destroy",
 	LINK_DEAD = "link_dead",
 	LINK = "link",
 	UNLINK = "unlink",
@@ -19,16 +20,19 @@ _M.sys_event = {
 	manages relation of actor
 --]]
 local actormap = {}
-local actor_mt = {}
-function actor_mt.new(id, event_handler)
+local actor_index = {}
+local actor_mt = {
+	__index = actor_index
+}
+function actor_index.new(id, event_handler)
 	-- TODO : allocate from cache if available.
 	return setmetatable({
 		uuid = id,
 		links = {},
 		event = event_handler,
-	}, proxy)
+	}, actor_mt)
 end
-function actor_mt:cleanup(reason)
+function actor_index:cleanup(reason)
  	for i=#self.links,1,-1 do
 		local link = table.remove(self.links, i)
 		link:notify___sys_event__(_M.sys_event.LINK_DEAD, self.uuid, reason) -- do not wait response
@@ -40,12 +44,13 @@ function try_to_hook_sys_event(body, event, ...)
 	local ok, r = pcall(body.__sys_event__, body, event, ...)
 	return ok and r
 end
-function actor_mt:event__(body, event, ...)
+function actor_index:event__(body, event, ...)
 	logger.info('sys_event', self.uuid, body, event, ...)
+	-- TODO : test and if that is significantly slow, better way to hook system events.
 	if try_to_hook_sys_event(body, event, ...) then
 		return
 	end
-	if event == _M.sys_event.LINK_DEAD then
+	if event == _M.sys_event.LINK_DEAD or event == _M.sys_event.DESTROY then
 		-- by default, if linked actor dead, you also dies.
 		_M.destroy(self.uuid)
 	elseif event == _M.sys_event.LINK then
@@ -69,6 +74,7 @@ local prefixes = {
 	async_		= 0x00000004, -- TODO
 	__sys_ 		= 0x00000008,
 }
+_M.prefixes = prefixes
 local patterns = {}
 for k,v in pairs(prefixes) do
 	patterns[k] = "(.-)"..k.."(.*)"
@@ -127,7 +133,7 @@ local uuid_metatable = {
 	make vid cdata itself message-sendable
 --]]
 local function vid_caller_proc(t, ...)
-	local c = conn.get_by_url(t.vid.url)
+	local c = conn.get_by_hostname(t.vid.host)
 	return c:vdispatch(t, ...)
 end
 local vid_caller_mt = {
@@ -173,9 +179,9 @@ end
 function _M.new_link_with_id(to, id, ctor, ...)
 	id = id or uuid.new()
 	local s = id:__serial()
-	if to then to:sys_event('link', id) end
-	local body,event_handler = ctor(...)
-	local a = actor_mt.new(id, event_handler)
+	if to then to:sys_event(_M.sys_event.LINK, id) end
+	local body = ctor(...)
+	local a = actor_index.new(id)
 	actormap[body] = a
 	bodymap[s] = body
 	return id
@@ -192,6 +198,8 @@ function _M.register(name, ctor, ...)
 		return assigned_node.register(name, ctor, ...)	
 	end ]]--
 end
+function _M.unregister(vid)
+end
 --[[
 	create remote actor reference from its name
 	eg. ssh+json://myservice.com:10000/user/id0001
@@ -200,41 +208,56 @@ function _M.ref(name)
 	return vid.new(name)
 end
 
-function _M.destroy(id, reason)
-	local s = id:__serial()
-	local a = bodymap[s]
+local function destroy_by_serial(s, reason)
+	local b = bodymap[s]
 	-- body only exists the node which create it.
-	if a then
+	if b then
 		bodymap[s] = nil
-		local p = actormap[a]
-		if p then
-			p:cleanup(reason)
-			actormap[a] = nil
+		local a = actormap[b]
+		if a then
+			a:cleanup(reason)
+			actormap[b] = nil
 		end
-		if a.destroy then
-			a:destroy(reason)
+		if b.destroy then
+			b:destroy(reason)
 		end
 	end
 end
-function _M.body_of(id)
-	return bodymap[id:__serial()]
+function _M.destroy(id, reason)
+	destroy_by_serial(id:__serial(), reason)
+end
+local function body_of(serial)
+	return bodymap[serial]
 end
 function _M.id_of(object)
 	return actormap[object].uuid
 end
-_M.proxy_of = id_of
-function _M.dispatch_send(uuid, method, ...)
-	local b = _M.body_of(uuid)
-	return pcall(b[method], b, ...)
+_M.proxy_of = _M.id_of
+function _M.dispatch_send(local_id, method, ...)
+	local s = uuid.serial_from_local_id(local_id)
+	local b = body_of(s)
+	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
+	local r = {pcall(b[method], b, ...)}
+	if not r[1] then destroy_by_serial(s, r[2]) end
+	return unpack(r)
 end
-function _M.dispatch_call(uuid, method, ...)
-	local b = _M.body_of(uuid)
-	return pcall(b[method], ...)
+function _M.dispatch_call(local_id, method, ...)
+	local s = uuid.serial_from_local_id(local_id)
+	local b = body_of(s)
+	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
+	local r = {pcall(b[method], ...)}
+	if not r[1] then destroy_by_serial(s, r[2]) end
+	return unpack(r)
 end
-function _M.dispatch_sys(uuid, method, ...)
-	local b = _M.body_of(uuid)
+function _M.dispatch_sys(local_id, method, ...)
+	local s = uuid.serial_from_local_id(local_id)
+	local b = body_of(s)
+	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
 	local p = actormap[b]
-	return pcall(p[method], p, b, ...)
+	if not p then return nil, exception.new('not_found', 'actor', tostring(uuid.from_local_id(local_id))) end
+	local r = {pcall(p[method], p, b, ...)}
+	if not r[1] then destroy_by_serial(s, r[2]) end
+	return unpack(r)
 end
 
 return _M

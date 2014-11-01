@@ -3,17 +3,24 @@ local ffi = require 'ffiex.init'
 local writer = require 'luact.writer'
 
 local pulpo = require 'pulpo.init'
+local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
 local thread = require 'pulpo.thread'
 local socket = require 'pulpo.socket'
+local event = require 'pulpo.event'
 
+local C = ffi.C
 local _M = (require 'pulpo.package').module('luact.defer.pbuf_c')
 _M.read = {}
 _M.write = {}
 _M.writer = writer 
 
 local WRITER_NONE = writer.WRITER_NONE
+local WRITER_RAW = writer.WRITER_RAW
+local WRITER_VEC = writer.WRITER_VEC
+
+local INITIAL_BUFFER_SIZE = 1024
 
 --[[
 	cdef
@@ -21,13 +28,13 @@ local WRITER_NONE = writer.WRITER_NONE
 ffi.cdef([[
 	typedef struct luact_rbuf {
 		char *buf;
-		size_t max, len, ofs;
+		luact_bufsize_t max, used, hpos;
 	} luact_rbuf_t;
 	typedef struct luact_wbuf {
-		luact_rbuf_t rbuf[2];
 		luact_rbuf_t *curr, *next;
-		char *last_p, last_cmd, padd[3];
-		pthread_mutex_t mutex[1];
+		luact_rbuf_t rbuf[2];
+		char last_cmd, padd[3];
+		pulpo_io_t *io;	
 	} luact_wbuf_t;
 ]])
 
@@ -38,68 +45,99 @@ ffi.cdef([[
 local rbuf_index = {}
 local rbuf_mt = { __index = rbuf_index }
 
+function rbuf_index:init()
+	self.buf = ffi.NULL
+	self.max, self.used, self.hpos = 0, 0, 0
+end
+function rbuf_index:reset()
+	self.used, self.hpos = 0, 0
+end
 function rbuf_index:fin()
-	if self.buf ~= ffi.NULL then
+	if self.buf ~= util.NULL then
 		memory.free(self.buf)
-		self.max,self.len,self.ofs = 0, 0, 0
-		self.buf = ffi.NULL
 	end
 end
 function rbuf_index:reserve(sz)
-	local r = self.max - self.ofs
+	local r = self.max - self.used
 	local buf
 	if r >= sz then return end
-	if self.buf ~= ffi.NULL then
+	if self.buf ~= util.NULL then
 		-- create new ptr object and copy unread buffer into it.
-		local copyb = self.len - self.ofs;
-		local newsz = self.max;
-		sz = sz + copyb;
-		-- print(copyb, sz, org);
-		while sz > newsz do newsz = bit.lshift(newsz, 1) end
+		local copyb = self.used - self.hpos
+		local newsz = self.max
+		sz = sz + copyb
+		-- print(copyb, sz, org)
+		while sz > newsz do newsz = (newsz * 2) end
 		buf = memory.alloc(newsz)
-		if buf == ffi.NULL then
+		if buf == util.NULL then
 			exception.raise('malloc', 'void*', newsz)
 		end
 		self.max = newsz
 		if copyb > 0 then 
-			ffi.copy(buf, self.buf + self.ofs, copyb)
+			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
-		self.ofs = 0;
-		self.len = copyb
+		self.hpos = 0
+		self.used = copyb
+		memory.free(self.buf)
 	else
-		self.max = INITIAL_BUFFER_SIZE;
+		self.max = INITIAL_BUFFER_SIZE
 		-- now self.buf == NULL, means no self.ofs, self.len. so compare with self.max work fine. 
-		while sz > self.max do self.max = bif.lshift(self.max, 1) end
+		while sz > self.max do self.max = (self.max * 2) end
 		buf = memory.alloc(self.max)
-		if buf == ffi.NULL then
+		if buf == util.NULL then
 			exception.raise('malloc', 'void*', self.max)
 		end
 	end
 	self.buf = buf
 end
+function rbuf_index:reserve_with_cmd(sz, cmd)
+	self:seek_from_last(0)
+	self:reserve(sz + 1)
+	self.buf[self.used] = cmd
+	self.used = self.used + 1
+end
 function rbuf_index:read(io, size)
 	self:reserve(size)
-	self.ofs = self.ofs + io:read(self.buf + self.ofs, size)
-end
-function rbuf_index:push(byte)
-	self.buf[self.ofs] = byte
-	self.ofs = self.ofs + 1
+	self.used = self.used + io:read(self.buf + self.used, size)
 end
 function rbuf_index:available()
-	return self.len - self.ofs
+	return self.used - self.hpos
+end
+function rbuf_index:use(r)
+	self.used = self.used + r
+end
+function rbuf_index:seek_from_curr(r)
+	self.hpos = self.hpos + r
+end
+function rbuf_index:seek_from_start(r)
+	self.hpos = r
+end
+function rbuf_index:seek_from_last(r)
+	self.hpos = self.used - r
 end
 function rbuf_index:curr_p()
-	return self.buf + self.ofs
+	return self.buf + self.hpos
 end
 function rbuf_index:last_p()
-	return self.buf + self.max
+	return self.buf + self.used
+end
+function rbuf_index:start_p()
+	return self.buf
+end
+function rbuf_index:dump()
+	io.write('buffer:'..tostring(self.buf))
+	for i=0,tonumber(self.used)-1,1 do
+		io.write(":")
+		io.write(string.format('%02x', self.buf[i]))
+	end
+	io.write('\n')
 end
 function rbuf_index:shrink(sz)
-	if sz >= self.len then
-		self.len = 0
+	if sz >= self.used then
+		self.used = 0
 	else
-		C.memmove(self.buf, self.buf + sz, sz)
-		self.len = self.len - sz
+		self.used = self.used - sz
+		C.memmove(self.buf, self.buf + sz, self.used)
 	end
 end
 ffi.metatype('luact_rbuf_t', rbuf_mt)
@@ -113,85 +151,67 @@ local wbuf_index = {}
 local wbuf_mt = { __index = wbuf_index }
 
 function wbuf_index:init()
-	C.pthread_mutex_init(self.mutex, nil)
+	self.rbuf[0]:init()
+	self.rbuf[1]:init()
 	self.curr = self.rbuf
 	self.next = self.rbuf + 1
 	self.last_cmd = WRITER_NONE
 end
+function wbuf_index:reset()
+	self.rbuf[0]:reset()
+	self.rbuf[1]:reset()
+	self.last_cmd = WRITER_NONE
+end
 function wbuf_index:fin()
-	C.pthread_mutex_destroy(self.mutex)
 	self.rbuf[0]:fin()
 	self.rbuf[1]:fin()
 end
-function wbuf_index:reserve(sz)
-	local p = self.next
-	local org_p = p.buf
-	p:reserve(sz)
-	if org_p ~= p.buf then
-		self.last_p = (p.buf + (self.last_p - org_p))
-	end
+function wbuf_index:set_io(io)
+	self.io = io
 end
-function wbuf_index:reserve_with_cmd(sz, cmd)
-	local append = (cmd == self.last_cmd)
-	if append then
-		self:reserve(sz)
-	else
-		self:reserve(sz + 1)
-		self.last_p[0] = cmd
-		self.last_p = (self.last_p + 1)
-	end
-	return append
-end
-function wbuf_index:lock(writer, ...)
-	C.pthread_mutex_lock(self.mutex)
-	local ok, r = pcall(writer, ...)
-	C.pthread_mutex_unlock(self.mutex)
-	assert(ok, r)
-	return r
-end
-function wbuf_index:send(writer, ...)
-	self:lock(self.do_send, self, writer, ...)
-end
-function wbuf_index:do_send(w, ...)
-	local sz = w.write(self, ...)
+function wbuf_index:send(w, ...)
+	local sz = w.write(self.next, self.last_cmd == w.cmd, ...)
 	if self.last_cmd == WRITER_NONE then
-		self.io:reactivate_write() -- remove and add edge trigger.
+		self.io:reactivate_write() -- add edge trigger again.
 		-- so even no actual environment changed, edge trigger should be triggered again.
-		-- TODO : any faster way than invoking syscall twice?
 	end
 	self.last_cmd = w.cmd
 	return sz
 end
-function wbuf_index:write(io)
-	if self.curr:available() == 0 then
-		if not self:lock(self.swap, self) then
+function wbuf_index:write()
+	local curr = self.curr
+	while curr:available() == 0 do
+		if not self:swap() then
 			-- because pulpo's polling always edge triggered, 
 			-- it waits for triggering edged write event caused by calling io:reactivate_write()
 			-- most of case. (see wbuf_index.do_send)
 			-- even if reactivate_write calls before pulpo.event.wait_write, it works.
 			-- because next epoll_wait or kqueue call will be done after this coroutine yields 
 			-- thus, pulpo.event.wait_write always calls before polling syscall.
-			pulpo.event.wait_write(self.io)
+			if not event.wait_reactivate_write(self.io) then
+				logger.warn('write thread terminate:', self.io:fd())
+				return
+			end
 			-- wait until next wbuf_index.do_send called...
 		end
-	else
-		local r
-		local now, last = self.curr:curr_p(), self.curr:last_p()
-		while now < last do
-			local w = ffi.cast(writer[now[0]], now + 1)
-			local r = w:syscall(io)
-			w:sent(r)
-			if w:finish() then
-				now = now + w:chunk_size()
-			else
-				goto shrink_buffer
-			end
-		end
-	::shrink_buffer::
-		assert(self.next ~= ffi.NULL and self.curr ~= ffi.NULL)
-		assert(now >= self.curr:curr_p());	-- if no w->finish(), == is possible 
-		self.curr:shrink(now - ctx.curr:curr_p())
 	end
+	local r
+	local now, last = curr:curr_p(), curr:last_p()
+	while now < last do
+		-- print(_M.writer[now[0]], now[0], curr:available())
+		local w = ffi.cast(_M.writer[now[0]], now + 1)
+		-- print(w, ffi.string(w.p))
+		local r = w:syscall(self.io)
+		w:sent(r)
+		if w:finish() then
+			-- print(now, w:chunk_size(), last, now + w:chunk_size())
+			now = now + w:chunk_size()
+		else
+			break -- cannot send all buffer
+		end
+	end
+	assert(now >= curr:curr_p());	-- if no w->finish(), == is possible 
+	curr:shrink(now - curr:curr_p())
 end
 function wbuf_index:swap()
 	local tmp = self.curr
@@ -201,6 +221,8 @@ function wbuf_index:swap()
 		-- it means there is no more packet to send at this timing
 		-- calling wbuf_index:do_send from any thread, resumes this yield
 		self.last_cmd = WRITER_NONE
+		self.io:deactivate_write()
+		-- yield is done after exiting swap() call, because it usually called inside mutex lock.
 		return false
 	end
 	return true
@@ -211,12 +233,13 @@ ffi.metatype('luact_wbuf_t', wbuf_mt)
  	create read buf/write buf
 --]]
 function _M.read.new()
-	local p = memory.alloc_fill_typed('luact_rbuf_t')
+	local p = memory.alloc_typed('luact_rbuf_t')
+	p:init()
 	return p
 end
-function _M.write.new()
-	local p = memory.alloc_fill_typed('luact_wbuf_t')
-	p:init()
+function _M.write.new(io)
+	local p = memory.alloc_typed('luact_wbuf_t')
+	p:init(io)
 	return p
 end
 

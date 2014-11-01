@@ -72,9 +72,9 @@ function _M.initialize(mt, startup_at, local_address)
 				t.detail.timestamp_hi = tv / (2 ^ 32)
 				t.detail.timestamp_lo = tv % 0xFFFFFFFF
 			end,
-			__thread_id = function (t) return t.data.thread_id end,
+			__thread_id = function (t) return t.detail.thread_id end,
 			__local_id = function (t) return t.tag.local_id end,
-			__serial = function (t) 
+			__serial = function (t) -- local_id without thread_id
 				return bit.bor(bit.lshift(t:__timestamp(), _M.SERIAL_BIT_SIZE), t.detail.serial)
 			end,
 			__addr = function (t) return t.tag.machine_id end,
@@ -109,6 +109,7 @@ function _M.initialize(mt, startup_at, local_address)
 	_M.node_address = node_address[0]
 	idgen.seed.detail.machine_id = _M.node_address
 	idgen.seed.detail.thread_id = pulpo.thread_id
+	_M.uuid_work.detail.machine_id = _M.node_address
 	-- TODO : register machine_id/ip address pair to consul.
 
 end
@@ -128,7 +129,7 @@ function _M.new()
 	buf.detail.serial = idgen.seed.detail.serial
 	buf:__set_timestamp(msec_timestamp())
 	if _M.DEBUG then
-		logger.info('new uuid:', buf, debug.traceback())
+		logger.info('new uuid:', buf)--, debug.traceback())
 	end
 	return buf
 end
@@ -139,8 +140,19 @@ end
 function _M.owner_of(uuid)
 	return uuid:__addr() == _M.node_address
 end
-function _M.owner_thread_of(uuid)
-	return _M.owner_of(uuid) and uuid:__thread_id() == pulpo.thread_id
+local uuid_work = ffi.new('luact_uuid_t')
+_M.uuid_work = uuid_work
+function _M.owner_thread_of(uuid_local_id)
+	uuid_work.tag.local_id = uuid_local_id
+	return uuid_work:__thread_id() == pulpo.thread_id
+end
+function _M.serial_from_local_id(uuid_local_id)
+	uuid_work.tag.local_id = uuid_local_id
+	return uuid_work:__serial()
+end
+function _M.from_local_id(uuid_local_id)
+	uuid_work.tag.local_id = uuid_local_id
+	return uuid_work
 end
 function _M.free(uuid)
 	idgen:free(uuid)

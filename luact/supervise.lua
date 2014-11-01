@@ -44,10 +44,12 @@ function supervisor_index:start_children()
 end
 
 local function supervisor(ctor, opts, ...)
-	return setmetatable({
+	local sv = setmetatable({
 		ctor = ctor, args = {...}, 
+		children = {}, 
 		opts = opts and setmetatable(opts, _M.opts) or _M.opts,
 	}, supervisor_mt)
+	return sv
 end
 
 -- module function
@@ -58,9 +60,9 @@ end
 		count : how many child will be created (and supervised)
 --]]
 function _M.new(ctor, opts, ...)
-	local sv = actor.new(supervisor, ctor, opts, ...)
-	sv:start_children()
-	return sv
+	local sva = actor.new(supervisor, ctor, opts, ...)
+	sva:start_children()
+	return sva
 end
 
 return setmetatable(_M, {

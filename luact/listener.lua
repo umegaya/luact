@@ -23,7 +23,7 @@ function new_listener(proto, serde, address, opts)
 end
 
 function _M.listen(url, opts)
-	local proto, serde, address = conn.urlparse(url)
+	local proto, serde, address = conn.parse_hostname(url)
 	local ln = lmap[address]
 	if not ln then
 		assert((not ops) or (not opts.internal), exception.new('invalid', 'argument', 
@@ -35,7 +35,7 @@ function _M.listen(url, opts)
 end
 
 function _M.unprotected_listen(url, opts)
-	local proto, serde, address = conn.urlparse(url)
+	local proto, serde, address = conn.parse_hostname(url)
 	local ln = lmap[address]
 	if not ln then
 		if opts then

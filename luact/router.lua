@@ -2,6 +2,7 @@ local msgidgen = require 'luact.msgid'
 local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local uuid = require 'luact.uuid'
+local actor = require 'luact.actor'
 
 local tentacle = require 'pulpo.tentacle'
 
@@ -9,13 +10,19 @@ local _M = {}
 local NOTICE_BIT = 2
 local NOTICE_MASK = bit.lshift(1, NOTICE_BIT)
 local EXCLUDE_NOTICE_MASK = bit.lshift(1, NOTICE_BIT) - 1
-_M.SYS = 0
-_M.CALL = 1
-_M.SEND = 2
-_M.RESPONSE = 3
-_M.NOTICE_SYS = 4
-_M.NOTICE_CALL = 5
-_M.NOTICE_SEND = 6
+
+local KIND_SYS = 0
+local KIND_CALL = 1
+local KIND_SEND = 2
+local KIND_RESPONSE = 3
+
+_M.SYS = KIND_SYS
+_M.CALL = KIND_CALL
+_M.SEND = KIND_SEND
+_M.RESPONSE = KIND_RESPONSE
+_M.NOTICE_SYS = bit.bor(KIND_SYS, NOTICE_MASK)
+_M.NOTICE_CALL = bit.bor(KIND_CALL, NOTICE_MASK)
+_M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 
 local coromap = {}
 
@@ -25,47 +32,51 @@ local MSGID = 3
 local METHOD = 4
 local ARGS = 5
 
+local RESP_MSGID = 2
+local RESP_ARGS = 3
+
 local function dest_assinged_this_thread(msg)
 	return uuid.owner_thread_of(msg[UUID])
 end
 
 function _M.internal(conn, message)
+	logger.notice('router_internal', unpack(message))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
-	if kind == RESPONSE then
-		local msgid = message:msgid()
+	if kind == KIND_RESPONSE then
+		local msgid = message[RESP_MSGID]
 		co = coromap[msgid]
 		if co then
-			coroutine.resume(co, unpack(msg[ARGS]))
+			coroutine.resume(co, unpack(message, RESP_ARGS))
 			coromap[msgid] = nil
 		end
 	elseif dest_assinged_this_thread(message) then
 		if not notice then
-			if kind == SYS then
+			if kind == KIND_SYS then
 				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+					sock:resp(msg[MSGID], actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
 				end, conn, message)
-			elseif kind == CALL then
+			elseif kind == KIND_CALL then
 				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+					sock:resp(msg[MSGID], actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
 				end, conn, message)
-			elseif kind == SEND then
+			elseif kind == KIND_SEND then
 				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg[ARGS])))
+					sock:resp(msg[MSGID], actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
 				end, conn, message)
 			end
 		else
-			if kind == SYS then
+			if kind == KIND_SYS then
 				tentacle(function (msg)
-					actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+					actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg, ARGS))
 				end, message)
-			elseif kind == CALL then
+			elseif kind == KIND_CALL then
 				tentacle(function (msg)
-					actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+					actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg, ARGS))
 				end, message)
-			elseif kind == SEND then
+			elseif kind == KIND_SEND then
 				tentacle(function (msg)
-					actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg[ARGS]))
+					actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg, ARGS))
 				end, message)
 			end
 		end
@@ -89,29 +100,29 @@ function _M.external(conn, message, from_untrusted)
 			return
 		end
 	end
-	if kind == _M.RESPONSE then
-		local msgid = message:msgid()
+	if kind == KIND_RESPONSE then
+		local msgid = message[RESP_MSGID]
 		co = coromap[msgid]
 		if co then
-			coroutine.resume(co, unpack(parsed[ARGS]))
+			coroutine.resume(co, unpack(message, RESP_ARGS))
 			coromap[msgid] = nil
 		end
 	elseif not notice then
-		if kind == _M.CALL then
+		if kind == KIND_CALL then
 			tentacle(function (sock, msg)
 				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS])))
 			end, conn, message)
-		elseif kind == _M.SEND then
+		elseif kind == KIND_SEND then
 			tentacle(function (sock, msg)
 				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS])))
 			end, conn, message)	
 		end
 	else
-		if kind == _M.CALL then
+		if kind == KIND_CALL then
 			tentacle(function (msg)
 				pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS]))
 			end, message)
-		elseif kind == _M.SEND then
+		elseif kind == KIND_SEND then
 			tentacle(function (msg)
 				pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS]))
 			end, message)

@@ -5,6 +5,7 @@ local pulpo = require 'pulpo.init'
 local pbuf = require 'luact.pbuf'
 local read, write = pbuf.read, pbuf.write
 local serde = require 'luact.serde'
+serde.DEBUG = true
 local uuid = require 'luact.uuid'
 local clock = require 'luact.clock'
 local actor = require 'luact.actor'
@@ -18,26 +19,37 @@ local exception = require 'pulpo.exception'
 local memory = require 'pulpo.memory'
 local gen = require 'pulpo.generics'
 local socket = require 'pulpo.socket'
+local event = require 'pulpo.event'
 local linda = pulpo.evloop.io.linda
 
 local _M = (require 'pulpo.package').module('luact.defer.conn_c')
 _M.DEFAULT_SERDE = "serpent"
+_M.DEFAULT_TIMEOUT = 5
 
 ffi.cdef [[
 	typedef struct luact_conn {
+		pulpo_io_t *io;
+		luact_rbuf_t rb;
+		luact_wbuf_t wb;
+		unsigned char serde_id, dead, padd[2];
 		union {
 			pulpo_addrinfo_t buf;
 			struct sockaddr p;
 		} addr;
-		pulpo_io_t *io;
-		luact_wbuf_t *wb;
-		unsigned char serde_id, dead, padd[2];
 	} luact_conn_t;
-	typedef struct luact_local_conn {
-		int thread_id;
-		pulpo_pipe_io_t *io;
-		luact_wbuf_t *wb;
+	typedef struct luact_ext_conn {
+		pulpo_io_t *io;
+		luact_rbuf_t rb;
+		luact_wbuf_t wb;
 		unsigned char serde_id, dead, padd[2];
+		char *hostname;
+	} luact_ext_conn_t;
+	typedef struct luact_local_conn {
+		pulpo_pipe_io_t *io;
+		luact_rbuf_t rb;
+		luact_wbuf_t wb;
+		unsigned char serde_id, dead, padd[2];
+		int thread_id;
 	} luact_local_conn_t;
 ]]
 
@@ -46,88 +58,93 @@ local AF_INET6 = ffi.defs.AF_INET6
 
 
 --[[
- 	remote connection instance and manager
+ 	connection managers (just hash map)
 --]]
--- connection manager (map)
-ffi.cdef(([[
-	typedef struct luact_conn_map {
-		%s list;
-	} luact_conn_map_t;
-]]):format(gen.mutex_ptr(gen.erastic_hash_map('luact_conn_t'))))
-local conn_map_index = {}
-local conn_map_mt = {
-	__index = conn_map_index, 
-	cache = {}
-}
-function conn_map_index.init(t, size)
-	t.list:init(function (data) data:init(size) end)
-end
-function conn_map_index.put(t, k, fn, ...)
-	local r = t.list:touch(function (data, key, ctor, ...)
-		return data:put(key, function (entry, initializer, ...)
-			initializer(entry, ...)
-		end, ctor, ...)
-	-- TODO : create hash map of numerical key version to reduce cost of tostring
-	end, tostring(k), fn)
-	-- update cache
-	rawset(conn_map_mt.cache, k, r)
-end
-function conn_map_index.remove(t, k)
-	t.list:touch(function (data, key)
-		data:remove(key)
-	-- TODO : create hash map of numerical key version to reduce cost of tostring
-	end, tostring(k))
-	-- update cache
-	rawset(conn_map_mt.cache, k, nil)
-end
-function conn_map_index.get(t, k)
-	return rawget(conn_map_mt.cache, k)
-end
-ffi.metatype('luact_conn_map_t', conn_map_mt)
+local cmap, lcmap = {}, {}
+local conn_free_list = {}
+_M.local_cmap = lcmap -- for external use
 
-local cmap = ffi.new('luact_conn_map_t')
-cmap:init(pulpo.poller.config.maxfd)
 
 -- remote conn metatable
 local conn_index  = {}
 local conn_mt = {
 	__index = conn_index,
 }
-local function open_io(url, opts)
-	local proto, sr, address = _M.urlparse(url)
+local function open_io(hostname, opts)
+	local proto, sr, address, user, credential = _M.parse_hostname(hostname)
+	-- TODO : if user and credential is specified, how should we handle these?
 	local p = pulpo.evloop.io[proto]
 	assert(p.connect, exception.new('not_found', 'method', 'connect', proto))
 	return p.connect(address, opts), serde.kind[sr]
 end
-local function start_io(c, internal, sr)
+function conn_index:init_buffer()
+	self.rb:init()
+	self.wb:init()
+end
+function conn_index:start_io(internal, sr)
+	local rev, wev
 	if internal then
-		tentacle(c.read_int, c, sr)
+		rev = tentacle(self.read_int, self, self.io, sr)
 	else
-		tentacle(c.read_ext, c, true, sr)
+		rev = tentacle(self.read_ext, self, self.io, true, sr)
 	end
-	tentacle(c.write, c)
+	wev = tentacle(self.write, self, self.io)
+	tentacle(self.sweeper, self, rev, wev)
 end
-function conn_index:new_internal(addr, opts)
-	-- numeric ipv4 address given
-	url = _M.hostname_of(addr)
-	return self:new(url, opts)
+function conn_index:sweeper(rev, wev)
+	local tp,obj = event.select(nil, rev, wev)
+	-- these 2 line assures another tentacle (read for write/write for read)
+	-- start to finish.
+	self:close()
+	self.io:close()
+	-- CAUTION: we never wait all tentacle related with this connection finished.
+	-- that depend on our conn_index:write, read_int, read_ext implementation, 
+	-- which once io:close called, above coroutine are immediately finished.
+	-- if this fact is changed, please wait for termination of all tentacles.
+	self:destroy('error')
 end
-function conn_index:new(url, opts)
-	self.io,self.serde_id = open_io(url, opts)
+function conn_index:new(machine_ipv4, opts)
+	local hostname = _M.hostname_of(machine_ipv4)
+	self.io,self.serde_id = open_io(hostname, opts)
+	self.dead = 0
 	self:store_peername()
-	start_io(self, opts.internal, serde[self.serde_id])
+	self:start_io(opts.internal, self:serde())
 	return self
 end
 function conn_index:new_server(io, opts)
 	self.io = io
+	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
+	self.dead = 0
 	self:store_peername()
-	start_io(self, opts.internal, serde[serde.kind[opts.serde]])
+	self:start_io(opts.internal, self:serde())
 	return self
 end
-function conn_index:destroy(reason)
-	cmap:remove(self:cmapkey())
+function conn_index:serde()
+	return serde[tonumber(self.serde_id)]
+end
+function conn_index:close()
 	self.dead = 1
-	memory.free(self)
+end
+local function conn_common_destroy(self, reason, map, free_list)
+	if map[self:cmapkey()] ~= self then
+		assert(false, "connection not match:"..tostring(self).." and "..tostring(map[self:cmapkey()]))
+	end
+	if not _M.use_connection_cache then
+		map[self:cmapkey()] = nil
+		self.rb:fin()
+		self.wb:fin()
+		memory.free(self)
+	logger.notice('conn free:', self)
+	else
+		-- TODO : cache conn object (to reduce malloc cost)
+		map[self:cmapkey()] = nil
+		self.rb:reset()
+		self.wb:reset()
+		table.insert(free_list, self)
+	end
+end
+function conn_index:destroy(reason)
+	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
 function conn_index:cmapkey()
 	if self.addr.p.sa_family == AF_INET then
@@ -141,87 +158,88 @@ end
 function conn_index:store_peername()
 	socket.inet_peerbyfd(self.io:fd(), self.addr.p, ffi.sizeof(self.addr.buf))
 end
-function conn_index:read_int(sr)
-	local rb = read.new()
+function conn_index:read_int(io, sr)
+	local rb = self.rb
 	while self.dead ~= 1 do
 		rb:read(io, 1024) 
 		while true do 
-			parsed, err = sr:unpack(rb)
+			local parsed, err = sr:unpack(rb)
 			if not parsed then 
-				if err then
-					io:close()
-					exception.raise('invalid', 'encoding', err)
-				end
+				if err then exception.raise('invalid', 'encoding', err) end
 				break
 			end
 			router.internal(self, parsed)
 		end
 	end
 end
-function conn_index:read_ext(untrusted, sr)
-	local rb = read.new()
+function conn_index:read_ext(io, unstrusted, sr)
+	local rb = self.rb
 	while self.dead ~= 1 do
 		rb:read(io, 1024) 
 		while true do 
-			parsed, err = sr:unpack(rb)
+			local parsed, err = sr:unpack(rb)
 			if not parsed then 
-				if err then
-					io:close()
-					exception.raise('invalid', 'encoding', err)
-				end
+				if err then exception.raise('invalid', 'encoding', err) end
 				break
 			end
 			router.external(self, parsed, untrusted)
 		end
 	end
 end
-function conn_index:write()
-	local wb = write.new()
-	local io = self.io
-	self.wb = wb
+function conn_index:write(io)
+	local wb = self.wb
+	wb:set_io(io)
 	while self.dead ~= 1 do
-		wb:write(io)
+		wb:write()
 	end
 end
-local conn_writer = pbuf.writer.serde
+local conn_writer = assert(pbuf.writer.serde)
 local prefixes = actor.prefixes
-local function common_dispatch(sent, id, t, ...)
+local function common_dispatch(self, sent, id, t, ...)
+	if self.dead ~= 0 then exception.raise('invalid', 'dead connection', tostring(self)) end
 	local args_idx = 1
 	if sent then args_idx = args_idx + 1 end
-	if bit.band(t.flag, prefixes.__sys__) then
+	local timeout = _M.DEFAULT_TIMEOUT
+	if bit.band(t.flag, prefixes.timed_) ~= 0 then
+		timeout = select(args_idx, ...)
+		args_idx = args_idx + 1
+	end
+	if bit.band(t.flag, prefixes.__sys_) ~= 0 then
 		if bit.band(t.flag, prefixes.notify_) then
-			return self:notify_sys(id, t.method, select(args_idx, ...))
-		elseif bit.band(t.flag, prefixes.async_) then
-			return self:async_sys(id, t.method, select(args_idx, ...))
+			self:notify_sys(id, t.method, timeout, select(args_idx, ...))
+		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
+			return self:async_sys(id, t.method, timeout, select(args_idx, ...))
 		else
-			return self:sys(id, t.method, select(args_idx, ...))
+			return self:sys(id, t.method, timeout, select(args_idx, ...))
 		end
 	end
 	if sent then
-		if bit.band(t.flag, prefixes.notify_) then
-			return self:notify_send(id, t.method, select(args_idx, ...))
-		elseif bit.band(t.flag, prefixes.async_) then
-			return self:async_send(id, t.method, select(args_idx, ...))
+		if bit.band(t.flag, prefixes.notify_) ~= 0 then
+			self:notify_send(id, t.method, select(args_idx, ...))
+		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
+			return self:async_send(id, t.method, timeout, select(args_idx, ...))
 		else
-			return self:send(id, t.method, select(args_idx, ...))
+			return self:send(id, t.method, timeout, select(args_idx, ...))
 		end
 	else
-		if bit.band(t.flag, prefixes.notify_) then
-			return self:notify_call(id, t.method, select(args_idx, ...))
-		elseif bit.band(t.flag, prefixes.async_) then
-			return self:async_call(id, t.method, select(args_idx, ...))
+		if bit.band(t.flag, prefixes.notify_) ~= 0 then
+			self:notify_call(id, t.method, select(args_idx, ...))
+		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
+			return self:async_call(id, t.method, timeout, select(args_idx, ...))
 		else
-			return self:call(id, t.method, select(args_idx, ...))	
+			return self:call(id, t.method, timeout, select(args_idx, ...))	
 		end
 	end
 end
 function conn_index:dispatch(t, ...)
-	local r = {common_dispatch(t.uuid == select(1, ...), t.uuid:__serial(), t, ...)}
+	print('dispatch start')
+	local r = {common_dispatch(self, t.uuid == select(1, ...), t.uuid:__local_id(), t, ...)}
+	print('dispatch res:', unpack(r))
 	if not r[1] then error(r[2]) end
 	return unpack(r, 2)
 end
 function conn_index:vdispatch(t, ...)
-	local r = {common_dispatch(t.vid == select(1, ...), t.vid.path, t, ...)}
+	local r = {common_dispatch(self, t.vid == select(1, ...), t.vid.path, t, ...)}
 	if not r[1] then error(r[2]) end
 	return unpack(r, 2)
 end
@@ -245,21 +263,89 @@ function conn_index:sys(serial, method, timeout, ...)
 end
 function conn_index:notify_call(serial, method, ...)
 	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_CALL, serial, msgid, method, ...)
+	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_CALL, serial, method, ...)
 end
 function conn_index:notify_send(serial, method, ...)
 	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SEND, serial, msgid, method, ...)
+	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SEND, serial, method, ...)
 end
 function conn_index:notify_sys(serial, method, ...)
 	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SYS, serial, msgid, method, ...)
+	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SYS, serial, method, ...)
 end
 function conn_index:resp(msgid, ...)
 	self.wb:send(conn_writer, serde[self.serde_id], router.RESPONSE, msgid, ...)
 end
--- attach to ctype
 ffi.metatype('luact_conn_t', conn_mt)
+
+-- create remote connections
+local function allocate_conn()
+	local c = table.remove(conn_free_list)
+	if not c then
+		c = memory.alloc_typed('luact_conn_t')
+		c:init_buffer()
+	end
+	return c
+end
+local function new_internal_conn(machine_id, opts)
+	local c = allocate_conn()
+	c:new(machine_id, opts)
+	cmap[c:cmapkey()] = c
+	return c
+end
+local function new_server_conn(io, opts)
+	local c = allocate_conn()
+	c:new_server(io, opts)
+	if opts.internal and (not cmap[c:cmapkey()]) then
+		-- it is possible that more than 2 connection which has same ip address from external.
+		-- OTOH there is only 1 connection required to communicate other machine in server cluster, 
+		-- only internal connection will be cached.
+		cmap[c:cmapkey()] = c
+	end
+	return c
+end
+
+
+
+--[[
+ 	external connection instance and manager
+--]]
+local ext_conn_index = pulpo.util.copy_table(conn_index)
+local ext_conn_free_list = {}
+local ext_conn_mt = {
+	__index = ext_conn_index,
+}
+function ext_conn_index:new(hostname, opts)
+	self.hostname = memory.strdup(hostname)
+	self.io,self.serde_id = open_io(hostname, opts)
+	self.dead = 0
+	self:start_io(self:serde())
+	return self
+end
+function ext_conn_index:cmapkey()
+	return ffi.string(self.hostname)
+end
+function ext_conn_index:destroy(reason)
+	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
+	memory.free(self.hostname)
+end
+ffi.metatype('luact_ext_conn_t', ext_conn_mt)
+
+-- create external connections
+local function allocate_ext_conn()
+	local c = table.remove(local_conn_free_list)
+	if not c then
+		c = memory.alloc_typed('luact_ext_conn_t')
+		c:init_buffer()
+	end
+	return c
+end
+local function new_external_conn(hostname, opts)
+	local c = allocate_ext_conn()
+	c:new(hostname, opts)
+	cmap[hostname] = c
+	return c
+end
 
 
 
@@ -268,65 +354,50 @@ ffi.metatype('luact_conn_t', conn_mt)
 --]]
 
 -- local conn metatable
-local local_conn_index  = {}
+local local_conn_index = pulpo.util.copy_table(conn_index)
+local local_conn_free_list = {}
 local local_conn_mt = {
 	__index = local_conn_index,
 }
+function local_conn_index:start_io(sr)
+	local rev, web
+	rev = tentacle(self.read_int, self, self.io:reader(), sr)
+	web = tentacle(self.write, self, self.io:writer())
+	tentacle(self.sweeper, self, rev, web)
+end
 function local_conn_index:new_local(thread_id, opts)
 	self.thread_id = thread_id
+	self.dead = 0
+	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.io = linda.new(tostring(thread_id), opts)
-	start_io(self, true, serde.get(opts.serde))
+	self:start_io(self:serde())
 	return self
 end
-function local_conn_index:destroy(reason)
-	lcmap[self.thread_id] = nil
-	self.dead = 1
+function local_conn_index:cmapkey()
+	return tonumber(self.thread_id)
 end
--- same as conn_index's
-local_conn_index.read = conn_index.read
-local_conn_index.write = conn_index.write
-local_conn_index.send = conn_index.send
-
--- attach to ctype
+function local_conn_index:destroy(reason)
+	conn_common_destroy(self, reason, lcmap, local_conn_free_list)
+end
 ffi.metatype('luact_local_conn_t', local_conn_mt)
 
--- local connection manager
-local function new_local_conn(thread_id, opts, cache)
-	local c = memory.alloc_typed('luact_local_conn_t')
-	c:new_local(thread_id, opts)
-	rawset(cache, thread_id, c)
-	return c
-end
-local lcmap = setmetatable({}, {
-	__index = function (t, id)
-		supervise(new_local_conn, id, _M.opts, t)
-		return rawget(t, id)
-	end,
-})
-_M.local_cmap = lcmap
-
-
-
---[[
- 	factory method (remote)
---]]
-local function new_conn(addr, opts)
-	return cmap:put(addr, function (entry, options)
-		entry.data:new(key, options)
-	end, opts)
-end
-local function new_server_conn(io, opts)
-	local c = memory.alloc_typed('luact_conn_t')
-	c:new_server(io, opts)
-	if opts.internal then
-		local tmp = cmap:put(c:cmapkey(), function (entry, server_conn, opts)
-			ffi.copy(entry.data, server_conn)
-		end, io, opts)
-		memory.free(c)
-		c = tmp
+-- create local connections
+local function allocate_local_conn()
+	local c = table.remove(local_conn_free_list)
+	if not c then
+		c = memory.alloc_typed('luact_local_conn_t')
+		c:init_buffer()
 	end
 	return c
 end
+local function new_local_conn(thread_id, opts)
+	local c = allocate_local_conn()
+	c:new_local(thread_id, opts)
+	lcmap[thread_id] = c
+	return c
+end
+
+
 
 --[[
  	module functions
@@ -347,6 +418,7 @@ function _M.initialize(cmdl_args)
 	hostname_buffer[1] = cmdl_args.proto
 	hostname_buffer[3] = (":"..tostring(cmdl_args.port))
 	_M.opts = opts_from_cmdl(cmdl_args)
+	_M.use_connection_cache = cmdl_args.use_connection_cache
 end
 
 -- socket options for created connection
@@ -362,31 +434,36 @@ function _M.get(id)
 	end
 end
 
+-- connect to node in same cluster by its internal ipv4 address
 function _M.get_by_machine_id(machine_id)
-	local c = cmap:get(machine_id)
+	local c = cmap[machine_id]
 	if not c then
-		sv = supervise(new_internal_conn, machine_id, _M.opts)
-		c = cmap:get(url)
+		c = new_internal_conn(machine_id, _M.opts)
 	end
 	return c
 end
 
-function _M.get_by_url(url)
-	local c = cmap:get(url)
+-- connect to node in internet by specified hostname (include scheme like http+json-rpc:// or tcp://)
+function _M.get_by_hostname(hostname)
+	local c = cmap[hostname]
 	if not c then
-		sv = supervise(new_conn, url, _M.opts)
-		c = cmap:get(url)
+		c = new_external_conn(hostname, _M.opts)
 	end
 	return c
 end
+
+-- connect to another thread in same node
 function _M.get_by_thread_id(thread_id)
-	return lcmap[thread_id]
+	local c = lcmap[thread_id]
+	if not c then
+		c = new_local_conn(thread_id, _M.opts)
+	end
+	return c
 end
 
 -- create and cache connection from accepted io 
 function _M.from_io(io, opts)
-	local c = actor.new(new_server_conn, io, opts)
-	return actor.body_of(c)
+	return new_server_conn(io, opts)
 end
 
 return _M

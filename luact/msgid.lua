@@ -31,9 +31,9 @@ end
 
 local seed = ffi.new('luact_msgid_t')
 function _M.new()
-	seed.serial = seed.serial + 1
-	if seed.serial >= MAX_SERIAL_ID then
-		seed.serial = 1
+	seed.detail.serial = seed.detail.serial + 1
+	if seed.detail.serial >= MAX_SERIAL_ID then
+		seed.detail.serial = 1
 	end
 	return seed.value
 end

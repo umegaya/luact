@@ -9,24 +9,26 @@ local _M = (require 'pulpo.package').module('luact.defer.writer_c')
 --[[
 	write commands
 --]]
-local WRITER_NONE = 0
-local WRITER_RAW = 1
-local WRITER_VEC = 2
-_M.WRITER_NONE = WRITER_NONE
+local WRITER_NONE = _M.WRITER_NONE
+local WRITER_RAW = _M.WRITER_RAW
+local WRITER_VEC = _M.WRITER_VEC
+
 
 --[[
 	cdef
 --]]
 ffi.cdef([[
 	typedef struct luact_writer_raw {
-		size_t sz, ofs;
+		luact_bufsize_t sz, ofs;
 		char p[0];
 	} luact_writer_raw_t;
 	typedef struct luact_writer_vec {
-		size_t sz, ofs;
+		luact_bufsize_t sz, ofs;
 		struct iovec p[0];
 	} luact_writer_vec_t;
 ]])
+
+
 
 --[[
  	wbuf writer:raw
@@ -37,23 +39,25 @@ local size_t_size = ffi.sizeof('size_t')
 
 -- before copied into write buff
 writer_raw_index.cmd = WRITER_RAW
-function writer_raw_index.required_size(p, sz)
+function writer_raw_index.required_size(sz)
 	return sz + (2 * size_t_size)
 end
-function writer_raw_index.write(wb, p, sz)
-	local append = wb:reserve_with_cmd(
-		writer_raw_index.required_size(p, sz), WRITER_RAW
-	)
-	local pv = ffi.cast('luact_writer_raw_t', wb.last_p)
+function writer_raw_index.write(buf, append, p, sz)
+	local pv
+	local reqsize = writer_raw_index.required_size(sz)
 	if append then
+		buf:reserve(reqsize)
+		pv = ffi.cast('luact_writer_raw_t*', buf:last_p())
 		ffi.copy(pv.p + p.sz, p, sz)
 		pv.sz = pv.sz + sz
-		return pv.sz
+		buf:use(sz)
 	else 
+		buf:reserve_with_cmd(reqsize, WRITER_RAW)
+		pv = ffi.cast('luact_writer_raw_t*', buf:last_p())
 		ffi.copy(pv.p, p, sz)
 		pv.ofs = 0
 		pv.sz = sz
-		return sz
+		buf:use(ffi.sizeof('luact_writer_raw_t') + sz)
 	end
 end
 -- after copied into write buff
@@ -72,6 +76,8 @@ end
 ffi.metatype('luact_writer_raw_t', writer_raw_mt)
 _M.raw = writer_raw_index
 
+
+
 --[[
  	wbuf writer:vec
 --]]
@@ -79,27 +85,27 @@ local writer_vec_index = {}
 local writer_vec_mt = { __index = writer_vec_index }
 local iovec_size = ffi.sizeof('struct iovec')
 
-
-
 -- before copied into write buff
 writer_vec_index.cmd = WRITER_VEC
-function writer_vec_index.required_size(iov, sz)
+function writer_vec_index.required_size(sz)
 	return (sz * iovec_size) + 1 + (2 * size_t_size)
 end
-function writer_vec_index.write(wb, p, sz)
-	local append = wb:reserve_with_cmd(
-		writer_vec_index.required_size(p, sz), WRITER_VEC
-	)
-	local pv = ffi.cast('luact_writer_vec_t', wb.last_p)
+function writer_vec_index.write(buf, append, p, sz)
+	local pv
+	local reqsize = writer_vec_index.required_size(sz)
 	if append then
+		buf:reserve(reqsize)
+		pv = ffi.cast('luact_writer_vec_t*', buf:last_p())
 		ffi.copy(pv.p + p.sz, p, sz * iovec_size)
 		pv.sz = pv.sz + sz
-		return pv.sz
+		buf:use(sz * iovec_size)
 	else 
-		ffi.copy(pv.p, p, sz)
+		buf:reserve_with_cmd(reqsize, WRITER_VEC)
+		pv = ffi.cast('luact_writer_vec_t*', buf:last_p())
+		ffi.copy(pv.p, p, sz * iovec_size)
 		pv.ofs = 0
 		pv.sz = sz
-		return sz
+		buf:use(ffi.sizeof('luact_writer_vec_t') + (sz * iovec_size))
 	end
 end
 -- after copied into write buff
@@ -128,27 +134,30 @@ ffi.metatype('luact_writer_vec_t', writer_vec_mt)
 _M.vec = writer_vec_index
 
 
+
 --[[
  	wbuf writer:serde
 --]]
 local writer_serde_index = pulpo.util.copy_table(writer_raw_index)
 
-function writer_serde_index.writer(wb, sr, obj)
-	local append = wb:reserve_with_cmd(0, WRITER_RAW)
-	local pv = ffi.cast('luact_writer_raw_t', wb.last_p)
+function writer_serde_index.write(buf, append, sr, ...)
+	local pv, sz
 	if append then
-		pv.sz = pv.sz + sr:pack(obj, pv.p, wb)
+		pv = ffi.cast('luact_writer_raw_t*', buf:last_p())
+		sz = sr:pack(pv.p + pv.sz, buf, ...)
+		pv.sz = pv.sz + sz
+		buf:use(sz)
 	else 
+		buf:reserve_with_cmd(0, WRITER_RAW)
+		pv = ffi.cast('luact_writer_raw_t*', buf:last_p())
 		pv.ofs = 0
-		pv.sz = sr:pack(obj, wb)
+		pv.sz = sr:pack(pv.p, buf, ...)
+		buf:use(ffi.sizeof('luact_writer_raw_t') + pv.sz)
 	end	
-	return pv.sz
 end
 _M.serde = writer_serde_index
 
-_M[WRITER_RAW] = ffi.typeof('luact_writer_raw_t')
-_M[WRITER_VEC] = ffi.typeof('luact_writer_vec_t')
-
-end) -- thread.add_initializer
+_M[WRITER_RAW] = ffi.typeof('luact_writer_raw_t*')
+_M[WRITER_VEC] = ffi.typeof('luact_writer_vec_t*')
 
 return _M

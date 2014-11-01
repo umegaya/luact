@@ -1,17 +1,8 @@
-require 'luact.exlib'
-local pulpo_package = require 'pulpo.package'
--- pulpo_package.DEBUG = true
--- add our defer module dependency to pulpo's packaga system
-local LUACT_BUFFER = pulpo_package.create_runlevel({
-	"luact.defer.writer_c", "luact.defer.pbuf_c",
-})
--- this group depends on LUACT_BUFFER modules.
-local LUACT_IO = pulpo_package.create_runlevel({
-	"luact.defer.conn_c", "luact.defer.clock_c"
-})
+local exlib = require 'luact.exlib'
 
 local pulpo = require 'pulpo.init'
-
+local pulpo_package = require 'pulpo.package'
+-- pulpo_package.DEBUG= true
 local ffi = require 'ffiex.init'
 
 local actor = require 'luact.actor'
@@ -65,10 +56,10 @@ end
 -- module function 
 local _M = {}
 function _M.start(opts, executable)
-	opts.init_proc = (_G.luact and init_worker or init_worker_and_global_ref)
+	opts.init_proc = _G.luact and init_worker or init_worker_and_global_ref
 	pulpo.initialize(opts)
 	-- initialize deferred modules in luact
-	pulpo_package.init_modules(LUACT_BUFFER, LUACT_IO)
+	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- TODO : need to change pulpo configuration from commandline?
 	_M.initialize()
 	pulpo.run(opts, executable)
