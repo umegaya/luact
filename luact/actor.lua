@@ -184,6 +184,9 @@ function _M.new_link_with_id(to, id, ctor, ...)
 	local a = actor_index.new(id)
 	actormap[body] = a
 	bodymap[s] = body
+	if _M.debug then
+		logger.notice('add bodymap', s, body, debug.traceback())
+	end
 	return id
 end
 function _M.register(name, ctor, ...)
@@ -236,27 +239,55 @@ _M.proxy_of = _M.id_of
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
-	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(b[method], b, ...)}
-	if not r[1] then destroy_by_serial(s, r[2]) end
+	if not r[1] then 
+		if not b then 
+			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
+		elseif not b[method] then 
+			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+		else
+			r[2] = exception.new('runtime', r[2])
+		end
+		destroy_by_serial(s, r[2]) 
+	end
 	return unpack(r)
 end
 function _M.dispatch_call(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
-	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(b[method], ...)}
-	if not r[1] then destroy_by_serial(s, r[2]) end
+	if not r[1] then 
+		if not b then 
+			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
+		elseif not b[method] then 
+			for k,v in pairs(b) do
+				print('mnotf', k,v,b,s)
+			end
+			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+		else
+			r[2] = exception.new('runtime', r[2])
+		end
+		destroy_by_serial(s, r[2]) 
+	end
 	return unpack(r)
 end
 function _M.dispatch_sys(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
-	if not b then return nil, exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id))) end
 	local p = actormap[b]
-	if not p then return nil, exception.new('not_found', 'actor', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(p[method], p, b, ...)}
-	if not r[1] then destroy_by_serial(s, r[2]) end
+	if not r[1] then 
+		if not p then 
+			r[2] = exception.new('not_found', 'actor', tostring(uuid.from_local_id(local_id)))
+		elseif not b then 
+			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
+		elseif not b[method] then 
+			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+		else
+			r[2] = exception.new('runtime', r[2])
+		end
+		destroy_by_serial(s, r[2]) 
+	end
 	return unpack(r)
 end
 

@@ -13,6 +13,8 @@ local pbuf = require 'luact.pbuf'
 local router = require 'luact.router'
 local conn = require 'luact.conn'
 
+local _M = {}
+
 -- command line option definitions
 local opts_defs = {
 	{"a", "local_address"},
@@ -28,10 +30,10 @@ local factory = {
 			return t
 		end, tbl)
 	end,
-	["cdata"] = function (tbl, opts)
-		return actor.new(function (t)
-			return t
-		end, tbl)
+	["cdata"] = function (cdata, opts)
+		return actor.new(function (c)
+			return c
+		end, cdata)
 	end,
 	["function"] = function (fn, opts)
 	end,
@@ -54,7 +56,6 @@ end
 
 
 -- module function 
-local _M = {}
 function _M.start(opts, executable)
 	opts.init_proc = _G.luact and init_worker or init_worker_and_global_ref
 	pulpo.initialize(opts)
@@ -89,7 +90,7 @@ function _M.require(module, opts)
 	return from_module(file, opts)
 end
 return setmetatable(_M, {
-	__call = function (t, opts, ...)
-		return assert(factory[type(t)])(t, opts, ...)
+	__call = function (t, target, opts, ...)
+		return assert(factory[type(target)])(target, opts, ...)
 	end
 })

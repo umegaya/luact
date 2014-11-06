@@ -7,7 +7,6 @@ luact.start({
 	local luact = require 'luact.init'
 	local a1 = luact {
 		hoge = function (n)
-		print('hoge: called', n)
 			return 'hoge'..n
 		end,
 	}

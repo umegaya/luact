@@ -232,9 +232,8 @@ local function common_dispatch(self, sent, id, t, ...)
 	end
 end
 function conn_index:dispatch(t, ...)
-	print('dispatch start')
 	local r = {common_dispatch(self, t.uuid == select(1, ...), t.uuid:__local_id(), t, ...)}
-	print('dispatch res:', unpack(r))
+	-- print('dispatch res:', unpack(r))
 	if not r[1] then error(r[2]) end
 	return unpack(r, 2)
 end
