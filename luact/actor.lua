@@ -15,6 +15,12 @@ _M.sys_event = {
 	UNLINK = "unlink",
 }
 
+exception.define('actor_not_found')
+exception.define('actor_body_not_found')
+exception.define('actor_method_not_found')
+exception.define('actor_runtime_error')
+
+
 -- local function
 --[[
 	manages relation of actor
@@ -32,7 +38,7 @@ function actor_index.new(id, event_handler)
 		event = event_handler,
 	}, actor_mt)
 end
-function actor_index:cleanup(reason)
+function actor_index:destroy(reason)
  	for i=#self.links,1,-1 do
 		local link = table.remove(self.links, i)
 		link:notify___sys_event__(_M.sys_event.LINK_DEAD, self.uuid, reason) -- do not wait response
@@ -52,7 +58,7 @@ function actor_index:event__(body, event, ...)
 	end
 	if event == _M.sys_event.LINK_DEAD or event == _M.sys_event.DESTROY then
 		-- by default, if linked actor dead, you also dies.
-		_M.destroy(self.uuid)
+		_M.destroy(self.uuid, "sys_event")
 	elseif event == _M.sys_event.LINK then
 		table.insert(self.links, ({...})[1])
 	elseif event == _M.sys_event.UNLINK then
@@ -108,6 +114,7 @@ local uuid_caller_mt = {
 local methods_cache = {}
 local uuid_metatable = {
 	__index = function (t, k)
+		-- print('uuid__index:', k)
 		local methods = rawget(methods_cache, t:__serial())
 		if not methods then
 			methods = {}
@@ -124,6 +131,7 @@ local uuid_metatable = {
 		return v
 	end,
 	__gc = function (t)
+		-- print('uuid_gc:', t)
 		rawset(methods_cache, t:__serial(), nil)
 		uuid.free(t)
 	end,
@@ -218,16 +226,21 @@ local function destroy_by_serial(s, reason)
 		bodymap[s] = nil
 		local a = actormap[b]
 		if a then
-			a:cleanup(reason)
+			a:destroy(reason)
 			actormap[b] = nil
 		end
-		if b.destroy then
-			b:destroy(reason)
+		if b.__destroy__ then
+			b:__destroy__(reason)
 		end
 	end
 end
+local function safe_destroy_by_serial(s, reason)
+	local ok, r = pcall(destroy_by_serial, s, reason) 
+	if not ok then logger.error('destroy fails:'..tostring(r)) end
+end
 function _M.destroy(id, reason)
-	destroy_by_serial(id:__serial(), reason)
+	local ok, r = pcall(destroy_by_serial, id:__serial(), reason)
+	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
 local function body_of(serial)
 	return bodymap[serial]
@@ -239,35 +252,30 @@ _M.proxy_of = _M.id_of
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
+	if not b then return false, exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(b[method], b, ...)}
 	if not r[1] then 
-		if not b then 
-			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
-		elseif not b[method] then 
-			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+		if not b[method] then 
+			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
 		else
-			r[2] = exception.new('runtime', r[2])
+			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end
-		destroy_by_serial(s, r[2]) 
+		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
 function _M.dispatch_call(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
+	if not b then return false, exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(b[method], ...)}
 	if not r[1] then 
-		if not b then 
-			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
-		elseif not b[method] then 
-			for k,v in pairs(b) do
-				print('mnotf', k,v,b,s)
-			end
-			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+		if not b[method] then 
+			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
 		else
-			r[2] = exception.new('runtime', r[2])
+			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end
-		destroy_by_serial(s, r[2]) 
+		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
@@ -275,18 +283,17 @@ function _M.dispatch_sys(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
 	local p = actormap[b]
+	if not p then return false, exception.new('actor_not_found', tostring(uuid.from_local_id(local_id))) end
 	local r = {pcall(p[method], p, b, ...)}
 	if not r[1] then 
-		if not p then 
-			r[2] = exception.new('not_found', 'actor', tostring(uuid.from_local_id(local_id)))
-		elseif not b then 
-			r[2] = exception.new('not_found', 'actor_body', tostring(uuid.from_local_id(local_id)))
+		if not b then 
+			r[2] = exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id)))
 		elseif not b[method] then 
-			r[2] = exception.new('not_found', 'actor_method', tostring(uuid.from_local_id(local_id)), method)
+			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
 		else
-			r[2] = exception.new('runtime', r[2])
+			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end
-		destroy_by_serial(s, r[2]) 
+		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end

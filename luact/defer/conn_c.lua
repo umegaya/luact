@@ -170,6 +170,7 @@ function conn_index:read_int(io, sr)
 			end
 			router.internal(self, parsed)
 		end
+		rb:shrink_by_hpos()
 	end
 end
 function conn_index:read_ext(io, unstrusted, sr)
@@ -184,6 +185,7 @@ function conn_index:read_ext(io, unstrusted, sr)
 			end
 			router.external(self, parsed, untrusted)
 		end
+		rb:shrink_by_hpos()
 	end
 end
 function conn_index:write(io)
@@ -205,7 +207,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		args_idx = args_idx + 1
 	end
 	if bit.band(t.flag, prefixes.__sys_) ~= 0 then
-		if bit.band(t.flag, prefixes.notify_) then
+		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			self:notify_sys(id, t.method, timeout, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
 			return self:async_sys(id, t.method, timeout, select(args_idx, ...))
@@ -239,41 +241,40 @@ function conn_index:dispatch(t, ...)
 end
 function conn_index:vdispatch(t, ...)
 	local r = {common_dispatch(self, t.vid == select(1, ...), t.vid.path, t, ...)}
-	if not r[1] then error(r[2]) end
+	if not r[1] then 
+		local fn, err = loadstring(r[2])
+		error(err and r[2] or fn()) 
+	end
 	return unpack(r, 2)
 end
 function conn_index:send(serial, method, timeout, ...)
-	-- TODO : apply flag setting
 	local msgid = router.regist(coroutine.running(), timeout)
-	self.wb:send(conn_writer, sr, router.SEND, serial, msgid, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.SEND, serial, msgid, method, ...)
 	return coroutine.yield()
 end
 function conn_index:call(serial, method, timeout, ...)
-	-- TODO : apply flag setting
 	local msgid = router.regist(coroutine.running(), timeout)
-	self.wb:send(conn_writer, serde[self.serde_id], router.CALL, serial, msgid, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.CALL, serial, msgid, method, ...)
 	return coroutine.yield()
 end
 function conn_index:sys(serial, method, timeout, ...)
-	-- TODO : apply flag setting
 	local msgid = router.regist(coroutine.running(), timeout)
-	self.wb:send(conn_writer, serde[self.serde_id], router.SYS, serial, msgid, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.SYS, serial, msgid, method, ...)
 	return coroutine.yield()
 end
 function conn_index:notify_call(serial, method, ...)
-	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_CALL, serial, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.NOTICE_CALL, serial, method, ...)
 end
 function conn_index:notify_send(serial, method, ...)
 	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SEND, serial, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.NOTICE_SEND, serial, method, ...)
 end
 function conn_index:notify_sys(serial, method, ...)
 	-- TODO : apply flag setting
-	self.wb:send(conn_writer, serde[self.serde_id], router.NOTICE_SYS, serial, method, ...)
+	self.wb:send(conn_writer, self:serde(), router.NOTICE_SYS, serial, method, ...)
 end
 function conn_index:resp(msgid, ...)
-	self.wb:send(conn_writer, serde[self.serde_id], router.RESPONSE, msgid, ...)
+	self.wb:send(conn_writer, self:serde(), router.RESPONSE, msgid, ...)
 end
 ffi.metatype('luact_conn_t', conn_mt)
 

@@ -9,16 +9,21 @@ luact.start({
 		hoge = function (n)
 			return 'hoge'..n
 		end,
+		__destroy__ = function (t)
+			logger.report('destroy called')
+		end,			
 	}
 	local a2 = luact.load "./test/tools/test_actor.lua"
-	local a3 = luact.require "ffiex"
+	local a3 = luact.require "serpent"
 
 	assert(a1.hoge(2) == 'hoge2')
 	assert(a2:fuga(3) == 4)
-	a3.cdef[[
-		#define FOO (1)
-	]]
-	assert(a3.defs.FOO == 1)
+	assert(a3.dump({"remote", "serpent"}) == [[do local _={[1]="remote",[2]="serpent"};return _;end]])
+	luact.kill(a1, a2, a3)
+	print('=================== kill actors')
+	local ok, r = pcall(a1.hoge, 2)
+	assert(not ok and (r:is('actor_body_not_found')))
+	luact.stop()
 end)
 
 return true

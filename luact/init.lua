@@ -1,6 +1,7 @@
 local exlib = require 'luact.exlib'
 
 local pulpo = require 'pulpo.init'
+local exception = require 'pulpo.exception'
 local pulpo_package = require 'pulpo.package'
 -- pulpo_package.DEBUG= true
 local ffi = require 'ffiex.init'
@@ -25,21 +26,53 @@ local opts_defs = {
 
 -- local function
 local factory = {
-	["table"] = function (tbl, opts)
+	["table"] = function (tbl)
 		return actor.new(function (t)
 			return t
 		end, tbl)
 	end,
-	["cdata"] = function (cdata, opts)
+	["cdata"] = function (cdata)
 		return actor.new(function (c)
 			return c
 		end, cdata)
 	end,
-	["function"] = function (fn, opts)
+	["function"] = function (fn, ...)
+		return actor.new(fn, ...)
 	end,
-	["file"] = function (file, opts)
+	["string"] = function (str, ...)
+		return actor.new(function (s, ...)
+			if str:find("/") or str:match("%.lua$") then
+				return factory["file"](s, ...)
+			else
+				return factory["module"](s, ...)
+			end
+		end, str, ...)
 	end,
-	["module"] = function (module, opts)
+	["file"] = function (file)
+		return actor.new(function (file)
+			local ok, err = loadfile(file)
+			if err then
+				exception.raise('runtime', err)
+			end
+			return ok()
+		end, file)
+	end,
+	["module"] = function (mod, fallback)
+		return actor.new(function (mod, fback)
+			local ok, r = pcall(require, mod)
+			if not ok then
+				if fback then
+					if os.execute('luarocks install '..fback) ~= 0 then
+						exception.raise('runtime', 'os.execute')
+					end
+					ok, r = pcall(require, mod)
+				end
+			end
+			if not ok then
+				exception.raise('runtime', err)
+			end
+			return r
+		end, mod, fallback)
 	end,
 }
 local from_file, from_module = factory["file"], factory["module"]
@@ -87,7 +120,12 @@ function _M.load(file, opts)
 	return from_file(file, opts)
 end
 function _M.require(module, opts)
-	return from_module(file, opts)
+	return from_module(module, opts)
+end
+function _M.kill(...)
+	for _,act in ipairs({...}) do
+		act:__sys_event__(actor.sys_event.DESTROY)
+	end
 end
 return setmetatable(_M, {
 	__call = function (t, target, opts, ...)

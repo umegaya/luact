@@ -91,10 +91,10 @@ function rbuf_index:reserve(sz)
 	self.buf = buf
 end
 function rbuf_index:reserve_with_cmd(sz, cmd)
-	self:seek_from_last(0)
 	self:reserve(sz + 1)
 	self.buf[self.used] = cmd
 	self.used = self.used + 1
+	self:seek_from_last(0)
 end
 function rbuf_index:read(io, size)
 	self:reserve(size)
@@ -125,10 +125,11 @@ function rbuf_index:start_p()
 	return self.buf
 end
 function rbuf_index:dump()
+	io.write('max,used,hpos: '..tonumber(self.max)..' '..tonumber(self.used)..' '..tonumber(self.hpos)..'\n')
 	io.write('buffer:'..tostring(self.buf))
 	for i=0,tonumber(self.used)-1,1 do
 		io.write(":")
-		io.write(string.format('%02x', self.buf[i]))
+		io.write(string.format('%02x', tonumber(ffi.cast('unsigned char', self.buf[i]))))
 	end
 	io.write('\n')
 end
@@ -139,6 +140,10 @@ function rbuf_index:shrink(sz)
 		self.used = self.used - sz
 		C.memmove(self.buf, self.buf + sz, self.used)
 	end
+end
+function rbuf_index:shrink_by_hpos()
+	self:shrink(self.hpos)
+	self.hpos = 0
 end
 ffi.metatype('luact_rbuf_t', rbuf_mt)
 
@@ -170,18 +175,18 @@ function wbuf_index:set_io(io)
 	self.io = io
 end
 function wbuf_index:send(w, ...)
-	local sz = w.write(self.next, self.last_cmd == w.cmd, ...)
+	w.write(self.next, self.last_cmd == w.cmd, ...)
 	if self.last_cmd == WRITER_NONE then
 		self.io:reactivate_write() -- add edge trigger again.
 		-- so even no actual environment changed, edge trigger should be triggered again.
 	end
 	self.last_cmd = w.cmd
-	return sz
 end
 function wbuf_index:write()
-	local curr = self.curr
-	while curr:available() == 0 do
-		if not self:swap() then
+	-- print('avail:', self.curr:available(), self.next:available())
+	if self.curr:available() == 0 then
+		-- print('swap current:', self.curr, self.next)
+		repeat
 			-- because pulpo's polling always edge triggered, 
 			-- it waits for triggering edged write event caused by calling io:reactivate_write()
 			-- most of case. (see wbuf_index.do_send)
@@ -193,12 +198,13 @@ function wbuf_index:write()
 				return
 			end
 			-- wait until next wbuf_index.do_send called...
-		end
+		until self:swap()
 	end
 	local r
+	local curr = self.curr
 	local now, last = curr:curr_p(), curr:last_p()
 	while now < last do
-		-- print(_M.writer[now[0]], now[0], curr:available())
+		-- print(curr, _M.writer[now[0]], now[0], curr:available())
 		local w = ffi.cast(_M.writer[now[0]], now + 1)
 		-- print(w, ffi.string(w.p))
 		local r = w:syscall(self.io)
@@ -217,6 +223,7 @@ function wbuf_index:swap()
 	local tmp = self.curr
 	self.curr = self.next
 	self.next = tmp
+	self.curr:seek_from_start(0) -- rewind hpos to read from start
 	if self.curr:available() == 0 then
 		-- it means there is no more packet to send at this timing
 		-- calling wbuf_index:do_send from any thread, resumes this yield

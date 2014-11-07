@@ -44,7 +44,7 @@ local idgen = {
 		if #self.availables > 0 then
 			buf = table.remove(self.availables)
 		else
-			buf = ffi.new('luact_uuid_t')
+			buf = ffi.new('luact_uuid_t') -- because wanna use gc
 			buf.detail.machine_id = self.seed.detail.machine_id
 			buf.detail.thread_id = self.seed.detail.thread_id
 		end

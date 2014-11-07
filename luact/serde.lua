@@ -167,24 +167,30 @@ function serpent:pack(ptr, rb, ...)
 	local data = tostring(#str)..":"..str
 	rb:reserve(#data)
 	ffi.copy(ptr, data, #data)
-	if true or _M.debug then
+	if _M.debug then
 		print('packed:', data)
 	end
 	return #data
 end
 function serpent:unpack(rb)
-	local p = rb:curr_p()
-	local sz = 0
-	while true do
+	local sz, len, p = 0, rb:available(), rb:curr_p()
+	while sz < len do
 		if p[sz] ~= (":"):byte() then
 			sz = sz + 1
 		else
 			break
 		end
 	end	
-	local dsz = tonumber(ffi.string(p, sz))
+	if sz <= 0 then
+		-- not enough buffer. keep on reading buffer	
+		return nil
+	end
+	local ok, dsz = pcall(tonumber, ffi.string(p, sz))
+	if not ok then
+		return nil, exception.new('invalid', 'format', ffi.string(p))
+	end
 	if rb:available() < (dsz + 1 + sz) then
-		-- not enough buffer. keep on reading buffer
+		-- not enough buffer. keep on reading buffer	
 		return nil
 	else
 		local fn, err = loadstring(ffi.string(p + sz + 1, dsz))
@@ -193,7 +199,7 @@ function serpent:unpack(rb)
 			return nil, err
 		else
 			-- can have valid record.
-			rb:shrink(sz + 1 + dsz)
+			rb:seek_from_curr(sz + 1 + dsz)
 			return conv:unescape(fn())
 		end
 	end
