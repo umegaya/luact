@@ -1,6 +1,8 @@
 local ffi = require 'ffiex.init'
 local reflect = require 'reflect'
 local socket = require 'pulpo.socket'
+local memory = require 'pulpo.memory'
+local exception = require 'pulpo.exception'
 
 local _M = {}
 local kind = {
@@ -108,6 +110,7 @@ function b2s_conv_index:escape(...)
 	for idx,arg in ipairs({...}) do
 		if type(arg) == "cdata" then
 			local refl = reflect.typeof(arg)
+			-- print('cdata arg:', refl.what, refl.name, tostring(arg))
 			if refl.what == 'int' or refl.what == 'enum' then
 				if refl.unsigned then
 					table.insert(tmp, ffi.string(self:unsigned2ptr(arg, refl), refl.size))
@@ -118,12 +121,16 @@ function b2s_conv_index:escape(...)
 			elseif refl.what == 'float' then
 				table.insert(tmp, ffi.string(self:float2ptr(arg, refl), refl.size))
 				tmp.cdata[idx] = {name = refl.what}
-			elseif refl.what == 'struct' then
+			elseif refl.what == 'struct' or refl.what == 'union' then
 				table.insert(tmp, ffi.string(arg, refl.size))
-				tmp.cdata[idx] = {name = refl.name}
+				tmp.cdata[idx] = {name = refl.what.." "..refl.name}
 			elseif refl.what == 'array' then
 				table.insert(tmp, ffi.string(arg, refl.size))
 				tmp.cdata[idx] = {name = 'array', tp = refl.element_type.name}
+			elseif refl.what == 'ptr' or refl.what == 'ref' then
+				table.insert(tmp, ffi.string(arg, refl.size))
+				local et = refl.element_type
+				tmp.cdata[idx] = {name = 'ptr', tp = et.what.." "..et.name}
 			end
 		else
 			table.insert(tmp, arg)
@@ -132,6 +139,7 @@ function b2s_conv_index:escape(...)
 	return tmp
 end
 function b2s_conv_index:unescape(obj)
+	-- TODO : check obj.le and if endian is not match with this node, do something like ntohs/ntohl/ntohll
 	for idx,tp in pairs(obj.cdata) do
 		if tp.name == 'int' then
 			if tp.unsigned then
@@ -141,7 +149,7 @@ function b2s_conv_index:unescape(obj)
 			end
 		elseif tp.name == 'float' then
 			obj[idx] = self:ptr2float(obj[idx])
-		elseif tp.name == 'array' then
+		elseif tp.name == 'array' or tp.name == 'ptr' then
 			local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
 			ffi.copy(tmp, obj[idx], #obj[idx])
 			obj[idx] = tmp
@@ -159,6 +167,17 @@ local conv = ffi.new('bytearray_scalar_conv_t')
 
 -- serpent
 local sp = require 'serpent'
+local depth = 0
+function exception.serializer(t)
+	depth = depth + 1
+	local esc = ("="):rep(depth)
+	local ok, r = pcall(string.format, 
+		"(require 'pulpo.exception').unserialize([[%s]],[[\n%s]],[%s[%s]%s])", 
+		t.name, t.bt, esc, sp.dump(t.args), esc)
+	depth = depth - 1
+	return ok and r or tostring(t)
+end
+
 local serpent = {}
 _M[kind.serpent] = serpent
 function serpent:pack(ptr, rb, ...)
@@ -167,7 +186,7 @@ function serpent:pack(ptr, rb, ...)
 	local data = tostring(#str)..":"..str
 	rb:reserve(#data)
 	ffi.copy(ptr, data, #data)
-	if _M.debug then
+	if _M.DEBUG then
 		print('packed:', data)
 	end
 	return #data

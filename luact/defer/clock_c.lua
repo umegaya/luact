@@ -10,4 +10,17 @@ function _M.get()
 	return pulpo.util.clock()
 end
 
+function _M.timer(interval, proc, ...)
+	pulpo.tentacle(function (intv, fn, ...)
+		while true do
+			fn(...)
+			_M.sleep(intv)
+		end
+	end, interval, proc, ...)
+end
+
+function _M.alarm(duration)
+	return clock:alarm(duration)
+end
+
 return _M

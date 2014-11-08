@@ -19,6 +19,7 @@ exception.define('actor_not_found')
 exception.define('actor_body_not_found')
 exception.define('actor_method_not_found')
 exception.define('actor_runtime_error')
+exception.define('actor_reply_timeout')
 
 
 -- local function
@@ -105,7 +106,7 @@ local function parse_method_name(name)
 end	
 
 local function uuid_caller_proc(t, ...)
-	local c = conn.get(t.uuid)
+	local c = conn.get(t.id)
 	return c:dispatch(t, ...)
 end
 local uuid_caller_mt = {
@@ -115,24 +116,23 @@ local methods_cache = {}
 local uuid_metatable = {
 	__index = function (t, k)
 		-- print('uuid__index:', k)
-		local methods = rawget(methods_cache, t:__serial())
-		if not methods then
-			methods = {}
-			rawset(methods_cache, t:__serial(), methods)
-		end
-		local v = rawget(methods, k)
-		if not v then
+		local v = rawget(methods_cache, k)
+		if v then
+			if v.id then -- cache exist but in-use
+				-- copy on write
+				v = setmetatable(util.copy_table(v), uuid_caller_mt)
+				rawset(methods_cache, k, v)
+			end
+		else -- cache not exist
 			local name, flag = parse_method_name(k)
-			-- TODO : cache this?
-			-- TODO : need to compare speed with closure generation
-			v = setmetatable({method = name, flag = flag, uuid = t}, uuid_caller_mt)
-			rawset(methods, k, v)
+			v = setmetatable({method = name, flag = flag}, uuid_caller_mt)
+			rawset(methods_cache, k, v)
 		end
+		v.id = t
 		return v
 	end,
 	__gc = function (t)
 		-- print('uuid_gc:', t)
-		rawset(methods_cache, t:__serial(), nil)
 		uuid.free(t)
 	end,
 }
@@ -141,7 +141,7 @@ local uuid_metatable = {
 	make vid cdata itself message-sendable
 --]]
 local function vid_caller_proc(t, ...)
-	local c = conn.get_by_hostname(t.vid.host)
+	local c = conn.get_by_hostname(t.id.host)
 	return c:vdispatch(t, ...)
 end
 local vid_caller_mt = {
@@ -149,12 +149,20 @@ local vid_caller_mt = {
 }
 local vid_metatable = {
 	__index = function (t, k)
-		local name, flag = parse_method_name(k)
-		-- TODO : cache this?
-		-- TODO : need to compare speed with closure generation
-		-- TODO : seems to be directly related with sender variations, like conn:send, conn:call, conn:sys, ... 
-		v = setmetatable({method = name, flag = flag, vid = t}, vid_caller_mt)
-		rawset(t, k, v)
+		local v = rawget(methods_cache, k)
+		-- cache not exist or in-use
+		if v then
+			if v.id then -- cache exist but in-use
+				-- copy on write
+				v = setmetatable(util.copy_table(v), vid_caller_mt)
+				rawset(methods_cache, k, v)
+			end
+		else -- cache not exist
+			local name, flag = parse_method_name(k)
+			v = setmetatable({method = name, flag = flag}, vid_caller_mt)
+			rawset(methods_cache, k, v)
+		end
+		v.id = t
 		return v
 	end,	
 }
@@ -195,6 +203,11 @@ function _M.new_link_with_id(to, id, ctor, ...)
 	if _M.debug then
 		logger.notice('add bodymap', s, body, debug.traceback())
 	end
+	if type(body) == 'cdata' then
+		if (require 'reflect').typeof(body).name == 'luact_uuid' then
+			exception.raise('invalid', 'actor is specified as body at:'..debug.traceback())
+		end
+	end
 	return id
 end
 function _M.register(name, ctor, ...)
@@ -233,6 +246,7 @@ local function destroy_by_serial(s, reason)
 			b:__destroy__(reason)
 		end
 	end
+	logger.warn('actor destroyed by', reason, debug.traceback())
 end
 local function safe_destroy_by_serial(s, reason)
 	local ok, r = pcall(destroy_by_serial, s, reason) 
@@ -245,10 +259,9 @@ end
 local function body_of(serial)
 	return bodymap[serial]
 end
-function _M.id_of(object)
+function _M.of(object)
 	return actormap[object].uuid
 end
-_M.proxy_of = _M.id_of
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)

@@ -25,7 +25,7 @@ function supervisor_index:restart_child(died_actor_id, reason)
 		local now = clock.get()
 		if now - self.first_restart < self.opts.maxt then
 			if self.restart >= self.opts.maxr then
-				actor.destroy(actor.id_of(self))
+				actor.destroy(actor.of(self))
 				return
 			else
 				self.first_restart = now
@@ -34,11 +34,11 @@ function supervisor_index:restart_child(died_actor_id, reason)
 		end
 	end
 	-- TODO : if error caused, this supervisor died. preparing supervisor of supervisors?
-	actor.new_link_with_id(actor.id_of(self), died_actor_id, self.ctor, unpack(self.args))
+	actor.new_link_with_id(actor.of(self), died_actor_id, self.ctor, unpack(self.args))
 end
 function supervisor_index:start_children()
 	while #self.children < self.opts.count do
-		local child = actor.new_link(actor.id_of(self), self.ctor, unpack(self.args))
+		local child = actor.new_link(actor.of(self), self.ctor, unpack(self.args))
 		table.insert(self.children, child)
 	end
 end

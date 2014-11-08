@@ -20,7 +20,6 @@ luact.start({
 	assert(a2:fuga(3) == 4)
 	assert(a3.dump({"remote", "serpent"}) == [[do local _={[1]="remote",[2]="serpent"};return _;end]])
 	luact.kill(a1, a2, a3)
-	print('=================== kill actors')
 	local ok, r = pcall(a1.hoge, 2)
 	assert(not ok and (r:is('actor_body_not_found')))
 	luact.stop()

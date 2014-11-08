@@ -21,11 +21,13 @@ local opts_defs = {
 	{"a", "local_address"},
 	{"t", "startup_at"},
 	{"p", "port"},
+	{nil, "timeout_resolution"},
 	{nil, "proto"},
 }
 
 -- local function
-local factory = {
+local factory 
+factory = {
 	["table"] = function (tbl)
 		return actor.new(function (t)
 			return t
@@ -40,13 +42,11 @@ local factory = {
 		return actor.new(fn, ...)
 	end,
 	["string"] = function (str, ...)
-		return actor.new(function (s, ...)
-			if str:find("/") or str:match("%.lua$") then
-				return factory["file"](s, ...)
-			else
-				return factory["module"](s, ...)
-			end
-		end, str, ...)
+		if str:find("/") or str:match("%.lua$") then
+			return factory["file"](str, ...)
+		else
+			return factory["module"](str, ...)
+		end
 	end,
 	["file"] = function (file)
 		return actor.new(function (file)
@@ -106,6 +106,7 @@ function _M.initialize()
 	conn.initialize(cmdl_args)
 	dht.initialize(cmdl_args)
 	actor.initialize(cmdl_args)
+	router.initialize(cmdl_args)
 
 	local port = tonumber(cmdl_args.port or 8008)
 	local proto = cmdl_args.proto or "tcp"

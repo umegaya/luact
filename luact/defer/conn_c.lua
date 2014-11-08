@@ -12,6 +12,7 @@ local actor = require 'luact.actor'
 local msgidgen = require 'luact.msgid'
 local supervise = require 'luact.supervise'
 local router = require 'luact.router'
+local future = require 'luact.future'
 
 local thread = require 'pulpo.thread'
 local tentacle = require 'pulpo.tentacle'
@@ -198,6 +199,8 @@ end
 local conn_writer = assert(pbuf.writer.serde)
 local prefixes = actor.prefixes
 local function common_dispatch(self, sent, id, t, ...)
+	local r
+	t.id = nil -- release ownership of this table
 	if self.dead ~= 0 then exception.raise('invalid', 'dead connection', tostring(self)) end
 	local args_idx = 1
 	if sent then args_idx = args_idx + 1 end
@@ -208,45 +211,45 @@ local function common_dispatch(self, sent, id, t, ...)
 	end
 	if bit.band(t.flag, prefixes.__sys_) ~= 0 then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
-			self:notify_sys(id, t.method, timeout, select(args_idx, ...))
+			return self:notify_sys(id, t.method, timeout, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return self:async_sys(id, t.method, timeout, select(args_idx, ...))
+			return future.new(tentacle(self.sys, self, id, t.method, timeout, select(args_idx, ...)))
 		else
-			return self:sys(id, t.method, timeout, select(args_idx, ...))
+			r = {self:sys(id, t.method, timeout, select(args_idx, ...))}
+			goto return_value
 		end
 	end
 	if sent then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
-			self:notify_send(id, t.method, select(args_idx, ...))
+			return self:notify_send(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return self:async_send(id, t.method, timeout, select(args_idx, ...))
+			return future.new(tentacle(self.send, self, id, t.method, timeout, select(args_idx, ...)))
 		else
-			return self:send(id, t.method, timeout, select(args_idx, ...))
+			r = {self:send(id, t.method, timeout, select(args_idx, ...))}
+			goto return_value
 		end
 	else
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
-			self:notify_call(id, t.method, select(args_idx, ...))
+			return self:notify_call(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return self:async_call(id, t.method, timeout, select(args_idx, ...))
+			return future.new(tentacle(self.call, self, id, t.method, timeout, select(args_idx, ...)))
 		else
-			return self:call(id, t.method, timeout, select(args_idx, ...))	
+			r = {self:call(id, t.method, timeout, select(args_idx, ...))}
+			goto return_value
 		end
 	end
-end
-function conn_index:dispatch(t, ...)
-	local r = {common_dispatch(self, t.uuid == select(1, ...), t.uuid:__local_id(), t, ...)}
-	-- print('dispatch res:', unpack(r))
+::return_value::
 	if not r[1] then error(r[2]) end
 	return unpack(r, 2)
 end
-function conn_index:vdispatch(t, ...)
-	local r = {common_dispatch(self, t.vid == select(1, ...), t.vid.path, t, ...)}
-	if not r[1] then 
-		local fn, err = loadstring(r[2])
-		error(err and r[2] or fn()) 
-	end
-	return unpack(r, 2)
+function conn_index:dispatch(t, ...)
+	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
+	return common_dispatch(self, t.id == select(1, ...), t.id:__local_id(), t, ...)
 end
+function conn_index:vdispatch(t, ...)
+	return common_dispatch(self, t.id == select(1, ...), t.id.path, t, ...)
+end
+-- normal family
 function conn_index:send(serial, method, timeout, ...)
 	local msgid = router.regist(coroutine.running(), timeout)
 	self.wb:send(conn_writer, self:serde(), router.SEND, serial, msgid, method, ...)
@@ -262,17 +265,17 @@ function conn_index:sys(serial, method, timeout, ...)
 	self.wb:send(conn_writer, self:serde(), router.SYS, serial, msgid, method, ...)
 	return coroutine.yield()
 end
+-- notify faimily 
 function conn_index:notify_call(serial, method, ...)
 	self.wb:send(conn_writer, self:serde(), router.NOTICE_CALL, serial, method, ...)
 end
 function conn_index:notify_send(serial, method, ...)
-	-- TODO : apply flag setting
 	self.wb:send(conn_writer, self:serde(), router.NOTICE_SEND, serial, method, ...)
 end
 function conn_index:notify_sys(serial, method, ...)
-	-- TODO : apply flag setting
 	self.wb:send(conn_writer, self:serde(), router.NOTICE_SYS, serial, method, ...)
 end
+-- response family
 function conn_index:resp(msgid, ...)
 	self.wb:send(conn_writer, self:serde(), router.RESPONSE, msgid, ...)
 end

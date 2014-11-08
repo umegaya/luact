@@ -3,10 +3,13 @@ local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local uuid = require 'luact.uuid'
 local actor = require 'luact.actor'
+local clock = require 'luact.clock'
 
 local tentacle = require 'pulpo.tentacle'
+local exception = require 'pulpo.exception'
 
 local _M = {}
+local debug_log
 local NOTICE_BIT = 2
 local NOTICE_MASK = bit.lshift(1, NOTICE_BIT)
 local EXCLUDE_NOTICE_MASK = bit.lshift(1, NOTICE_BIT) - 1
@@ -25,6 +28,7 @@ _M.NOTICE_CALL = bit.bor(KIND_CALL, NOTICE_MASK)
 _M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 
 local coromap = {}
+local timeout_periods = {}
 
 local KIND = 1
 local UUID = 2
@@ -35,6 +39,10 @@ local ARGS = 5
 local RESP_MSGID = 2
 local RESP_ARGS = 3
 
+local NOTIFY_UUID = 2
+local NOTIFY_METHOD = 3
+local NOTIFY_ARGS = 4
+
 local function dest_assinged_this_thread(msg)
 	return uuid.owner_thread_of(msg[UUID])
 end
@@ -44,12 +52,7 @@ function _M.internal(conn, message)
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if kind == KIND_RESPONSE then
-		local msgid = message[RESP_MSGID]
-		co = coromap[msgid]
-		if co then
-			coroutine.resume(co, unpack(message, RESP_ARGS))
-			coromap[msgid] = nil
-		end
+		_M.respond(message)
 	elseif dest_assinged_this_thread(message) then
 		if not notice then
 			if kind == KIND_SYS then
@@ -68,15 +71,15 @@ function _M.internal(conn, message)
 		else
 			if kind == KIND_SYS then
 				tentacle(function (msg)
-					actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg, ARGS))
+					actor.dispatch_sys(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
 				end, message)
 			elseif kind == KIND_CALL then
 				tentacle(function (msg)
-					actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg, ARGS))
+					actor.dispatch_call(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
 				end, message)
 			elseif kind == KIND_SEND then
 				tentacle(function (msg)
-					actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg, ARGS))
+					actor.dispatch_send(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
 				end, message)
 			end
 		end
@@ -101,12 +104,7 @@ function _M.external(conn, message, from_untrusted)
 		end
 	end
 	if kind == KIND_RESPONSE then
-		local msgid = message[RESP_MSGID]
-		co = coromap[msgid]
-		if co then
-			coroutine.resume(co, unpack(message, RESP_ARGS))
-			coromap[msgid] = nil
-		end
+		_M.respond(message)
 	elseif not notice then
 		if kind == KIND_CALL then
 			tentacle(function (sock, msg)
@@ -120,20 +118,61 @@ function _M.external(conn, message, from_untrusted)
 	else
 		if kind == KIND_CALL then
 			tentacle(function (msg)
-				pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS]))
+				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], unpack(msg[NOTIFY_ARGS]))
 			end, message)
 		elseif kind == KIND_SEND then
 			tentacle(function (msg)
-				pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS]))
+				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], dht[msg[UUID]], unpack(msg[NOTIFY_ARGS]))
 			end, message)
 		end
+	end
+end
+
+function _M.respond(message)
+	local msgid = message[RESP_MSGID]
+	timeout_periods[msgid] = nil
+	co = coromap[msgid]
+	if co then
+		coroutine.resume(co, unpack(message, RESP_ARGS))
+		coromap[msgid] = nil
 	end
 end
 
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
+	if timeout then
+		local nt = clock.get()
+		timeout_periods[msgid] = (timeout + nt)
+		debug_log('msgid=', msgid, 'settimeout', timeout_periods[msgid], timeout, nt)
+	end
 	return msgid
+end
+
+function _M.initialize(cmdl_args)
+	if _M.DEBUG then
+		debug_log = function (...)
+			logger.notice(...)
+		end
+	else
+		debug_log = function (...) end
+	end
+	-- TODO : prepare multiple timeout check queue for shorter timeout duration
+	clock.timer((cmdl_args.timeout_resolution or 1) / 2, function ()
+		local nt = clock.get()
+		for id,tv in pairs(timeout_periods) do
+			debug_log('nt:tv=', nt, tv)
+			if nt > tv then
+				debug_log('msgid=',id,'timeout')
+				local co = coromap[id]
+				if co then
+					coromap[id] = nil
+					coroutine.resume(co, nil, exception.new('actor_reply_timeout'))
+				end
+				timeout_periods[id] = nil
+			end
+		end
+	end)
 end
 
 return _M
