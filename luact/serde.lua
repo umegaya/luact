@@ -3,6 +3,7 @@ local reflect = require 'reflect'
 local socket = require 'pulpo.socket'
 local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
+local writer = require 'luact.writer'
 
 local _M = {}
 local kind = {
@@ -12,6 +13,8 @@ local kind = {
 	protobuf = 4,
 }
 _M.kind = kind
+
+local WRITER_RAW = writer.WRITER_RAW
 
 
 
@@ -122,13 +125,15 @@ function b2s_conv_index:escape(...)
 				table.insert(tmp, ffi.string(self:float2ptr(arg, refl), refl.size))
 				tmp.cdata[idx] = {name = refl.what}
 			elseif refl.what == 'struct' or refl.what == 'union' then
+				-- print('refl.name = ', refl.name, 'size = ', refl.size, ffi.sizeof('struct luact_id_tag'))
 				table.insert(tmp, ffi.string(arg, refl.size))
 				tmp.cdata[idx] = {name = refl.what.." "..refl.name}
 			elseif refl.what == 'array' then
 				table.insert(tmp, ffi.string(arg, refl.size))
 				tmp.cdata[idx] = {name = 'array', tp = refl.element_type.name}
 			elseif refl.what == 'ptr' or refl.what == 'ref' then
-				table.insert(tmp, ffi.string(arg, refl.size))
+				table.insert(tmp, ffi.string(arg, refl.element_type.size))
+				-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size, ffi.sizeof('struct luact_id_tag'))
 				local et = refl.element_type
 				tmp.cdata[idx] = {name = 'ptr', tp = et.what.." "..et.name}
 			end
@@ -167,8 +172,10 @@ local conv = ffi.new('bytearray_scalar_conv_t')
 
 -- serpent
 local sp = require 'serpent'
+local serpent = {}
+
 local depth = 0
-function exception.serializer(t)
+function serpent.serializer(t)
 	depth = depth + 1
 	local esc = ("="):rep(depth)
 	local ok, r = pcall(string.format, 
@@ -178,14 +185,29 @@ function exception.serializer(t)
 	return ok and r or tostring(t)
 end
 
-local serpent = {}
 _M[kind.serpent] = serpent
-function serpent:pack(ptr, rb, ...)
+function serpent:pack(buf, append, ...)
 	logger.notice('packer', ...)
+	exception.serializer = serpent.serializer
 	local str = sp.dump(conv:escape(...))
 	local data = tostring(#str)..":"..str
-	rb:reserve(#data)
-	ffi.copy(ptr, data, #data)
+	local sz, pv = #data, nil
+	if append then
+		buf:reserve(sz)
+		-- pv must get after necessary size allocated. 
+		-- because reserve changed internal pointer of buf
+		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		ffi.copy(pv.p + pv.sz, data, sz)
+		pv.sz = pv.sz + sz
+		buf:use(sz)
+	else 
+		buf:reserve_with_cmd(sz, WRITER_RAW)
+		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		pv.sz = sz
+		pv.ofs = 0
+		ffi.copy(pv.p, data, sz)
+		buf:use(ffi.sizeof('luact_writer_raw_t') + sz)
+	end	
 	if _M.DEBUG then
 		print('packed:', data)
 	end
@@ -228,7 +250,7 @@ end
 local dkjson = require 'dkjson'
 local json = {}
 _M[kind.json] = json
-function json:pack(ptr, rb, ...)
+function json:pack(buf, append, ...)
 end
 function json:unpack(rb)
 end
@@ -237,7 +259,9 @@ end
 local mpk = require 'msgpack'
 local msgpack = {}
 _M[kind.msgpack] = msgpack
-function msgpack:pack(ptr, rb, ...)
+function msgpack:pack(buf, append, ...)
+	-- TODO : it is probably very costly to expand buffer on-demand, 
+	-- (espacially because msgpack packer writes data to buf ptr directly)
 end
 function msgpack:unpack(rb)
 end
@@ -245,7 +269,7 @@ end
 -- protobuf (TODO)
 local protobuf = {}
 _M[kind.protobuf] = protobuf
-function protobuf:pack(ptr, rb, ...)
+function protobuf:pack(buf, append, ...)
 end
 function protobuf:unpack(rb)
 end

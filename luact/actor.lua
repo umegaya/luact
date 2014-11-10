@@ -5,16 +5,14 @@ local vid = require 'luact.vid'
 local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 
-local exception = require 'pulpo.exception'
-
 local _M = {}
-_M.sys_event = {
-	DESTROY = "destroy",
-	LINK_DEAD = "link_dead",
-	LINK = "link",
-	UNLINK = "unlink",
-}
+_M.EVENT_DESTROY = "destroy"
+_M.EVENT_LINK_DEAD = "link_dead"
+_M.EVENT_LINK = "link"
+_M.EVENT_UNLINK = "unlink"
 
+-- exceptions
+local exception = require 'pulpo.exception'
 exception.define('actor_not_found')
 exception.define('actor_body_not_found')
 exception.define('actor_method_not_found')
@@ -31,44 +29,45 @@ local actor_index = {}
 local actor_mt = {
 	__index = actor_index
 }
-function actor_index.new(id, event_handler)
+function actor_index.new(id)
 	-- TODO : allocate from cache if available.
 	return setmetatable({
 		uuid = id,
 		links = {},
-		event = event_handler,
 	}, actor_mt)
 end
 function actor_index:destroy(reason)
  	for i=#self.links,1,-1 do
 		local link = table.remove(self.links, i)
-		link:notify___sys_event__(_M.sys_event.LINK_DEAD, self.uuid, reason) -- do not wait response
+		link:notify___actor_event__(_M.EVENT_LINK_DEAD, self.uuid, reason) -- do not wait response
+ 		-- print('send linkdead to:', link, self, #self.links)
 	end
 	-- TODO : cache this (to reduce GC)
 end
--- called with actor:__sys__event
-function try_to_hook_sys_event(body, event, ...)
-	local ok, r = pcall(body.__sys_event__, body, event, ...)
-	return ok and r
+function actor_index:unlink(unlinked)
+	for idx,link in ipairs(self.links) do
+		if link:equals(unlinked) then
+		-- if link == unlinked then
+			table.remove(self.links, idx)
+			return
+		end
+	end
 end
+-- called with actor:__actor_event__()
 function actor_index:event__(body, event, ...)
-	logger.info('sys_event', self.uuid, body, event, ...)
+	logger.info('actor_event', self.uuid, body, event, ...)
 	-- TODO : test and if that is significantly slow, better way to hook system events.
-	if try_to_hook_sys_event(body, event, ...) then
+	if body.__actor_event__ and body:__actor_event__(self, event, ...) then
 		return
 	end
-	if event == _M.sys_event.LINK_DEAD or event == _M.sys_event.DESTROY then
+	if event == _M.EVENT_LINK_DEAD or event == _M.EVENT_DESTROY then
 		-- by default, if linked actor dead, you also dies.
-		_M.destroy(self.uuid, "sys_event")
-	elseif event == _M.sys_event.LINK then
+		_M.destroy(self.uuid)
+	elseif event == _M.EVENT_LINK then
 		table.insert(self.links, ({...})[1])
-	elseif event == _M.sys_event.UNLINK then
-		local unlinked = ({...})[1]
-		for idx,link in ipairs(self.links) do
-			if link == unlinked then
-				table.remove(self.link, idx)
-			end
-		end
+		-- print('add link:', ({...})[1], self, #self.links)
+	elseif event == _M.EVENT_UNLINK then
+		self:unlink(({...})[1])
 	end
 end
 
@@ -79,7 +78,7 @@ local prefixes = {
 	notify_ 	= 0x00000001,
 	timed_ 		= 0x00000002,
 	async_		= 0x00000004, -- TODO
-	__sys_ 		= 0x00000008,
+	__actor_ 	= 0x00000008,
 }
 _M.prefixes = prefixes
 local patterns = {}
@@ -171,8 +170,8 @@ local vid_metatable = {
 local bodymap = {}
 
 -- module function
-function _M.initialize(cmdl_args)
-	uuid.initialize(uuid_metatable, cmdl_args.startup_at, cmdl_args.local_address)
+function _M.initialize(opts)
+	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
 	vid.initialize(vid_metatable)
 	_M.root = _M.new(function ()
 		return {
@@ -195,9 +194,10 @@ end
 function _M.new_link_with_id(to, id, ctor, ...)
 	id = id or uuid.new()
 	local s = id:__serial()
-	if to then to:sys_event(_M.sys_event.LINK, id) end
-	local body = ctor(...)
+	if to then to:__actor_event__(_M.EVENT_LINK, id) end
 	local a = actor_index.new(id)
+	table.insert(a.links, to)
+	local body = ctor(...)
 	actormap[body] = a
 	bodymap[s] = body
 	if _M.debug then
@@ -209,6 +209,9 @@ function _M.new_link_with_id(to, id, ctor, ...)
 		end
 	end
 	return id
+end
+function _M.monitor(watcher_actor, target_actor)
+
 end
 function _M.register(name, ctor, ...)
 	-- TODO : choose owner thread of this actor
@@ -242,11 +245,11 @@ local function destroy_by_serial(s, reason)
 			a:destroy(reason)
 			actormap[b] = nil
 		end
-		if b.__destroy__ then
-			b:__destroy__(reason)
+		if b.__actor_destroy__ then
+			b:__actor_destroy__(reason)
 		end
+		logger.warn('actor destroyed by', reason or "sys_event", debug.traceback())
 	end
-	logger.warn('actor destroyed by', reason, debug.traceback())
 end
 local function safe_destroy_by_serial(s, reason)
 	local ok, r = pcall(destroy_by_serial, s, reason) 

@@ -141,19 +141,7 @@ _M.vec = writer_vec_index
 local writer_serde_index = pulpo.util.copy_table(writer_raw_index)
 
 function writer_serde_index.write(buf, append, sr, ...)
-	local pv, sz
-	if append then
-		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
-		sz = sr:pack(pv.p + pv.sz, buf, ...)
-		pv.sz = pv.sz + sz
-		buf:use(sz)
-	else 
-		buf:reserve_with_cmd(0, WRITER_RAW)
-		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
-		pv.ofs = 0
-		pv.sz = sr:pack(pv.p, buf, ...)
-		buf:use(ffi.sizeof('luact_writer_raw_t') + pv.sz)
-	end	
+	sr:pack(buf, append, ...)
 end
 _M.serde = writer_serde_index
 

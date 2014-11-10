@@ -209,9 +209,9 @@ local function common_dispatch(self, sent, id, t, ...)
 		timeout = select(args_idx, ...)
 		args_idx = args_idx + 1
 	end
-	if bit.band(t.flag, prefixes.__sys_) ~= 0 then
+	if bit.band(t.flag, prefixes.__actor_) ~= 0 then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
-			return self:notify_sys(id, t.method, timeout, select(args_idx, ...))
+			return self:notify_sys(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
 			return future.new(tentacle(self.sys, self, id, t.method, timeout, select(args_idx, ...)))
 		else
@@ -413,15 +413,11 @@ function _M.hostname_of(id)
 end
 
 -- initialize
-function opts_from_cmdl(cmdl_args)
-	-- NYI
-	return cmdl_args
-end
-function _M.initialize(cmdl_args)
-	hostname_buffer[1] = cmdl_args.proto
-	hostname_buffer[3] = (":"..tostring(cmdl_args.port))
-	_M.opts = opts_from_cmdl(cmdl_args)
-	_M.use_connection_cache = cmdl_args.use_connection_cache
+function _M.initialize(opts)
+	hostname_buffer[1] = opts.proto
+	hostname_buffer[3] = (":"..tostring(opts.port))
+	_M.opts = opts
+	_M.use_connection_cache = opts.use_connection_cache
 end
 
 -- socket options for created connection

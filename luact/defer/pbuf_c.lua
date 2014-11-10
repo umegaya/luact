@@ -63,19 +63,48 @@ function rbuf_index:reserve(sz)
 	if r >= sz then return end
 	if self.buf ~= util.NULL then
 		-- create new ptr object and copy unread buffer into it.
+		local copyb = self.used
+		local newsz = self.max
+		sz = sz + copyb
+		while sz > newsz do newsz = (newsz * 2) end
+		buf = memory.realloc(self.buf, newsz)
+		if not buf then
+			exception.raise('malloc', 'void*', newsz)
+		end
+		logger.report('reserve1 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
+		self.max = newsz
+		self.used = copyb
+	else
+		self.max = INITIAL_BUFFER_SIZE
+		-- now self.buf == NULL, means no self.ofs, self.len. so compare with self.max work fine. 
+		while sz > self.max do self.max = (self.max * 2) end
+		buf = memory.alloc(self.max)
+		if not buf then
+			exception.raise('malloc', 'void*', self.max)
+		end
+	end
+	self.buf = buf
+end
+function rbuf_index:reserve_and_reduce_unsed(sz)
+	local r = self.max - self.used
+	local buf
+	if r >= sz then return end
+	if self.buf ~= util.NULL then
+		-- create new ptr object and copy unread buffer into it.
+		-- also reduce used memory block with self.hpos size (because its already read)
 		local copyb = self.used - self.hpos
 		local newsz = self.max
 		sz = sz + copyb
-		-- print(copyb, sz, org)
 		while sz > newsz do newsz = (newsz * 2) end
 		buf = memory.alloc(newsz)
-		if buf == util.NULL then
+		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
 		self.max = newsz
 		if copyb > 0 then 
 			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
+		logger.report('reserve2 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
 		self.hpos = 0
 		self.used = copyb
 		memory.free(self.buf)
@@ -84,11 +113,11 @@ function rbuf_index:reserve(sz)
 		-- now self.buf == NULL, means no self.ofs, self.len. so compare with self.max work fine. 
 		while sz > self.max do self.max = (self.max * 2) end
 		buf = memory.alloc(self.max)
-		if buf == util.NULL then
+		if not buf then
 			exception.raise('malloc', 'void*', self.max)
 		end
 	end
-	self.buf = buf
+	self.buf = buf	
 end
 function rbuf_index:reserve_with_cmd(sz, cmd)
 	self:reserve(sz + 1)
@@ -97,7 +126,7 @@ function rbuf_index:reserve_with_cmd(sz, cmd)
 	self:seek_from_last(0)
 end
 function rbuf_index:read(io, size)
-	self:reserve(size)
+	self:reserve_and_reduce_unsed(size)
 	self.used = self.used + io:read(self.buf + self.used, size)
 end
 function rbuf_index:available()
@@ -187,6 +216,9 @@ function wbuf_index:write()
 	if self.curr:available() == 0 then
 		-- print('swap current:', self.curr, self.next)
 		repeat
+			-- there should be no unread buffer (because available() == 0)
+			-- TODO : reduce curr buffer size if its too large.
+			self.curr:reset()
 			-- because pulpo's polling always edge triggered, 
 			-- it waits for triggering edged write event caused by calling io:reactivate_write()
 			-- most of case. (see wbuf_index.do_send)
@@ -204,9 +236,9 @@ function wbuf_index:write()
 	local curr = self.curr
 	local now, last = curr:curr_p(), curr:last_p()
 	while now < last do
-		-- print(curr, _M.writer[now[0]], now[0], curr:available())
+		-- curr:dump()
+		-- print('enddump', now, now[0], _M.writer[now[0]], debug.traceback())
 		local w = ffi.cast(_M.writer[now[0]], now + 1)
-		-- print(w, ffi.string(w.p))
 		local r = w:syscall(self.io)
 		w:sent(r)
 		if w:finish() then
@@ -217,7 +249,7 @@ function wbuf_index:write()
 		end
 	end
 	assert(now >= curr:curr_p());	-- if no w->finish(), == is possible 
-	curr:shrink(now - curr:curr_p())
+	curr:seek_from_curr(now - curr:curr_p())
 end
 function wbuf_index:swap()
 	local tmp = self.curr

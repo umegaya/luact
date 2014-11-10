@@ -28,13 +28,18 @@ typedef union luact_uuid {
 	struct luact_id_tag {
 		uint64_t local_id;
 		uint32_t machine_id;
-	} tag;
+	} __attribute__((__packed__)) tag; //force packed to 12byte
 	struct luact_id_tag2 {
 		uint32_t local_id[2];
 		uint32_t machine_id;
 	} tag2;
 } luact_uuid_t;
 ]]):format(_M.THREAD_BIT_SIZE, _M.SERIAL_BIT_SIZE, _M.TIMESTAMP_BIT_SIZE - 32))
+
+assert(ffi.sizeof('struct luact_id_detail') == 12)
+assert(ffi.sizeof('struct luact_id_tag2') == 12)
+assert(ffi.sizeof('struct luact_id_tag') == 12)
+assert(ffi.sizeof('union luact_uuid') == 12)
 
 -- vars
 local idgen = {
@@ -82,6 +87,9 @@ function _M.initialize(mt, startup_at, local_address)
 				local buf = idgen:new()
 				buf.local_id = t.local_id
 				return buf
+			end,
+			equals = function (t, cmp)
+				return t.tag.local_id == cmp.tag.local_id and t.tag.machine_id == cmp.tag.machine_id
 			end,
 		}, mt), 
 		__tostring = function (t)

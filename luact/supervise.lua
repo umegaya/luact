@@ -3,15 +3,17 @@ local clock = require 'luact.clock'
 local _M = {}
 
 local supervisor_index = {}
-local supervisor_mt = {__index = supervisor_index }
+local supervisor_mt = { __index = supervisor_index }
 _M.opts = {
 	maxt = 5.0, maxr = 5, -- torelate 5 failure in 5.0 seconds
 	count = 1,
 	distribute = false,
 }
 -- hook system event
-function supervisor_index:__sys_event__(event, ...)
-	if event == actor.sys_event.LINK_DEAD then
+function supervisor_index:__actor_event__(act, event, ...)
+	-- print('sv event == ', act, event, ...)
+	if event == actor.EVENT_LINK_DEAD then
+		act:unlink(({...})[1])
 		self:restart_child(...)
 		return true -- handled. default behavior will skip
 	end
@@ -41,6 +43,7 @@ function supervisor_index:start_children()
 		local child = actor.new_link(actor.of(self), self.ctor, unpack(self.args))
 		table.insert(self.children, child)
 	end
+	return #self.children == 1 and self.children[1] or self.children
 end
 
 local function supervisor(ctor, opts, ...)
@@ -61,12 +64,11 @@ end
 --]]
 function _M.new(ctor, opts, ...)
 	local sva = actor.new(supervisor, ctor, opts, ...)
-	sva:start_children()
-	return sva
+	return sva:start_children(), sva
 end
 
 return setmetatable(_M, {
-	__call = function (ctor, ...)
+	__call = function (t, ctor, ...)
 		return _M.new(ctor, nil, ...)
 	end,
 })

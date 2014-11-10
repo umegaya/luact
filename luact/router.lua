@@ -149,7 +149,7 @@ function _M.regist(co, timeout)
 	return msgid
 end
 
-function _M.initialize(cmdl_args)
+function _M.initialize(opts)
 	if _M.DEBUG then
 		debug_log = function (...)
 			logger.notice(...)
@@ -158,7 +158,7 @@ function _M.initialize(cmdl_args)
 		debug_log = function (...) end
 	end
 	-- TODO : prepare multiple timeout check queue for shorter timeout duration
-	clock.timer((cmdl_args.timeout_resolution or 1) / 2, function ()
+	clock.timer((opts.timeout_resolution or 1) / 2, function ()
 		local nt = clock.get()
 		for id,tv in pairs(timeout_periods) do
 			debug_log('nt:tv=', nt, tv)

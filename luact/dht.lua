@@ -10,7 +10,7 @@ _M.table = setmetatable({}, {
 	end,
 })
 
-function _M.initialize(cmdl_args)
+function _M.initialize(opts)
 end
 
 return _M
