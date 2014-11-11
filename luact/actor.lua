@@ -284,6 +284,9 @@ local function body_of(serial)
 	return bodymap[serial]
 end
 
+function _M.alive(id)
+	return body_of(uuid.serial(id))
+end
 function _M.destroy(id, reason)
 	local ok, r = pcall(destroy_by_serial, uuid.serial(id), reason)
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
@@ -291,6 +294,7 @@ end
 function _M.of(object)
 	return actormap[object].uuid
 end
+-- only from internal use.
 function _M._set_restart_result(id, result)
 	local s = uuid.serial(id)
 	if result then

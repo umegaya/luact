@@ -25,6 +25,33 @@ function supervisor_index:__actor_event__(act, event, ...)
 		end
 	end
 end
+function supervisor_index:add_restarting_id(add)
+	for idx,id in ipairs(self.restarting) do
+		if uuid.equals(id, add) then
+			return
+		end
+	end
+	table.insert(self.restarting, add)
+end
+function supervisor_index:remove_restarting_id(rem)
+	for idx,id in ipairs(self.restarting) do
+		if uuid.equals(id, rem) then
+			table.remove(self.restarting, idx)
+		end
+	end
+end
+function supervisor_index:clear_uuids()
+	for i=1,#self.restarting,1 do
+		self.restarting[i] = nil
+	end
+	for i=1,#self.children,1 do
+		local id = self.children[i]
+		if _M.DEBUG then logger.warn('set restart failure:', id) end
+		actor._set_restart_result(id, false) -- indicate restart failure
+		self.children[i] = nil
+	end		
+end
+
 local function err_handler(e)
 	return exception.new('actor_runtime_error', e)
 end
@@ -37,12 +64,8 @@ function supervisor_index:restart_child(died_actor_id)
 		local now = clock.get()
 		if now - self.first_restart < self.opts.maxt then
 			if self.restart >= self.opts.maxr then
-				if _M.DEBUG then logger.warn('restart_child fails:', self.restart, self.opts.maxr) end
-				for i=1,#self.restarting,1 do
-					local id = self.restarting[i]
-					actor._set_restart_result(id, false) -- indicate restart failure
-					self.restarting[i] = nil
-				end
+				if _M.DEBUG then logger.warn('restart_child fails:', self.restart, self.opts.maxr, #self.restarting) end
+				self:clear_uuids()
 				actor.destroy(actor.of(self))
 				return
 			end
@@ -51,22 +74,17 @@ function supervisor_index:restart_child(died_actor_id)
 			self.restart = 1
 		end
 	end
-	if _M.DEBUG then logger.warn('restart_child try:', self.restart, died_actor_id) end
-	table.insert(self.restarting, died_actor_id)
+	if _M.DEBUG then logger.warn('restart_child try:', self.restart, died_actor_id, #self.restarting) end
+	self:add_restarting_id(died_actor_id)
 	local supervise_opts = { supervised = true, uuid = died_actor_id }
 	local ok, r = xpcall(actor.new_link_with_opts, err_handler, actor.of(self), supervise_opts, self.ctor, unpack(self.args))
-	if _M.DEBUG then logger.warn('restart_child result:', ok, r) end
+	if _M.DEBUG then logger.warn('restart_child result:', ok, r, self, #self.restarting) end
 	if not ok then
 		-- retry restart.
 		actor.of(self):notify_restart_child(died_actor_id, reason)
 	else -- indicate restart success
 		actor._set_restart_result(died_actor_id, true)
-		for idx,id in ipairs(self.restarting) do
-			if uuid.equals(id, died_actor_id) then
-				table.remove(self.restarting, idx)
-				break
-			end
-		end
+		self:remove_restarting_id(died_actor_id)
 	end
 end
 local supervise_opts = { supervised = true }
