@@ -25,7 +25,7 @@ luact.start({
 	luact.kill(a1, a2, a3)
 	assert(_G.g_destroy)
 	local ok, r = pcall(a1.hoge, 2)
-	assert(not ok and (r:is('actor_body_not_found')))
+	assert(not ok and (r:is('actor_no_body')))
 	luact.stop()
 end)
 

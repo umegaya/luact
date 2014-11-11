@@ -14,12 +14,12 @@ luact.start({
 	print('=========================== iter ================================', i)
 		local ok, r = pcall(a.inc_num, a, err_at)
 		if not ok then
-			if true or r:is('actor_runtime_error') then
+			if r:is('actor_runtime_error') then
 				print('inc_num: scheduled error:', r)
 				-- if not ok, a is restarted by supervisor, so est backto 1 (initial value)
 				est = 1
 			else
-				assert(false, 'unexpected error:'..tostring(r))
+				assert(r:is('actor_temporary_fail'), 'unexpected error:'..tostring(r))
 			end
 		else
 			est = est + 1
@@ -28,7 +28,7 @@ luact.start({
 	assert(a:fuga(0) == est)
 	luact.kill(a)
 	local ok, r = pcall(a.inc_num, a)
-	assert(not ok and r:is('actor_body_not_found'))
+	assert(not ok and r:is('actor_no_body'))
 
 	luact.stop()
 end)

@@ -4,6 +4,7 @@ uuid.DEBUG = true
 local vid = require 'luact.vid'
 local dht = require 'luact.dht'
 local conn = require 'luact.conn'
+local clock = require 'luact.clock'
 
 local _M = {}
 _M.EVENT_DESTROY = "destroy"
@@ -14,10 +15,11 @@ _M.EVENT_UNLINK = "unlink"
 -- exceptions
 local exception = require 'pulpo.exception'
 exception.define('actor_not_found')
-exception.define('actor_body_not_found')
-exception.define('actor_method_not_found')
+exception.define('actor_no_body')
+exception.define('actor_no_method')
 exception.define('actor_runtime_error')
-exception.define('actor_reply_timeout')
+exception.define('actor_timeout')
+exception.define('actor_temporary_fail')
 
 
 -- local function
@@ -29,11 +31,12 @@ local actor_index = {}
 local actor_mt = {
 	__index = actor_index
 }
-function actor_index.new(id)
+function actor_index.new(id, opts)
 	-- TODO : allocate from cache if available.
 	return setmetatable({
 		uuid = id,
 		links = {},
+		supervised = opts.supervised,
 	}, actor_mt)
 end
 function actor_index:destroy(reason)
@@ -42,6 +45,7 @@ function actor_index:destroy(reason)
 		link:notify___actor_event__(_M.EVENT_LINK_DEAD, self.uuid, reason) -- do not wait response
  		-- print('send linkdead to:', link, self, #self.links)
 	end
+	self.supervised = nil
 	-- TODO : cache this (to reduce GC)
 end
 function actor_index:unlink(unlinked)
@@ -60,8 +64,10 @@ function actor_index:event__(body, event, ...)
 	if body.__actor_event__ and body:__actor_event__(self, event, ...) then
 		return
 	end
-	if event == _M.EVENT_LINK_DEAD or event == _M.EVENT_DESTROY then
+	if event == _M.EVENT_LINK_DEAD then
 		-- by default, if linked actor dead, you also dies.
+		_M.destroy(self.uuid)
+	elseif event == _M.EVENT_DESTROY then
 		_M.destroy(self.uuid)
 	elseif event == _M.EVENT_LINK then
 		table.insert(self.links, ({...})[1])
@@ -185,17 +191,18 @@ end
 --[[
 	actor creation/deletion
 --]]
+local default_opts = {}
 function _M.new(ctor, ...)
-	return _M.new_link_with_id(nil, nil, ctor, ...)
+	return _M.new_link_with_opts(nil, default_opts, ctor, ...)
 end
 function _M.new_link(to, ctor, ...)
-	return _M.new_link_with_id(to, nil, ctor, ...)
+	return _M.new_link_with_opts(to, default_opts, ctor, ...)
 end
-function _M.new_link_with_id(to, id, ctor, ...)
-	id = id or uuid.new()
+function _M.new_link_with_opts(to, opts, ctor, ...)
+	local id = opts.uuid or uuid.new()
 	local s = id:__serial()
 	if to then to:__actor_event__(_M.EVENT_LINK, id) end
-	local a = actor_index.new(id)
+	local a = actor_index.new(id, opts)
 	table.insert(a.links, to)
 	local body = ctor(...)
 	actormap[body] = a
@@ -211,7 +218,10 @@ function _M.new_link_with_id(to, id, ctor, ...)
 	return id
 end
 function _M.monitor(watcher_actor, target_actor)
-
+	local w, t = _M.of(watcher_actor), _M.of(target_actor)
+	if not w then exception.raise('not_found', 'watcher_actor') end
+	if not t then exception.raise('not_found', 'target_actor') end
+	table.insert(t.links, w.uuid)
 end
 function _M.register(name, ctor, ...)
 	-- TODO : choose owner thread of this actor
@@ -228,13 +238,14 @@ end
 function _M.unregister(vid)
 end
 --[[
-	create remote actor reference from its name
+	create remote actor reference from its url
 	eg. ssh+json://myservice.com:10000/user/id0001
 --]]
-function _M.ref(name)
-	return vid.new(name)
+function _M.ref(url)
+	return vid.new(url)
 end
 
+local ACTOR_WAIT_RESTART = false
 local function destroy_by_serial(s, reason)
 	local b = bodymap[s]
 	-- body only exists the node which create it.
@@ -242,37 +253,55 @@ local function destroy_by_serial(s, reason)
 		bodymap[s] = nil
 		local a = actormap[b]
 		if a then
+			-- if no reason, force destroy and superviser not works.
+			if reason and a.supervised then
+				-- if restart not finished so long time, at least error causes in supervisor:restart_child.
+				-- then actor._set_restart_result calls. it sets bodymap[s] to nil to reset state
+				bodymap[s] = ACTOR_WAIT_RESTART
+			end
 			a:destroy(reason)
 			actormap[b] = nil
 		end
 		if b.__actor_destroy__ then
 			b:__actor_destroy__(reason)
 		end
-		logger.warn('actor destroyed by', reason or "sys_event", debug.traceback())
+		logger.warn('actor destroyed by', reason or "system", debug.traceback())
 	end
 end
 local function safe_destroy_by_serial(s, reason)
 	local ok, r = pcall(destroy_by_serial, s, reason) 
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
+local function body_of(serial)
+	return bodymap[serial]
+end
+
 function _M.destroy(id, reason)
 	local ok, r = pcall(destroy_by_serial, id:__serial(), reason)
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
-local function body_of(serial)
-	return bodymap[serial]
-end
 function _M.of(object)
 	return actormap[object].uuid
+end
+function _M._set_restart_result(id, result)
+	local s = id:__serial()
+	if result then
+		assert(bodymap[s], exception.new('actor_not_found', id))
+	elseif bodymap[s] == ACTOR_WAIT_RESTART then
+		bodymap[s] = nil -- restart fails, so remove wait restart state.
+	end
 end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
-	if not b then return false, exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id))) end
+	if not b then 
+		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
+		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
+	end
 	local r = {pcall(b[method], b, ...)}
 	if not r[1] then 
 		if not b[method] then 
-			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
+			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
 		else
 			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end
@@ -283,11 +312,14 @@ end
 function _M.dispatch_call(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
-	if not b then return false, exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id))) end
+	if not b then 
+		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
+		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
+	end
 	local r = {pcall(b[method], ...)}
 	if not r[1] then 
 		if not b[method] then 
-			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
+			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
 		else
 			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end
@@ -303,9 +335,10 @@ function _M.dispatch_sys(local_id, method, ...)
 	local r = {pcall(p[method], p, b, ...)}
 	if not r[1] then 
 		if not b then 
-			r[2] = exception.new('actor_body_not_found', tostring(uuid.from_local_id(local_id)))
-		elseif not b[method] then 
-			r[2] = exception.new('actor_method_not_found', tostring(uuid.from_local_id(local_id)), method)
+			local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
+			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
+		elseif not p[method] then 
+			r[2] = exception.new('not_found', p, method)
 		else
 			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
 		end

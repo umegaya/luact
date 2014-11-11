@@ -17,7 +17,7 @@ luact.start({
 
 	local ok, r 
 	ok, r = pcall(b.timed_sleep, b, 0.5, 1.5)
-	assert((not ok) and r:is('actor_reply_timeout'))
+	assert((not ok) and r:is('actor_timeout'))
 	ok, r = pcall(b.timed_sleep, b, 2.5, 1.5)
 	assert(ok and r == 3.0)
 
@@ -28,7 +28,7 @@ luact.start({
 	
 	local f2 = b:async_sleep(1.5)
 	ok, r = f2:get(0.5)
-	assert((not ok) and r:is('actor_reply_timeout'))
+	assert((not ok) and r:is('actor_timeout'))
 	ok, r = f2:get(1.5)
 	assert(ok and r == 3.0)
 

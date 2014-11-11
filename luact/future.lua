@@ -18,7 +18,7 @@ function future_index:unsafe_get(timeout)
 		local alarm = timeout and clock.alarm(timeout) or nil
 		local type,obj = event.select(nil, self.cev, alarm)
 		if obj == alarm then
-			exception.raise('actor_reply_timeout')
+			exception.raise('actor_timeout')
 		end
 	end
 	-- type, eventobject, true or false, return values... or exception object

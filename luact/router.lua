@@ -167,7 +167,7 @@ function _M.initialize(opts)
 				local co = coromap[id]
 				if co then
 					coromap[id] = nil
-					coroutine.resume(co, nil, exception.new('actor_reply_timeout'))
+					coroutine.resume(co, nil, exception.new('actor_timeout'))
 				end
 				timeout_periods[id] = nil
 			end

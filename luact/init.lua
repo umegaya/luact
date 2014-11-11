@@ -123,6 +123,9 @@ end
 function _M.supervise(target, ...)
 	return supervise(assert(factory[type(target)]), target, ...)
 end
+function _M.monitor(watcher, target)
+	actor.monitor(watcher, target)
+end
 function _M.kill(...)
 	for _,act in ipairs({...}) do
 		act:__actor_event__(actor.EVENT_DESTROY)
