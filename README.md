@@ -1,4 +1,4 @@
 luact
 =====
 
-framework for writing robust, scalable network application, heavily inspired by celluloid(ruby) and orleans(.NET).
+framework for writing robust, scalable network application, heavily inspired by celluloid(ruby) and Orleans(.NET).
