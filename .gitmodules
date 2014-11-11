@@ -10,3 +10,9 @@
 [submodule "luact/ext/msgpack"]
 	path = luact/ext/msgpack
 	url = git@github.com:umegaya/lua-MessagePack.git
+[submodule "luact/ext/serpent"]
+	path = luact/ext/serpent
+	url = git@github.com:umegaya/serpent.git
+[submodule "luact/ext/ffi-reflect"]
+	path = luact/ext/ffi-reflect
+	url = git@github.com:umegaya/ffi-reflect.git
