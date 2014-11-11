@@ -244,7 +244,7 @@ local function common_dispatch(self, sent, id, t, ...)
 end
 function conn_index:dispatch(t, ...)
 	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
-	return common_dispatch(self, t.id == select(1, ...), t.id:__local_id(), t, ...)
+	return common_dispatch(self, t.id == select(1, ...), uuid.local_id(t.id), t, ...)
 end
 function conn_index:vdispatch(t, ...)
 	return common_dispatch(self, t.id == select(1, ...), t.id.path, t, ...)
@@ -408,7 +408,7 @@ end
 -- get default hostname to access given actor uuid
 local hostname_buffer = {}
 function _M.hostname_of(id)
-	hostname_buffer[2] = socket.inet_namebyhost(id:__addr())
+	hostname_buffer[2] = socket.inet_namebyhost(uuid.addr(id))
 	return table.concat(hostname_buffer)
 end
 
@@ -427,9 +427,9 @@ _M.opts = false
 -- get (or create) connection to the node which id is exists.
 function _M.get(id)
 	if uuid.owner_of(id) then
-		return _M.get_by_thread_id(id:__thread_id())
+		return _M.get_by_thread_id(uuid.thread_id(id))
 	else
-		return _M.get_by_machine_id(id:__addr())
+		return _M.get_by_machine_id(uuid.addr(id))
 	end
 end
 

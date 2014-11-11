@@ -6,6 +6,8 @@ local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local clock = require 'luact.clock'
 
+-- local util = require 'pulpo.util'
+
 local _M = {}
 _M.EVENT_DESTROY = "destroy"
 _M.EVENT_LINK_DEAD = "link_dead"
@@ -50,7 +52,7 @@ function actor_index:destroy(reason)
 end
 function actor_index:unlink(unlinked)
 	for idx,link in ipairs(self.links) do
-		if link:equals(unlinked) then
+		if uuid.equals(link, unlinked) then
 		-- if link == unlinked then
 			table.remove(self.links, idx)
 			return
@@ -201,7 +203,7 @@ end
 function _M.new_link_with_opts(to, opts, ctor, ...)
 	local body = ctor(...)
 	local id = opts.uuid or uuid.new()
-	local s = id:__serial()
+	local s = uuid.serial(id)
 	if to then 
 		local ok, r = pcall(to.__actor_event__, to, _M.EVENT_LINK, id)
 		if not ok then
@@ -283,14 +285,14 @@ local function body_of(serial)
 end
 
 function _M.destroy(id, reason)
-	local ok, r = pcall(destroy_by_serial, id:__serial(), reason)
+	local ok, r = pcall(destroy_by_serial, uuid.serial(id), reason)
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
 function _M.of(object)
 	return actormap[object].uuid
 end
 function _M._set_restart_result(id, result)
-	local s = id:__serial()
+	local s = uuid.serial(id)
 	if result then
 		assert(bodymap[s], exception.new('actor_not_found', id))
 	elseif bodymap[s] == ACTOR_WAIT_RESTART then

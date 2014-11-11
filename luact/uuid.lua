@@ -68,30 +68,38 @@ local function msec_timestamp()
 end
 
 -- module function 
+function _M.timestamp(t) 
+	return (epoc + bit.lshift(t.detail.timestamp_hi, 32) + t.detail.timestamp_lo) 
+end
+function _M.set_timestamp(t, tv)
+	t.detail.timestamp_hi = tv / (2 ^ 32)
+	t.detail.timestamp_lo = tv % 0xFFFFFFFF
+end
+function _M.thread_id(t) 
+	return t.detail.thread_id 
+end
+function _M.local_id(t) 
+	return t.tag.local_id 
+end
+function _M.serial(t) -- local_id without thread_id
+	return bit.bor(bit.lshift(_M.timestamp(t), _M.SERIAL_BIT_SIZE), t.detail.serial)
+end
+function _M.addr(t) 
+	return t.tag.machine_id 
+end
+function _M.clone(t)
+	local buf = idgen:new()
+	buf.local_id = t.local_id
+	return buf
+end
+function _M.equals(t, cmp)
+	return t.tag.local_id == cmp.tag.local_id and t.tag.machine_id == cmp.tag.machine_id
+end
+
 function _M.initialize(mt, startup_at, local_address)
 	epoc = startup_at and tonumber(startup_at) or math.floor(clock.get() * 1000) -- current time in millis
 	ffi.metatype('luact_uuid_t', {
-		__index = setmetatable({
-			__timestamp = function (t) return (epoc + bit.lshift(t.detail.timestamp_hi, 32) + t.detail.timestamp_lo) end,
-			__set_timestamp = function (t, tv)
-				t.detail.timestamp_hi = tv / (2 ^ 32)
-				t.detail.timestamp_lo = tv % 0xFFFFFFFF
-			end,
-			__thread_id = function (t) return t.detail.thread_id end,
-			__local_id = function (t) return t.tag.local_id end,
-			__serial = function (t) -- local_id without thread_id
-				return bit.bor(bit.lshift(t:__timestamp(), _M.SERIAL_BIT_SIZE), t.detail.serial)
-			end,
-			__addr = function (t) return t.tag.machine_id end,
-			__clone = function (t)
-				local buf = idgen:new()
-				buf.local_id = t.local_id
-				return buf
-			end,
-			equals = function (t, cmp)
-				return t.tag.local_id == cmp.tag.local_id and t.tag.machine_id == cmp.tag.machine_id
-			end,
-		}, mt), 
+		__index = mt.__index, 
 		__tostring = function (t)
 			return _M.tostring(t)
 		end,
@@ -124,18 +132,18 @@ end
 
 function _M.new()
 	if idgen.seed.detail.serial >= _M.MAX_SERIAL_ID then
-		local current = idgen.seed:__timestamp()
+		local current = _M.timestamp(idgen.seed)
 		repeat
 			clock.sleep(0.01)
-			idgen.seed:__set_timestamp(msec_timestamp())
-		until current ~= idgen.seed:__timestamp()
+			_M.set_timestamp(idgen.seed, msec_timestamp())
+		until current ~= _M.timestamp(idgen.seed)
 		idgen.seed.detail.serial = 0
 	else
 		idgen.seed.detail.serial = idgen.seed.detail.serial + 1
 	end
 	local buf = idgen:new()
 	buf.detail.serial = idgen.seed.detail.serial
-	buf:__set_timestamp(msec_timestamp())
+	_M.set_timestamp(buf, msec_timestamp())
 	if _M.DEBUG then
 		logger.info('new uuid:', buf)--, debug.traceback())
 	end
@@ -146,17 +154,17 @@ function _M.from(ptr)
 	return p:__clone()
 end
 function _M.owner_of(uuid)
-	return uuid:__addr() == _M.node_address
+	return _M.addr(uuid) == _M.node_address
 end
 local uuid_work = ffi.new('luact_uuid_t')
 _M.uuid_work = uuid_work
 function _M.owner_thread_of(uuid_local_id)
 	uuid_work.tag.local_id = uuid_local_id
-	return uuid_work:__thread_id() == pulpo.thread_id
+	return _M.thread_id(uuid_work) == pulpo.thread_id
 end
 function _M.serial_from_local_id(uuid_local_id)
 	uuid_work.tag.local_id = uuid_local_id
-	return uuid_work:__serial()
+	return _M.serial(uuid_work)
 end
 function _M.from_local_id(uuid_local_id)
 	uuid_work.tag.local_id = uuid_local_id

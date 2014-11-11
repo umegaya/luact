@@ -1,5 +1,6 @@
 local actor = require 'luact.actor'
 local clock = require 'luact.clock'
+local uuid = require 'luact.uuid'
 local exception = require 'pulpo.exception'
 local _M = {}
 
@@ -61,7 +62,7 @@ function supervisor_index:restart_child(died_actor_id)
 	else -- indicate restart success
 		actor._set_restart_result(died_actor_id, true)
 		for idx,id in ipairs(self.restarting) do
-			if id:equals(died_actor_id) then
+			if uuid.equals(id, died_actor_id) then
 				table.remove(self.restarting, idx)
 				break
 			end

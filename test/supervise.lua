@@ -25,8 +25,15 @@ luact.start({
 			est = est + 1
 		end
 	end
-	clock.sleep(0.5)
-	assert(a:fuga(0) == est)
+	while true do
+		local ok, r = pcall(a.fuga, a, 0)
+		if not ok then
+			assert(r:is('actor_temporary_fail'))
+		else
+			assert(r == est)
+			break
+		end
+	end
 	luact.kill(a)
 	local ok, r = pcall(a.inc_num, a)
 	assert(not ok and r:is('actor_no_body'))
