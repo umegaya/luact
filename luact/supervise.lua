@@ -10,6 +10,7 @@ _M.opts = {
 	count = 1,
 	always = false, 
 }
+local opts_mt = { __index = _M.opts }
 
 -- hook system event
 function supervisor_index:__actor_event__(act, event, ...)
@@ -35,23 +36,28 @@ function supervisor_index:restart_child(died_actor_id)
 		local now = clock.get()
 		if now - self.first_restart < self.opts.maxt then
 			if self.restart >= self.opts.maxr then
-				for idx,id in ipairs(self.restarting) do
+				if _M.DEBUG then logger.warn('restart_child fails:', self.restart, self.opts.maxr) end
+				for i=1,#self.restarting,1 do
+					local id = self.restarting[i]
 					actor._set_restart_result(id, false) -- indicate restart failure
+					self.restarting[i] = nil
 				end
 				actor.destroy(actor.of(self))
 				return
-			else
-				self.first_restart = now
-				self.restart = 1
 			end
+		else
+			self.first_restart = now
+			self.restart = 1
 		end
 	end
+	if _M.DEBUG then logger.warn('restart_child try:', self.restart, died_actor_id) end
 	table.insert(self.restarting, died_actor_id)
 	local supervise_opts = { supervised = true, uuid = died_actor_id }
 	local ok, r = xpcall(actor.new_link_with_opts, err_handler, actor.of(self), supervise_opts, self.ctor, unpack(self.args))
+	if _M.DEBUG then logger.warn('restart_child result:', ok, r) end
 	if not ok then
 		-- retry restart.
-		actor.of(self):restart_child(died_actor_id, reason)
+		actor.of(self):notify_restart_child(died_actor_id, reason)
 	else -- indicate restart success
 		actor._set_restart_result(died_actor_id, true)
 		for idx,id in ipairs(self.restarting) do
@@ -75,7 +81,7 @@ local function supervisor(ctor, opts, ...)
 	local sv = setmetatable({
 		ctor = ctor, args = {...}, 
 		children = {}, restarting = {}, 
-		opts = opts and setmetatable(opts, _M.opts) or _M.opts,
+		opts = opts and setmetatable(opts, opts_mt) or _M.opts,
 	}, supervisor_mt)
 	return sv
 end
@@ -93,7 +99,7 @@ function _M.new(ctor, opts, ...)
 end
 
 return setmetatable(_M, {
-	__call = function (t, ctor, ...)
-		return _M.new(ctor, nil, ...)
+	__call = function (t, ctor, opts, ...)
+		return _M.new(ctor, opts, ...)
 	end,
 })

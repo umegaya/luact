@@ -120,8 +120,8 @@ end
 function _M.require(module)
 	return actor.new(from_module, module, opts)
 end
-function _M.supervise(target, ...)
-	return supervise(assert(factory[type(target)]), target, ...)
+function _M.supervise(target, opts, ...)
+	return supervise(assert(factory[type(target)]), opts, target, ...)
 end
 function _M.monitor(watcher, target)
 	actor.monitor(watcher, target)

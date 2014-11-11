@@ -199,12 +199,18 @@ function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
 end
 function _M.new_link_with_opts(to, opts, ctor, ...)
+	local body = ctor(...)
 	local id = opts.uuid or uuid.new()
 	local s = id:__serial()
-	if to then to:__actor_event__(_M.EVENT_LINK, id) end
+	if to then 
+		local ok, r = pcall(to.__actor_event__, to, _M.EVENT_LINK, id)
+		if not ok then
+		 	if b.__actor_destroy__ then b:__actor_destroy__(r) end
+			error(r)
+		end
+	end
 	local a = actor_index.new(id, opts)
 	table.insert(a.links, to)
-	local body = ctor(...)
 	actormap[body] = a
 	bodymap[s] = body
 	if _M.debug then
@@ -265,7 +271,7 @@ local function destroy_by_serial(s, reason)
 		if b.__actor_destroy__ then
 			b:__actor_destroy__(reason)
 		end
-		logger.warn('actor destroyed by', reason or "system", debug.traceback())
+		logger.warn('actor destroyed by', reason or "system")
 	end
 end
 local function safe_destroy_by_serial(s, reason)
@@ -291,6 +297,9 @@ function _M._set_restart_result(id, result)
 		bodymap[s] = nil -- restart fails, so remove wait restart state.
 	end
 end
+local function err_handler(e)
+	return {debug.traceback(), e}
+end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
@@ -298,12 +307,12 @@ function _M.dispatch_send(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {pcall(b[method], b, ...)}
+	local r = {xpcall(b[method], err_handler, b, ...)}
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
 		else
-			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
+			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
 		end
 		safe_destroy_by_serial(s, r[2]) 
 	end
@@ -316,12 +325,12 @@ function _M.dispatch_call(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {pcall(b[method], ...)}
+	local r = {xpcall(b[method], err_handler, ...)}
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
 		else
-			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
+			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
 		end
 		safe_destroy_by_serial(s, r[2]) 
 	end
@@ -332,7 +341,7 @@ function _M.dispatch_sys(local_id, method, ...)
 	local b = body_of(s)
 	local p = actormap[b]
 	if not p then return false, exception.new('actor_not_found', tostring(uuid.from_local_id(local_id))) end
-	local r = {pcall(p[method], p, b, ...)}
+	local r = {xpcall(p[method], err_handler, p, b, ...)}
 	if not r[1] then 
 		if not b then 
 			local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
@@ -340,7 +349,7 @@ function _M.dispatch_sys(local_id, method, ...)
 		elseif not p[method] then 
 			r[2] = exception.new('not_found', p, method)
 		else
-			r[2] = exception.new('actor_runtime_error', tostring(uuid.from_local_id(local_id)), r[2])
+			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
 		end
 		safe_destroy_by_serial(s, r[2]) 
 	end
