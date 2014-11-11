@@ -5,6 +5,15 @@ env:
   - LUAJIT_VERSION="master" TEST_BIN="luajit test/tools/run.lua" PRELOAD="/usr/local/lib/libjemalloc.so.1 libpthread.so.0"
   - LUAJIT_VERSION="v2.1" TEST_BIN="luajit-2.1.0-alpha test/tools/run.lua" PRELOAD="/usr/local/lib/libjemalloc.so.1 libpthread.so.0"
 
+# Handle git submodules yourself
+git:
+  submodules: false
+
+# Use sed to replace the SSH URL with the public URL, then initialize submodules
+before_install:
+  - sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+  - git submodule update --init --recursive
+
 compiler:
   - gcc
 
@@ -24,4 +33,3 @@ notifications:
   email:
     on_success: change
     on_failure: always
-
