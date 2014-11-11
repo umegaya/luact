@@ -7,6 +7,7 @@
 return function (args, opts_defs, DEBUG)
 	local ret = {}
 	for i=1,#args,1 do
+		print('args:', args[i])
 		local a = args[i]
 		local long, short, v, vv, found
 		long, v = a:match('^%-%-(%w+)=(.*)$')
@@ -30,9 +31,11 @@ return function (args, opts_defs, DEBUG)
 			end
 		end
 ::on_found::
-		local vv = {found[3] and v:match(found[3]) or v}
-		if vv[1] then
-			ret[def[2]] = (found[4] and found[4](unpack(vv)) or vv[1])
+		if found then
+			local vv = {found[3] and v:match(found[3]) or v}
+			if vv[1] then
+				ret[def[2]] = (found[4] and found[4](unpack(vv)) or vv[1])
+			end
 		end
 	end
 	if DEBUG then

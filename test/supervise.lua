@@ -25,6 +25,7 @@ luact.start({
 			est = est + 1
 		end
 	end
+	clock.sleep(0.5)
 	assert(a:fuga(0) == est)
 	luact.kill(a)
 	local ok, r = pcall(a.inc_num, a)
