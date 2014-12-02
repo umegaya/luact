@@ -18,6 +18,9 @@ local supervise = require 'luact.supervise'
 
 local _M = {}
 
+_M.DEFAULT_ROOT_DIR = "/tmp/luact"
+_M.PATH_SEPS = "/"
+
 -- command line option definitions
 local opts_defs = {
 	{"a", "local_address"},
@@ -105,6 +108,7 @@ function _M.initialize(opts)
 	actor.initialize(opts)
 	router.initialize(opts)
 
+	-- initialize listener of internal actor messaging 
 	local port = tonumber(opts.port or 8008)
 	local proto = opts.proto or "tcp"
 	if opts.serde then
@@ -113,6 +117,25 @@ function _M.initialize(opts)
 	listener.unprotected_listen(proto.."://0.0.0.0:"..tostring(port))
 	-- external port should be declared at each startup routine.
 	-- because it is likely to open multiple listener port.
+
+	-- create initial root actor, which can be accessed only need to know its hostname.
+	_M.root_actor = actor.new_root(function (options)
+		local ca = options.consensus_algorithm or "raft"
+		local mediator_module = _M.require('luact.cluster.'..ca).new(options)
+		return {
+			new = actor.new,
+			new_link = actor.new_link,
+			register = actor.register,
+			mediator = function (self)
+				return mediator_module
+			end,
+			stat = function (self)
+				-- TODO : add default stats functions
+				local ret = {}
+				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
+			end,
+		}
+	end, options)
 end
 function _M.load(file)
 	return actor.new(from_file, file, opts)

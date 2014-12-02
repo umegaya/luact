@@ -24,15 +24,14 @@ local event = require 'pulpo.event'
 local linda = pulpo.evloop.io.linda
 
 local _M = (require 'pulpo.package').module('luact.defer.conn_c')
-_M.DEFAULT_SERDE = "serpent"
-_M.DEFAULT_TIMEOUT = 5
 
 ffi.cdef [[
 	typedef struct luact_conn {
 		pulpo_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead, padd[2];
+		unsigned char serde_id, dead
+		unsigned short task_processor_id;
 		union {
 			pulpo_addrinfo_t buf;
 			struct sockaddr p;
@@ -42,14 +41,16 @@ ffi.cdef [[
 		pulpo_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead, padd[2];
+		unsigned char serde_id, dead;
+		unsigned short task_processor_id;
 		char *hostname;
 	} luact_ext_conn_t;
 	typedef struct luact_local_conn {
 		pulpo_pipe_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead, padd[2];
+		unsigned char serde_id, dead;
+		unsigned short task_processor_id;
 		int thread_id;
 	} luact_local_conn_t;
 ]]
@@ -65,6 +66,65 @@ local cmap, lcmap = {}, {}
 local conn_free_list = {}
 _M.local_cmap = lcmap -- for external use
 
+
+-- periodic task
+local conn_tasks_index = {}
+local conn_tasks_mt = {
+	__index = conn_tasks_index,
+}
+function conn_tasks_mt.new(per_processor, interval)
+	return setmetatable({
+		[1] = {}, 
+		alive = true, map = {}, 
+		per_processor = per_processor or 256,
+		interval = interval or 3.0, 
+	}, conn_tasks_mt)
+end
+function conn_tasks_index:add(conn)
+	local list = self[1]
+	if #list > self.per_processor then
+		table.sort(self, function (a, b) return #a < #b end)
+		list = self[1]
+		if #list > self.per_processor then
+			list = {}
+			list.id = (#self + 1)
+			self.map[list.id] = list
+			table.insert(self, list)
+			table.insert(list, conn)
+			conn.task_processor_id = list.id
+			clock.timer(self.interval, self, list)
+			return
+		end
+	end
+	conn.task_processor_id = list.id
+	table.insert(list, conn)
+end
+function conn_tasks_index:remove(conn)
+	local list = self.map[conn.task_processor_id]
+	if not list then
+		return 
+	end
+	for i=1,#list do
+		local c = list[i]
+		if c == conn then
+			table.remove(i)
+			return
+		end
+	end
+end
+function conn_tasks_index:process(conn_list)
+	while self.alive do
+		clock.sleep(self.interval)
+		for i=1,#conn_list,1 do
+			conn_list[i]:task()
+		end
+	end
+end
+local conn_tasks = conn_tasks_mt.new()
+
+
+-- known machine stats
+_M.stats = {}
 
 -- remote conn metatable
 local conn_index  = {}
@@ -82,9 +142,9 @@ function conn_index:init_buffer()
 	self.rb:init()
 	self.wb:init()
 end
-function conn_index:start_io(internal, sr)
+function conn_index:start_io(opts, sr)
 	local rev, wev
-	if internal then
+	if opts.internal then
 		rev = tentacle(self.read_int, self, self.io, sr)
 	else
 		rev = tentacle(self.read_ext, self, self.io, true, sr)
@@ -94,6 +154,8 @@ function conn_index:start_io(internal, sr)
 end
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.select(nil, rev, wev)
+	machine_stats[self:machine_id()] = nil
+	conn_tasks:remove(self)
 	-- these 2 line assures another tentacle (read for write/write for read)
 	-- start to finish.
 	self:close()
@@ -104,12 +166,22 @@ function conn_index:sweeper(rev, wev)
 	-- if this fact is changed, please wait for termination of all tentacles.
 	self:destroy('error')
 end
+function conn_index:tick()
+	-- do keep alive
+	local mid = self:machine_id()
+	local ra = actor.root_actor_of(mid, 1)
+	_M.stats[mid] = ra:stat() -- used as heartbeat message
+	-- TODO : check which thread accept this connection and use corresponding root actor.
+end
 function conn_index:new(machine_ipv4, opts)
 	local hostname = _M.hostname_of(machine_ipv4)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
 	self:store_peername()
-	self:start_io(opts.internal, self:serde())
+	self:start_io(opts, self:serde())
+	if not opts.volatile_connection then
+		conn_tasks:add(self) -- start keeping alive
+	end
 	return self
 end
 function conn_index:new_server(io, opts)
@@ -117,7 +189,7 @@ function conn_index:new_server(io, opts)
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
 	self:store_peername()
-	self:start_io(opts.internal, self:serde())
+	self:start_io(opts, self:serde())
 	return self
 end
 function conn_index:serde()
@@ -147,9 +219,13 @@ end
 function conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
+function conn_index:machine_id()
+	assert(self.addr.p.sa_family == AF_INET)
+	return ffi.cast('struct sockaddr_in*', self.addr.p).sin_addr.in_addr
+end
 function conn_index:cmapkey()
 	if self.addr.p.sa_family == AF_INET then
-		return ffi.cast('struct sockaddr_in*', self.addr.p).sin_addr.in_addr
+		return self:machine_id()
 	elseif self.addr.p.sa_family == AF_INET6 then
 		return socket.inet_namebyhost(self.addr.p)
 	else
@@ -322,7 +398,7 @@ function ext_conn_index:new(hostname, opts)
 	self.hostname = memory.strdup(hostname)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
-	self:start_io(self:serde())
+	self:start_io(opts, self:serde())
 	return self
 end
 function ext_conn_index:cmapkey()
@@ -362,7 +438,7 @@ local local_conn_free_list = {}
 local local_conn_mt = {
 	__index = local_conn_index,
 }
-function local_conn_index:start_io(sr)
+function local_conn_index:start_io(opts, sr)
 	local rev, web
 	rev = tentacle(self.read_int, self, self.io:reader(), sr)
 	web = tentacle(self.write, self, self.io:writer())
@@ -373,7 +449,7 @@ function local_conn_index:new_local(thread_id, opts)
 	self.dead = 0
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.io = linda.new(tostring(thread_id), opts)
-	self:start_io(self:serde())
+	self:start_io(opts, self:serde())
 	return self
 end
 function local_conn_index:cmapkey()

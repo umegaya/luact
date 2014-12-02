@@ -178,16 +178,11 @@ local vid_metatable = {
 local bodymap = {}
 
 -- module function
+local root_actor_id
 function _M.initialize(opts)
 	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
 	vid.initialize(vid_metatable)
-	_M.root = _M.new(function ()
-		return {
-			new = _M.new,
-			new_link = _M.new_link,
-			register = _M.register,
-		}
-	end)
+	root_actor_id = uuid.first()
 end
 
 --[[
@@ -196,6 +191,13 @@ end
 local default_opts = {}
 function _M.new(ctor, ...)
 	return _M.new_link_with_opts(nil, default_opts, ctor, ...)
+end
+function _M.new_root(ctor, ...)
+	local s = uuid.serial(root_actor_id)
+	if bodymap[s] then
+		return actormap[bodymap[s]]
+	end
+	return _M.new_link_with_opts(nil, { uuid = root_actor_id }, ctor, ...)
 end
 function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
@@ -230,6 +232,9 @@ function _M.monitor(watcher_actor, target_actor)
 	if not w then exception.raise('not_found', 'watcher_actor') end
 	if not t then exception.raise('not_found', 'target_actor') end
 	table.insert(t.links, w.uuid)
+end
+function _M.root_actor_of(machine_id, thread_id)
+	return uuid.first(machine_id, thread_id)
 end
 function _M.register(name, ctor, ...)
 	-- TODO : choose owner thread of this actor

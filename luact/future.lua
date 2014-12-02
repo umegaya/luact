@@ -21,7 +21,7 @@ function future_index:unsafe_get(timeout)
 			exception.raise('actor_timeout')
 		end
 	end
-	-- type, eventobject, true or false, return values... or exception object
+	-- type, eventobject, true or false, return values...
 	if self.ret[3] then
 		-- return values... == true, arg1, arg2, ... 
 		return unpack(self.ret, 5) -- return only return value
@@ -32,6 +32,9 @@ function future_index:unsafe_get(timeout)
 end
 function future_index:get(timeout)
 	return pcall(self.unsafe_get, self, timeout)
+end
+function future_index:rawevent()
+	return self.cev
 end
 
 

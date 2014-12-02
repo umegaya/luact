@@ -137,6 +137,14 @@ function _M.respond(message)
 		coromap[msgid] = nil
 	end
 end
+function _M.respond_by_msgid(msgid, ...)
+	timeout_periods[msgid] = nil
+	co = coromap[msgid]
+	if co then
+		coroutine.resume(co, ...)
+		coromap[msgid] = nil
+	end
+end
 
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()

@@ -1,4 +1,5 @@
 local pulpo = require 'pulpo.init'
+local event = require 'pulpo.event'
 local _M = (require 'pulpo.package').module('luact.defer.clock_c')
 local clock = pulpo.evloop.clock.new(0.01, 10)
 
@@ -17,6 +18,14 @@ function _M.timer(interval, proc, ...)
 			_M.sleep(intv)
 		end
 	end, interval, proc, ...)
+end
+
+function _M.ticker(interval)
+	local ticker = event.new()
+	_M.timer(1.0, function (ev)
+		ev:emit('tick')
+	end, ticker)
+	return ticker
 end
 
 function _M.alarm(duration)

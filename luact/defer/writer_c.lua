@@ -141,7 +141,7 @@ _M.vec = writer_vec_index
 local writer_serde_index = pulpo.util.copy_table(writer_raw_index)
 
 function writer_serde_index.write(buf, append, sr, ...)
-	sr:pack(buf, append, ...)
+	sr:pack_packet(buf, append, ...)
 end
 _M.serde = writer_serde_index
 

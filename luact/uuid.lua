@@ -114,10 +114,10 @@ function _M.initialize(mt, startup_at, local_address)
 			v[0] = tonumber(local_address, 16)
 		else
 			local addr = socket.getifaddr(nil, ffi.defs.AF_INET)
+			local af = addr.sa_family
 			-- print(addr, addr.sa_family, ffi.defs.AF_INET, ffi.defs.AF_INET6)
-			assert(addr.sa_family == ffi.defs.AF_INET, 
-				exception.new("invalid", "address", "family", addr.sa_family))
-			v[0] = socket.htonl(ffi.cast('struct sockaddr_in*', addr).sin_addr.s_addr)
+			assert(af == ffi.defs.AF_INET, exception.new("invalid", "address", "family", af))
+			v[0] = socket.numeric_ipv4_addr_from_sockaddr(addr)
 		end
 		logger.notice('node_address:', ('%x'):format(v[0]))
 		return 'uint32_t', v
@@ -149,9 +149,20 @@ function _M.new()
 	end
 	return buf
 end
+function _M.first(machine_id, thread_id)
+	local ret = _M.new()
+	if machine_id then
+		ret.detail.machine_id = machine_id
+	end
+	if thread_id then
+		ret.detail.thread_id = thread_id
+	end
+	ret:set_timestamp(0)
+	ret.detail.serial = 0
+	return ret
+end
 function _M.from(ptr)
-	local p = ffi.cast('luact_uuid_t*', ptr)
-	return p:__clone()
+	return ffi.cast('luact_uuid_t*', ptr)
 end
 function _M.owner_of(uuid)
 	return _M.addr(uuid) == _M.node_address
@@ -172,6 +183,12 @@ function _M.from_local_id(uuid_local_id)
 end
 function _M.free(uuid)
 	idgen:free(uuid)
+end
+function _M.valid(uuid)
+	return _M.addr(uuid) == 0
+end
+function _M.invalidate(uuid)
+	return uuid.detail.machine_id = 0
 end
 
 local sprintf_workmem_size = 32
