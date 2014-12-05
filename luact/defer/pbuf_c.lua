@@ -26,10 +26,6 @@ local INITIAL_BUFFER_SIZE = 1024
 	cdef
 --]]
 ffi.cdef([[
-	typedef struct luact_rbuf {
-		char *buf;
-		luact_bufsize_t max, used, hpos;
-	} luact_rbuf_t;
 	typedef struct luact_wbuf {
 		luact_rbuf_t *curr, *next;
 		luact_rbuf_t rbuf[2];

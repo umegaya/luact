@@ -1,11 +1,13 @@
 local ffi = require 'ffiex.init'
 local C = ffi.C
 
+local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
-local pbuf = require 'pulpo.pbuf'
+local fs = require 'pulpo.fs'
 
+local pbuf = require 'luact.pbuf'
 local db = require 'luact.storage.rocksdb'
 
 local _M = {}
@@ -13,11 +15,15 @@ local _M = {}
 -- cdefs
 ffi.cdef [[
 typedef struct luact_store_rocksdb {
-	const char *dir, *pfx;
+	const char *name;
 	rocksdb_t *db;
 	uint64_t min_idx, max_idx;
 	luact_rbuf_t rb;
 } luact_store_rocksdb_t;
+typedef union luact_logkey_gen {
+	uint64_t ll;
+	uint8_t p[8];
+} luact_logkey_gen_t;
 ]]
 
 -- luact_store_rocksdb
@@ -25,16 +31,24 @@ local store_rocksdb_index = {}
 local store_rocksdb_mt = {
 	__index = store_rocksdb_index
 }
-function store_rocksdb_index:init(dir, pfx, opts)
-	self.dir = memory.strdup(dir)
-	self.pfx = memory.strdup(pfx)
+function store_rocksdb_index:init(dir, name, opts)
+	self.name = memory.strdup(name)
 	self.rb:init()
-	self:open(opts)
+	self:open(dir, name, opts)
 	self.min_idx = 0
 	self.max_idx = 0
 end
+function store_rocksdb_index:fin()
+	self.db:fin()
+	self.rb:fin()
+	memory.free(self.dir)
+	memory.free(self.pfx)
+end
+local logkeygen = ffi.new('luact_logkey_gen_t')
+local logkeysize = ffi.sizeof('luact_logkey_gen_t');
 function store_rocksdb_index:logkey(idx)
-	return util.rawsprintf("%s/%16x", self.pfx, self.last_index + 1)
+	logkeygen.ll = idx
+	return logkeygen.p, logkeysize
 end
 function store_rocksdb_index:state_key()
 	return util.rawsprintf("%s/state", self.pfx)
@@ -51,8 +65,12 @@ function store_rocksdb_index:key_by_kind(kind)
 		exception.raise('invalid', 'objects type', kind)
 	end
 end
-function store_rocksdb_index:open(opts)
-	self.db = db.open(self.dir, opts and db.new_open_opts(opts))
+function store_rocksdb_index:column_family_name()
+	return 'luact_raft_logs'..pulpo.thread_id
+end
+function store_rocksdb_index:open(dir, name, opts)
+	local path = fs.path(dir, name)
+	self.db = db.open(path, opts):column_family(self:column_family_name())
 end
 
 -- interfaces for consensus modules
@@ -80,6 +98,12 @@ function store_rocksdb_index:put_logs(logcache, serde, start_idx, end_idx)
 	local ok, r = pcall(self.unsafe_put_logs, self, txn, logcache, serde, start_idx, end_idx)
 	if ok then
 		txn:commit()
+		if self.min_idx <= 0 then
+			self.min_idx = start_idx
+		end
+		if self.max_idx < end_idx then
+			self.max_idx = end_idx
+		end
 		return true
 	end
 	return nil, r
@@ -98,6 +122,11 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 	local ok, r = pcall(self.unsafe_delete_logs, self, txn, start_idx, end_idx) 
 	if ok then
 		txn:commit()
+		if self.min_idx >= start_idx then
+			self.min_idx = end_idx
+		else
+			logger.error('raft', 'it seems *bug* that delete_logs creates index gap', self.min_idx, start_idx)
+		end
 		return true
 	end
 	return nil, r
@@ -114,13 +143,15 @@ function store_rocksdb_index:get_log(idx, serde)
 	ffi.copy(self.rb:start_p(), p, pl)
 	return serde:unpack(self.rb)
 end
+ffi.metatype('luact_store_rocksdb_t', store_rocksdb_mt)
 
 
 
 -- module functions
-function _M.new(dir, pfx, opts)
+function _M.new(dir, name, opts)
 	local p = memory.alloc_typed('luact_store_rocksdb_t')
-	p:init(dir, id, opts)
+	p:init(dir, name, opts)
 	return p
 end
 
+return _M

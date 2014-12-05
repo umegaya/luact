@@ -50,7 +50,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		-- last log have coroutine object to resume after these logs are accepted.
 		-- (its not necessary for persisted data, so after serde:pack)
 		if i == #logs and msgid then log.msgid = msgid end
-		logcache:append(last_index, log)
+		logcache:put_at(last_index, log)
 	end
 	local ok, r = store:put_logs(logcache, serde, self.last_index, last_index)
 	if not ok then
@@ -109,21 +109,18 @@ local wal_mt = {
 }
 function wal_index:init()
 	self.writer:init()
-	self.writer:write(self.meta, self.serde)
 end
 function wal_index:fin()
 	self.writer:fin()
+	self.store:fin()
 end
 function wal_index:restore(index, fsm)
 	self.writer:restore(self.store, self.serde, index, fsm, self.meta)
 end
 function wal_index:compaction(upto_idx)
-	self.writer:compaction(self.dir, upto_idx)
-	-- write metadata (compaction opens new logfile)
-	self.writer:write(self.meta, self.serde)
 	-- remove in memory log with some margin (because minority node which hasn't replicate old log exists.)
 	if upto_idx > self.opts.log_compaction_margin then
-		self.logs:delete(upto_idx - self.opts.log_compaction_margin)
+		self.writer:compaction(self.dir, upto_idx - self.opts.log_compaction_margin)
 	end
 end
 function wal_index:write(kind, term, logs, msgid)

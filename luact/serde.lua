@@ -111,9 +111,14 @@ end
 local custom_pack = {}
 local custom_unpack = {}
 function b2s_conv_index:escape(...)
+	return self:rawescape(true, ...)
+end
+function b2s_conv_index:rawescape(need_meta, ...)
+	local has_cdata 
 	local tmp = { cdata = {}, le = socket.little_endian() }
 	for idx,arg in ipairs({...}) do
 		if type(arg) == "cdata" then
+			has_cdata = true
 			if custom_pack[ffi.typeof(arg)] then
 				custom_pack[ffi.typeof(arg)](tmp, arg)
 			else
@@ -143,33 +148,31 @@ function b2s_conv_index:escape(...)
 					tmp.cdata[idx] = {name = 'ptr', tp = et.what.." "..et.name}
 				end
 			end
-		elseif type(arg) == 'table' then
-			table.insert(tmp, self:escape(unpack(arg)))
 		else
 			table.insert(tmp, arg)
 		end
 	end
-	return tmp
+	return (need_meta or has_cdata) and tmp or {...}
 end
 function b2s_conv_index:unescape(obj)
 	-- TODO : check obj.le and if endian is not match with this node, do something like ntohs/ntohl/ntohll
 	for idx,tp in pairs(obj.cdata) do
-		if custom_unpack[ffi.typeof(arg)] then
-			obj[idx] = custom_unpack[ffi.typeof(arg)](obj[idx])
-		else
-			if tp.name == 'int' then
-				if tp.unsigned then
-					obj[idx] = self:ptr2unsigned(obj[idx])
-				else
-					obj[idx] = self:ptr2signed(obj[idx])
-				end
-			elseif tp.name == 'float' then
-				obj[idx] = self:ptr2float(obj[idx])
-			elseif tp.name == 'array' or tp.name == 'ptr' then
-				local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
-				ffi.copy(tmp, obj[idx], #obj[idx])
-				obj[idx] = tmp
-			elseif tp.name then
+		if tp.name == 'int' then
+			if tp.unsigned then
+				obj[idx] = self:ptr2unsigned(obj[idx])
+			else
+				obj[idx] = self:ptr2signed(obj[idx])
+			end
+		elseif tp.name == 'float' then
+			obj[idx] = self:ptr2float(obj[idx])
+		elseif tp.name == 'array' or tp.name == 'ptr' then
+			local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
+			ffi.copy(tmp, obj[idx], #obj[idx])
+			obj[idx] = tmp
+		elseif tp.name then
+			if custom_unpack[tp.name] then
+				obj[idx] = custom_unpack[tp.name](obj[idx])
+			else
 				local tmp = memory.alloc_typed(tp.name)
 				ffi.copy(tmp, obj[idx], ffi.sizeof(tp.name))
 				obj[idx] = tmp

@@ -14,6 +14,7 @@ local util = require 'pulpo.util'
 local nevent = util -- for GO style select
 local socket = require 'pulpo.socket'
 local tentacle = require 'pulpo.tentacle'
+local fs = require 'pulpo.fs'
 
 local exception = require 'pulpo.exception'
 exception.define('raft')
@@ -38,10 +39,8 @@ end
 local _M = {}
 local raftmap = {}
 
--- tickers
+-- tick interval
 local tick_intval_sec = 0.05
-local tick_intval_msec = math.floor(1000 * tick_intval_sec)
-local ticker = clock.ticker(0.05)
 
 -- raft object methods
 local raft_index = {}
@@ -51,16 +50,16 @@ local raft_mt = {
 function raft_index:init()
 end
 function raft_index:fin()
-	self.alive = nil
+	state:fin()
 end
 function raft_index:__actor_destroy__()
-	self:fin()
+	self.alive = nil
 end
 function raft_index:election_timeout()
 	-- between x msec ~ 2*x msec
 	return (self.elapsed >= util.random(_M.election_timeout, _M.election_timeout * 2 - 1))
 end
-function raft_index:tick(dms)
+function raft_index:tick()
 	self.elapsed = self.elapsed + 1
 	if self:is_follower() then
 		if self:election_timeout() then
@@ -71,15 +70,11 @@ function raft_index:tick(dms)
 end
 function raft_index:run()
 	self:become_follower() -- become follower first
-	local selector = {
-		[ticker] = function (t)
-			self:tick(tick_intval_msec)
-			return not self.alive 
-		end,
-	}
 	while self.alive do
-		nevent.select(selector)
+		clock.sleep(tick_intval_sec)
+		self:tick()
 	end
+	self:fin()
 end
 function raft_index:start_election()
 	while self.state:is_candidate() do
@@ -90,7 +85,8 @@ function raft_index:start_election()
 		for i=1,#set,1 do
 			table.insert(votes, set[i]:async_request_vote())
 		end
-		local ret = event.wait(clock.alarm(self.election_timeout_sec), unpack(votes))
+		local timeout = math.random(self.election_timeout_sec, self.election_timeout_sec * 2)
+		local ret = event.wait(clock.alarm(timeout), unpack(votes))
 		local grant = 0
 		for i=1,#ret-1 do
 			local r = ret[i]
@@ -99,10 +95,10 @@ function raft_index:start_election()
 			end
 		end
 		if grant >= quorum then
+			self.state:become_leader()
 			break
 		end
 	end
-	self.state:become_leader()
 end
 function raft_index:propose(logs, timeout)
 	local l = self.state:leader()
@@ -157,11 +153,6 @@ function raft_index:apply_log(log)
 	end
 	if log.msgid then
 		router.respond_by_msgid(log.msgid, ok, r)
-	end
-end
-function raft_index:verify_term(received_term)
-	if received_term > self.state:current_term() then
-		self.state:become_follower()
 	end
 end
 --[[--
@@ -291,7 +282,7 @@ local default_opts = {
 	workdir = luact.DEFAULT_ROOT_DIR,
 }
 local function configure_workdir(id, opts)
-	return opts.work_dir..tostring(pulpo.thread_id)..luact.PATH_SEPS..tostring(id)
+	return fs.path(opts.work_dir, tostring(pulpo.thread_id), tostring(id))
 end
 local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]

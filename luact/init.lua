@@ -4,6 +4,7 @@ local pulpo = require 'pulpo.init'
 local exception = require 'pulpo.exception'
 local pulpo_package = require 'pulpo.package'
 local util = require 'pulpo.util'
+local fs = require 'pulpo.fs'
 -- pulpo_package.DEBUG= true
 local ffi = require 'ffiex.init'
 
@@ -18,8 +19,7 @@ local supervise = require 'luact.supervise'
 
 local _M = {}
 
-_M.DEFAULT_ROOT_DIR = "/tmp/luact"
-_M.PATH_SEPS = "/"
+_M.DEFAULT_ROOT_DIR = fs.path("tmp", "luact")
 
 -- command line option definitions
 local opts_defs = {
@@ -121,7 +121,7 @@ function _M.initialize(opts)
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
 		local ca = options.consensus_algorithm or "raft"
-		local mediator_module = _M.require('luact.cluster.'..ca).new(options)
+		-- local mediator_module = _M.require('luact.cluster.'..ca).new(options)
 		return {
 			new = actor.new,
 			new_link = actor.new_link,
@@ -135,7 +135,7 @@ function _M.initialize(opts)
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
 			end,
 		}
-	end, options)
+	end, opts)
 end
 function _M.load(file)
 	return actor.new(from_file, file, opts)

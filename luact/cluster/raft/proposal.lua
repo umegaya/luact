@@ -57,9 +57,8 @@ end
 local function proposal_list_realloc(p, size)
 	return ffi.cast('luact_raft_proposal_list_t*', memory.realloc(p, proposal_list_size(size)))
 end
-function proposal_list_index:copy(spos, epos, offset)
-	-- epos < spos. copy states[0] ~ states[epos] + to state[spos + 1] ~ state[spos + epos + 1]
-	memory.move(self.states + spos + 1, self.states, ffi.sizeof('luact_raft_proposal_state_t') * (epos + 1))
+function ringbuf_store_index:copy(src_store, src_pos, dst_pos)
+	self.states[dst_pos] = src_store.states[src_pos]
 end
 function proposal_list_index:realloc(size)
 	return proposal_list_realloc(self, size)

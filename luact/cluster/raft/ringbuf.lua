@@ -1,6 +1,7 @@
 local ffi = require 'ffiex.init'
 local C = ffi.C
 
+local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
 
 local _M = {}
@@ -20,15 +21,19 @@ local ringbuf_store_mt = {
 function ringbuf_store_index:fin()
 end
 function ringbuf_store_index:realloc()
+	return self
 end
 function ringbuf_store_index:delete(i)
 	self[i] = nil
 end
-function ringbuf_store_index:copy(spos, epos, offset)
+function ringbuf_store_index:copy(src_store, src_pos, dst_pos)
 	-- +1 for lua array index
-	for i=spos+1,epos+1 do
-		self[offset + i] = logs[i]
-		self:delete(i)
+	self[dst_pos] = src_store[src_pos]
+end
+function ringbuf_store_index:dump()
+	print('dump ringbuf store:', self)
+	for k,v in pairs(self) do
+		print(k, v)
 	end
 end
 function ringbuf_store_index:from(spos, epos)
@@ -51,70 +56,89 @@ function ringbuf_header_index:init(n_size)
 	self.n_size = n_size
 end
 function ringbuf_header_index:verify_range(idx)
-	return idx >= start_idx and idx <= end_idx
+	if self.start_idx == 0 then
+		self.start_idx = idx
+		self.end_idx = idx
+	end
+	return idx >= self.start_idx
 end
-function ringbuf_header_index:at(idx, logs)
+function ringbuf_header_index:at(idx, store)
 	if self:verify_range(idx) then
 		local pos = idx % self.n_size
-		return logs[pos]
+		return store[pos]
 	end
 	return nil
 end
-function ringbuf_header_index:from(sidx)
+function ringbuf_header_index:from(sidx, store)
 	if self:verify_range(sidx) then
 		local pos = sidx % self.n_size
-		return logs:from(pos)
+		return store:from(pos)
 	end
 	return nil
 end
-function ringbuf_header_index:reserve(size)
+function ringbuf_header_index:reserve(size, store)
 	local av = self:available()
 	if av < size then
-		local newsize = self.n_size * 2
-		local required = self.n_size - av
+		local newsize = self.n_size
+		local required = size + self.n_size - av
 		while required > newsize do
 			newsize = newsize * 2
 		end
-		self = logs:realloc(newsize)
-		local spos, epos = self:range_pos()
+		local newstore = store:realloc(newsize)
+		for idx=tonumber(self.start_idx),tonumber(self.end_idx) do 
+			local src, dst = idx % self.n_size, idx % newsize
+			newstore:copy(store, src, dst)
+		end
 		self.n_size = newsize
-		if spos > epos then
-			logs:copy(0,epos,spos)
+		return newstore
+	end
+	return store
+end
+function ringbuf_header_index:put_at(idx, store, log)
+	if self:verify_range(idx) then
+		local diff = idx - self.end_idx
+		if diff > 0 then
+			store = self:reserve(diff, store)
+		end
+		store[idx % self.n_size] = log
+		if diff > 0 then
+			self.end_idx = idx
 		end
 	end
+	return store
 end
-function ringbuf_header_index:append(idx, logs, log)
+function ringbuf_header_index:init_at(idx, store, init, ...)
 	if self:verify_range(idx) then
-		self:reserve(1)
-		local pos = idx % self.n_size
-		logs[pos] = log
-		self.end_idx = idx
+		local diff = idx - self.end_idx
+		if diff > 0 then
+			store = self:reserve(diff, store)
+		end
+		init(store[idx % self.n_size], ...)
+		if diff > 0 then
+			self.end_idx = idx
+		end
 	end
+	return store
 end
-function ringbuf_header_index:init_at(idx, logs, init, ...)
-	if self:verify_range(idx) then
-		self:reserve(1)
-		local pos = idx % self.n_size
-		init(logs[pos], ...)
-		self.end_idx = idx
-	end
-end
-function ringbuf_header_index:delete(end_idx, logs)
-	start_idx = self.start_idx
-	end_idx = end_idx or self.end_idx
+function ringbuf_header_index:delete(end_idx, store)
 	if self:verify_range(end_idx) then
+		local start_idx = tonumber(self.start_idx)
+		end_idx = end_idx or self.end_idx
 		for idx=start_idx,end_idx do
-			local pos = index2pos(idx)
-			logs:delete(pos)
+			local pos = idx % self.n_size
+			store:delete(pos)
 		end
-		self.start_idx = start_idx
+		self.start_idx = end_idx + 1
+		if self.end_idx <= end_idx then
+			self.end_idx = end_idx + 1
+		end
 	end
 end
 function ringbuf_header_index:index2pos(index)
 	return index % self.n_size
 end
 function ringbuf_header_index:range_pos()
-	return self:index2pos(self.start_idx), self:index2pos(end_idx)
+	return self:index2pos(self.start_idx), self:index2pos(self.end_idx)
 end
 function ringbuf_header_index:available()
 	local spos, epos = self:range_pos()
@@ -122,13 +146,16 @@ function ringbuf_header_index:available()
 		return spos - epos - 1
 	elseif spos < epos then
 		return self.n_size - epos - 1 + spos
-	elseif self.start_idx == 0 then
+	elseif spos == epos then
 		return self.n_size
 	else
-		exception.raise('fatal', 'raft', 'invalid proposal list state', self.start_idx, self.end_idx, self.n_size)
+		exception.raise('fatal', 'raft', 'invalid ring buffer state', self.start_idx, self.end_idx, self.n_size)
 	end
 end
-ffi.metatype('luact_raft_ringbuf_header_t', ringbuf_mt)
+function ringbuf_header_index:dump()
+	print('header:', self.start_idx, self.end_idx, self.n_size, self:available())
+end
+ffi.metatype('luact_raft_ringbuf_header_t', ringbuf_header_mt)
 
 
 -- ringbuf object
@@ -141,19 +168,26 @@ function ringbuf_index:fin()
 	self.store:fin()
 end
 function ringbuf_index:at(idx)
-	self.header:at(idx, self.store)
+	return self.header:at(idx, self.store)
 end
-function ringbuf_index:append(idx, log)
-	self.header:appendt(idx, self.store, log)
+function ringbuf_index:put_at(idx, log)
+	self.store = self.header:put_at(idx, self.store, log)
 end
 function ringbuf_index:init_at(idx, fn, ...)
-	self.header:init_at(idx, self.store, fn, ...)
+	self.store = self.header:init_at(idx, self.store, fn, ...)
 end
 function ringbuf_index:delete(eidx)
 	self.header:delete(eidx, self.store)
 end
 function ringbuf_index:from(sidx)
-	self.header:from(sidx)
+	return self.header:from(sidx)
+end
+function ringbuf_index:available()
+	return self.header:available()
+end
+function ringbuf_index:dump()
+	self.header:dump()
+	self.store:dump()
 end
 
 -- module funcitons

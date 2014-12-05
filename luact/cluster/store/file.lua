@@ -23,19 +23,19 @@ local store_file_index = {}
 local store_file_mt = {
 	__index = store_file_index
 }
-function store_file_index:init(dir, id, opts)
+function store_file_index:init(dir, name, opts)
 	self.dir = memory.strdup(dir)
 	self.rb:init()
 	self:open()
 end
 function store_file_index:path()
-	return util.rawsprintf("%s/%16x.wal", self.dir, self.last_index + 1)
+	return util.rawsprintf(fs.path("%s", "%16x.wal"), self.dir, self.last_index + 1)
 end
 function store_file_index:state_path()
-	return util.rawsprintf("%s/state", self.dir)
+	return util.rawsprintf(fs.path("%s", "state"), self.dir)
 end
 function store_file_index:replica_set_path()
-	return util.rawsprintf("%s/replicas", self.dir)
+	return util.rawsprintf(fs.path("%s", "replicas"), self.dir)
 end
 function store_file_index:path_by_kind(kind)
 	if kind == 'state' then
@@ -54,18 +54,19 @@ function store_file_index:open()
 	end
 end
 -- remove/search snapshot files
+local wal_pattern = fs.path(".*", "([0-9a-f]+)%.wal$")
 function store_file_index:remove_files_by_index(dir, index)
 	local files = {}
 	local d = fs.opendir(dir)
 	for _, path in d:iter() do
-		if path:match(".*/[0-9a-f]+%.wal$") then
+		if path:match(wal_pattern) then
 			table.insert(files, path)
 		end
 	end
 	-- default sort is ascending order
 	table.sort(files)
 	for i=1,#files,1 do
-		local ok, idx = files[i]:match(".*/([0-9a-f]+)%.wal$")
+		local ok, idx = files[i]:match(wal_pattern)
 		if ok then
 			idx = tonumber(idx, 16)
 			if idx <= index then break end
@@ -81,14 +82,14 @@ function store_file_index:covered_files_for_index(dir, index)
 	local files = {}
 	local d = fs.opendir(dir)
 	for _, path in d:iter() do
-		if path:match(".*/[0-9a-f]+%.wal$") then
+		if path:match(wal_pattern) then
 			table.insert(files, path)
 		end
 	end
 	-- default sort is ascending order
 	table.sort(files)
 	for i=#files,1,-1 do
-		local ok, idx = files[i]:match(".*/([0-9a-f]+)%.wal$")
+		local ok, idx = files[i]:match(wal_pattern)
 		if ok then
 			idx = tonumber(idx, 16)
 			if idx <= index then
@@ -150,9 +151,9 @@ end
 
 
 -- module functions
-function _M.new(dir, id, opts)
+function _M.new(dir, name, opts)
 	local p = memory.alloc_typed('luact_store_file_t')
-	p:init(dir, id, opts)
+	p:init(dir, name, opts)
 	return p
 end
 

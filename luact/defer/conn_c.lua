@@ -30,7 +30,7 @@ ffi.cdef [[
 		pulpo_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead
+		unsigned char serde_id, dead;
 		unsigned short task_processor_id;
 		union {
 			pulpo_addrinfo_t buf;
