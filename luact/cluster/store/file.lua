@@ -142,7 +142,7 @@ function store_file_index:put_logs(logcache, serde, start_idx, end_idx)
 	C.fsync(self.fd)
 	return true
 end
--- TODO : following interfaces requires to preserve idx => offset table.
+-- TODO : following interfaces requires to preserve idx => offset table. (with transactional way)
 function store_file_index:delete_logs(start_idx, end_idx)
 end
 function store_file_index:get_log(idx, serde)

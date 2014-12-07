@@ -33,15 +33,14 @@ end
 function ringbuf_store_index:dump()
 	print('dump ringbuf store:', self)
 	for k,v in pairs(self) do
-		print(k, v)
+		print(k, v, v.index, v.term)
 	end
 end
 function ringbuf_store_index:from(spos, epos)
-	-- +1 for lua array index
 	if spos < epos then
-		return {unpack(self, spos+1, epos+1)}
+		return {unpack(self, spos, epos)}
 	else
-		return {unpack(self, spos+1), unpack(self, 1, epos+1)}
+		return {unpack(self, spos), unpack(self, 0, epos)}
 	end
 end
 
@@ -64,15 +63,16 @@ function ringbuf_header_index:verify_range(idx)
 end
 function ringbuf_header_index:at(idx, store)
 	if self:verify_range(idx) then
-		local pos = idx % self.n_size
+		local pos = self:index2pos(idx)
 		return store[pos]
 	end
 	return nil
 end
 function ringbuf_header_index:from(sidx, store)
 	if self:verify_range(sidx) then
-		local pos = sidx % self.n_size
-		return store:from(pos)
+		local pos = self:index2pos(sidx)
+		local epos = self:index2pos(self.end_idx)
+		return store:from(pos, epos)
 	end
 	return nil
 end
@@ -85,11 +85,25 @@ function ringbuf_header_index:reserve(size, store)
 			newsize = newsize * 2
 		end
 		local newstore = store:realloc(newsize)
+		local mapped = {}
 		for idx=tonumber(self.start_idx),tonumber(self.end_idx) do 
-			local src, dst = idx % self.n_size, idx % newsize
+			local src, dst = self:index2pos(idx), tonumber(idx % newsize)
 			newstore:copy(store, src, dst)
 		end
 		self.n_size = newsize
+		local spos, epos = self:range_pos()
+		if spos > epos then
+			for pos=epos+1,spos-1,1 do
+				newstore:delete(pos)
+			end
+		elseif spos <= epos then
+			for pos=0,spos-1,1 do
+				newstore:delete(pos)
+			end
+			for pos=epos+1,self.n_size,1 do
+				newstore:delete(pos)
+			end
+		end				
 		return newstore
 	end
 	return store
@@ -100,7 +114,7 @@ function ringbuf_header_index:put_at(idx, store, log)
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end
-		store[idx % self.n_size] = log
+		store[self:index2pos(idx)] = log
 		if diff > 0 then
 			self.end_idx = idx
 		end
@@ -113,19 +127,19 @@ function ringbuf_header_index:init_at(idx, store, init, ...)
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end
-		init(store[idx % self.n_size], ...)
+		init(store[self:index2pos(idx)], ...)
 		if diff > 0 then
 			self.end_idx = idx
 		end
 	end
 	return store
 end
-function ringbuf_header_index:delete(end_idx, store)
+function ringbuf_header_index:delete_elements(end_idx, store)
 	if self:verify_range(end_idx) then
 		local start_idx = tonumber(self.start_idx)
 		end_idx = end_idx or self.end_idx
 		for idx=start_idx,end_idx do
-			local pos = idx % self.n_size
+			local pos = self:index2pos(idx)
 			store:delete(pos)
 		end
 		self.start_idx = end_idx + 1
@@ -135,7 +149,7 @@ function ringbuf_header_index:delete(end_idx, store)
 	end
 end
 function ringbuf_header_index:index2pos(index)
-	return index % self.n_size
+	return tonumber(index % self.n_size)
 end
 function ringbuf_header_index:range_pos()
 	return self:index2pos(self.start_idx), self:index2pos(self.end_idx)
@@ -176,11 +190,11 @@ end
 function ringbuf_index:init_at(idx, fn, ...)
 	self.store = self.header:init_at(idx, self.store, fn, ...)
 end
-function ringbuf_index:delete(eidx)
-	self.header:delete(eidx, self.store)
+function ringbuf_index:delete_elements(eidx)
+	self.header:delete_elements(eidx, self.store)
 end
 function ringbuf_index:from(sidx)
-	return self.header:from(sidx)
+	return self.header:from(sidx, self.store)
 end
 function ringbuf_index:available()
 	return self.header:available()

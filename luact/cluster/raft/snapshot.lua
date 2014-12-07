@@ -51,9 +51,7 @@ function snapshot_header_index:to_table()
 	return t
 end
 function snapshot_header_index.pack(tbl, arg)
-	table.insert(tbl, ffi.string(arg, snapshot_header_size(arg.n_replica)))
-	-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size, ffi.sizeof('struct luact_id_tag'))
-	tbl.cdata[idx] = {name = 'ptr', tp = 'luact_raft_snapshot_header_t'}
+	return ffi.string(arg, snapshot_header_size(arg.n_replica))
 end
 function snapshot_header_index.unpack(arg)
 	return ffi.cast('luact_raft_snapshot_header_t*', arg)
@@ -196,7 +194,7 @@ function _M.new(dir, serde)
 	}, snapshot_mt)
 	ss:init()
 	if not _M.serde_initialized then
-		serde:customize('luact_raft_snapshot_header_t', snapshot_header_index.pack, snapshot_header_index.unpack)
+		serde:customize('struct luact_raft_snapshot_header', snapshot_header_index.pack, snapshot_header_index.unpack)
 	end
 	return ss
 end

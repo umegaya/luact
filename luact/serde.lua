@@ -110,73 +110,82 @@ function b2s_conv_index:ptr2float(ptr)
 end
 local custom_pack = {}
 local custom_unpack = {}
-function b2s_conv_index:escape(...)
-	return self:rawescape(true, ...)
-end
-function b2s_conv_index:rawescape(need_meta, ...)
+function b2s_conv_index:escape(obj)
 	local has_cdata 
-	local tmp = { cdata = {}, le = socket.little_endian() }
-	for idx,arg in ipairs({...}) do
+	local tmp = { __cdata__ = {}, __le__ = socket.little_endian() }
+	for idx,arg in pairs(obj) do
 		if type(arg) == "cdata" then
 			has_cdata = true
-			if custom_pack[ffi.typeof(arg)] then
-				custom_pack[ffi.typeof(arg)](tmp, arg)
-			else
-				local refl = reflect.typeof(arg)
-				-- print('cdata arg:', refl.what, refl.name, tostring(arg))
-				if refl.what == 'int' or refl.what == 'enum' then
-					if refl.unsigned then
-						table.insert(tmp, ffi.string(self:unsigned2ptr(arg, refl), refl.size))
-					else
-						table.insert(tmp, ffi.string(self:signed2ptr(arg, refl), refl.size))	
-					end
-					tmp.cdata[idx] = {name = 'int', unsigned = refl.unsigned}
-				elseif refl.what == 'float' then
-					table.insert(tmp, ffi.string(self:float2ptr(arg, refl), refl.size))
-					tmp.cdata[idx] = {name = refl.what}
-				elseif refl.what == 'struct' or refl.what == 'union' then
-					-- print('refl.name = ', refl.name, 'size = ', refl.size, ffi.sizeof('struct luact_id_tag'))
-					table.insert(tmp, ffi.string(arg, refl.size))
-					tmp.cdata[idx] = {name = refl.what.." "..refl.name}
-				elseif refl.what == 'array' then
-					table.insert(tmp, ffi.string(arg, refl.size))
-					tmp.cdata[idx] = {name = 'array', tp = refl.element_type.name}
-				elseif refl.what == 'ptr' or refl.what == 'ref' then
-					table.insert(tmp, ffi.string(arg, refl.element_type.size))
-					-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size, ffi.sizeof('struct luact_id_tag'))
-					local et = refl.element_type
-					tmp.cdata[idx] = {name = 'ptr', tp = et.what.." "..et.name}
+			local refl = reflect.typeof(arg)
+			-- print('cdata arg:', refl.what, refl.name, tostring(arg))
+			if refl.what == 'int' or refl.what == 'enum' then
+				if refl.unsigned then
+					tmp[idx] = ffi.string(self:unsigned2ptr(arg, refl), refl.size)
+				else
+					tmp[idx] = ffi.string(self:signed2ptr(arg, refl), refl.size)
 				end
+				tmp.__cdata__[idx] = {name = 'int', unsigned = refl.unsigned}
+			elseif refl.what == 'float' then
+				tmp[idx] = ffi.string(self:float2ptr(arg, refl), refl.size)
+				tmp.__cdata__[idx] = {name = 'float'}
+			elseif refl.what == 'struct' or refl.what == 'union' then
+				-- print('refl.name = ', refl.name, 'size = ', refl.size, ffi.sizeof('struct luact_id_tag'))
+				local name = refl.what.." "..refl.name
+				if custom_pack[name] then
+					tmp[idx] = custom_pack[name](arg)
+				else
+					tmp[idx] = ffi.string(arg, refl.size)
+				end
+				tmp.__cdata__[idx] = {name = name}
+			elseif refl.what == 'array' then
+				tmp[idx] = ffi.string(arg, refl.size)
+				tmp.__cdata__[idx] = {name = 'array', tp = refl.element_type.name}
+			elseif refl.what == 'ptr' or refl.what == 'ref' then
+				tmp[idx] = ffi.string(arg, refl.element_type.size)
+				-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size, ffi.sizeof('struct luact_id_tag'))
+				local et = refl.element_type
+				tmp.__cdata__[idx] = {name = 'ptr', tp = et.what.." "..et.name}
 			end
+		elseif type(arg) == 'table' then
+			-- TODO : nested table which has cdata in it, need to pack?
+			tmp[idx] = self:escape(arg)
 		else
-			table.insert(tmp, arg)
+			-- such an complex structure should pass as uuid to remote. 
+			tmp[idx] = arg
 		end
 	end
-	return (need_meta or has_cdata) and tmp or {...}
+	return has_cdata and tmp or obj
 end
 function b2s_conv_index:unescape(obj)
 	-- TODO : check obj.le and if endian is not match with this node, do something like ntohs/ntohl/ntohll
-	for idx,tp in pairs(obj.cdata) do
-		if tp.name == 'int' then
-			if tp.unsigned then
-				obj[idx] = self:ptr2unsigned(obj[idx])
-			else
-				obj[idx] = self:ptr2signed(obj[idx])
-			end
-		elseif tp.name == 'float' then
-			obj[idx] = self:ptr2float(obj[idx])
-		elseif tp.name == 'array' or tp.name == 'ptr' then
-			local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
-			ffi.copy(tmp, obj[idx], #obj[idx])
-			obj[idx] = tmp
-		elseif tp.name then
-			if custom_unpack[tp.name] then
-				obj[idx] = custom_unpack[tp.name](obj[idx])
-			else
-				local tmp = memory.alloc_typed(tp.name)
-				ffi.copy(tmp, obj[idx], ffi.sizeof(tp.name))
+	if obj.__cdata__ then
+		for idx,tp in pairs(obj.__cdata__) do
+			if tp.name == 'int' then
+				if tp.unsigned then
+					obj[idx] = self:ptr2unsigned(obj[idx])
+				else
+					obj[idx] = self:ptr2signed(obj[idx])
+				end
+			elseif tp.name == 'float' then
+				obj[idx] = self:ptr2float(obj[idx])
+			elseif tp.name == 'array' or tp.name == 'ptr' then
+				local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
+				ffi.copy(tmp, obj[idx], #obj[idx])
 				obj[idx] = tmp
+			elseif tp.name then
+				if custom_unpack[tp.name] then
+					obj[idx] = custom_unpack[tp.name](obj[idx])
+				else
+					local tmp = memory.alloc_typed(tp.name)
+					ffi.copy(tmp, obj[idx], ffi.sizeof(tp.name))
+					obj[idx] = tmp
+				end
 			end
+		end
+	end
+	for k,v in pairs(obj) do
+		if type(v) == 'table' and v.__cdata__ then
+			obj[k] = self:unescape(v)
 		end
 	end
 	return obj
@@ -204,7 +213,7 @@ _M[kind.serpent] = serpent
 function serpent:pack_packet(buf, append, ...)
 	logger.notice('packer', ...)
 	exception.serializer = serpent.serializer
-	local str = sp.dump(conv:escape(...))
+	local str = sp.dump(conv:escape({...}))
 	local data = tostring(#str)..":"..str
 	local sz, pv = #data, nil
 	if append then
@@ -228,22 +237,11 @@ function serpent:pack_packet(buf, append, ...)
 	end
 	return sz
 end
-function serpent:pack(buf, ...)
-	logger.notice('packer', ...)
-	exception.serializer = serpent.serializer
-	local str = sp.dump(conv:escape(...))
-	local data = tostring(#str)..":"..str
-	local sz, pv = #data, nil
-	buf:reserve(sz)
-	fif.copy(buf:curr_p(), data, sz)
-	buf:use(sz)
-	if _M.DEBUG then
-		print('packed:', data)
-	end
-	return sz
-end
-function serpent:unpack(rb)
+function serpent:unpack_packet(rb)
 	local sz, len, p = 0, rb:available(), rb:curr_p()
+	if _M.DEBUG then
+		print('unpack:', len,ffi.string(p, len))
+	end
 	while sz < len do
 		if p[sz] ~= (":"):byte() then
 			sz = sz + 1
@@ -274,6 +272,21 @@ function serpent:unpack(rb)
 		end
 	end
 end
+function serpent:pack(buf, obj)
+	logger.notice('packer', obj)
+	exception.serializer = serpent.serializer
+	local str = sp.dump(conv:escape(obj))
+	local data = tostring(#str)..":"..str
+	local sz, pv = #data, nil
+	buf:reserve(sz)
+	ffi.copy(buf:curr_p(), data, sz)
+	buf:use(sz)
+	if _M.DEBUG then
+		print('packed:', data, #data)
+	end
+	return sz
+end
+serpent.unpack = serpent.unpack_packet
 function serpent:customize(ctype, pack, unpack)
 	custom_pack[ctype] = pack
 	custom_unpack[ctype] = unpack
@@ -284,6 +297,8 @@ local dkjson = require 'dkjson'
 local json = {}
 _M[kind.json] = json
 function json:pack_packet(buf, append, ...)
+end
+function json:unpack_packet(rb)
 end
 function json:pack(buf, ...)
 end
@@ -298,6 +313,8 @@ function msgpack:pack_packet(buf, append, ...)
 	-- TODO : it is probably very costly to expand buffer on-demand, 
 	-- (espacially because msgpack packer writes data to buf ptr directly)
 end
+function msgpack:unpack_packet(rb)
+end
 function msgpack:pack(buf, ...)
 	-- TODO : it is probably very costly to expand buffer on-demand, 
 	-- (espacially because msgpack packer writes data to buf ptr directly)
@@ -309,6 +326,8 @@ end
 local protobuf = {}
 _M[kind.protobuf] = protobuf
 function protobuf:pack_packet(buf, append, ...)
+end
+function protobuf:unpack_packet(rb)
 end
 function protobuf:pack(buf, ...)
 end

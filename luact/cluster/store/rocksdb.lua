@@ -11,12 +11,13 @@ local pbuf = require 'luact.pbuf'
 local db = require 'luact.storage.rocksdb'
 
 local _M = {}
+_M.max_dbname_len = 256
 
 -- cdefs
 ffi.cdef [[
 typedef struct luact_store_rocksdb {
-	const char *name;
-	rocksdb_t *db;
+	char *name;
+	luact_rocksdb_column_family_t *db;
 	uint64_t min_idx, max_idx;
 	luact_rbuf_t rb;
 } luact_store_rocksdb_t;
@@ -33,6 +34,9 @@ local store_rocksdb_mt = {
 }
 function store_rocksdb_index:init(dir, name, opts)
 	self.name = memory.strdup(name)
+	if util.strlen(self.name, _M.max_dbname_len + 1) >= (_M.max_dbname_len + 1) then
+		exception.raise('invalid', 'dbname', _M.max_dbname_len)
+	end
 	self.rb:init()
 	self:open(dir, name, opts)
 	self.min_idx = 0
@@ -41,26 +45,31 @@ end
 function store_rocksdb_index:fin()
 	self.db:fin()
 	self.rb:fin()
-	memory.free(self.dir)
-	memory.free(self.pfx)
+	memory.free(self.name)
 end
 local logkeygen = ffi.new('luact_logkey_gen_t')
 local logkeysize = ffi.sizeof('luact_logkey_gen_t');
+local function keydump(p)
+	print(p[0], p[1], p[2], p[3], 
+		p[4], p[5], p[6], p[7])
+end
 function store_rocksdb_index:logkey(idx)
 	logkeygen.ll = idx
 	return logkeygen.p, logkeysize
 end
 function store_rocksdb_index:state_key()
-	return util.rawsprintf("%s/state", self.pfx)
+	return util.rawsprintf("%s/state", _M.max_dbname_len, self.name)
 end
 function store_rocksdb_index:replica_set_key()
-	return util.rawsprintf("%s/replicas", self.pfx)
+	return util.rawsprintf("%s/replicas", _M.max_dbname_len, self.name)
 end
 function store_rocksdb_index:key_by_kind(kind)
 	if kind == 'state' then
 		return self:state_key()
 	elseif kind == 'replica_set' then
 		return self:replica_set_key()
+	elseif kind == 'metadata' then
+		return self:metadata_key()
 	else
 		exception.raise('invalid', 'objects type', kind)
 	end
@@ -72,21 +81,37 @@ function store_rocksdb_index:open(dir, name, opts)
 	local path = fs.path(dir, name)
 	self.db = db.open(path, opts):column_family(self:column_family_name())
 end
+function store_rocksdb_index:init_rbuf()
+	self.rb:reset()
+	return self.rb
+end
+function store_rocksdb_index:to_rbuf(p, pl)
+	local rb = self:init_rbuf()
+	-- print('to_rbuf:', pl, ffi.string(p, pl))
+	rb:reserve(pl)
+	-- remove this copy
+	ffi.copy(rb:start_p(), p, pl)
+	rb:use(pl)
+	memory.free(p)
+	return rb
+end
 
 -- interfaces for consensus modules
-function store_rocksdb_index:compact(upto_idx)
-	self:delete_logs(self.min_idx, upto_idx)
+function store_rocksdb_index:compaction(upto_idx)
+	if upto_idx >= self.min_idx then
+		self:delete_logs(self.min_idx, upto_idx)
+	end
 end
 function store_rocksdb_index:put_object(kind, serde, object)
 	local k, kl = self:key_by_kind(kind)
-	serde:pack(self.rb, object)
+	local rb = self:init_rbuf()
+	serde:pack(rb, object)
 	self.db:rawput(k, kl, rb:start_p(), rb:available())
 end
 function store_rocksdb_index:get_object(kind, serde)
 	local k, kl = self:key_by_kind(kind)
 	local p, pl = self.db:rawget(k, kl)
-	rb:reserve(pl)
-	ffi.copy(rb:start_p(), p, pl)
+	local rb = self:to_rbuf(p, pl)
 	local obj, err = serde:unpack(rb)
 	if err then
 		exception.raise('invalid', 'object data', err)
@@ -109,16 +134,21 @@ function store_rocksdb_index:put_logs(logcache, serde, start_idx, end_idx)
 	return nil, r
 end
 function store_rocksdb_index:unsafe_put_logs(txn, logcache, serde, start_idx, end_idx)
-	for idx=start_idx,end_idx do
+	for idx=tonumber(start_idx),tonumber(end_idx) do
 		local log = logcache:at(idx)
-		self.rb:reset()
-		serde:pack(self.rb, log)
+		if not log then
+			exception.raise('not_found', 'log', idx)
+		end
+		local rb = self:init_rbuf()
+		serde:pack(rb, log)
 		local k, kl = self:logkey(idx)
-		txn:rawput(k, kl, rb:start_p(), rb:available())
+		-- print('put_logs:', idx, ffi.string(rb:start_p(), rb:available()))
+		txn:rawput_cf(self.db, k, kl, rb:start_p(), rb:available())
 	end
 end
 function store_rocksdb_index:delete_logs(start_idx, end_idx)
 	local txn = self.db:new_txn()
+	start_idx = start_idx or self.min_idx
 	local ok, r = pcall(self.unsafe_delete_logs, self, txn, start_idx, end_idx) 
 	if ok then
 		txn:commit()
@@ -133,14 +163,15 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 end
 function store_rocksdb_index:unsafe_delete_logs(txn, start_idx, end_idx)
 	for idx=start_idx,end_idx do
-		txn:rawdelete(self:logkey(idx))
+		txn:rawdelete_cf(self.db, self:logkey(idx))
 	end
 end
 function store_rocksdb_index:get_log(idx, serde)
 	local p, pl = self.db:rawget(self:logkey(idx))
-	self.rb:reset()
-	self.rb:reserve(pl)
-	ffi.copy(self.rb:start_p(), p, pl)
+	if _M.DEBUG then
+		print('get_log', idx, ffi.string(p, pl))
+	end
+	local rb = self:to_rbuf(p, pl)
 	return serde:unpack(self.rb)
 end
 ffi.metatype('luact_store_rocksdb_t', store_rocksdb_mt)

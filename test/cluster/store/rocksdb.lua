@@ -43,9 +43,9 @@ luact.start({
 	for i=1,1000,1 do
 		keygen.ll = i
 		local v, vl = db:rawget(keygen.p, 8)
-		assert(vl == 16)
+		assert(vl == 16, "data length should be equal to put size")
 		for i=1,4 do
-			assert(ffi.cast('uint32_t*', v)[i - 1] == 0xdeadbeef)
+			assert(ffi.cast('uint32_t*', v)[i - 1] == 0xdeadbeef, "data contents should never change")
 		end
 	end
 
@@ -58,8 +58,9 @@ luact.start({
 	txn = nil -- abort
 	for i=txn_key_start,txn_key_start+100 do
 		keygen.ll = i
-		local ptr = db:rawget(keygen.p, 8)
-		assert(ffi.NULL == ptr)
+		local ptr, pl = db:rawget(keygen.p, 8)
+		-- print('aftabort', ptr, pl)
+		assert(ffi.NULL == ptr, "if transaction is not commited, put key should not appear")
 	end
 
 	txn = db:new_txn()
@@ -71,9 +72,10 @@ luact.start({
 	for i=txn_key_start,txn_key_start+100 do
 		keygen.ll = i
 		local ptr, pl = db:rawget(keygen.p, 8)
-		assert(ffi.NULL ~= ptr and pl == 16)
+		-- print('aftcommit', ptr, pl)
+		assert(ffi.NULL ~= ptr and pl == 16, "if transaction is commited, put key should appear")
 		for i=1,4 do
-			assert(ffi.cast('uint32_t*', ptr)[i - 1] == 0xdeadbeef)
+			assert(ffi.cast('uint32_t*', ptr)[i - 1] == 0xdeadbeef, "data contents should never change")
 		end
 	end
 	luact.stop()

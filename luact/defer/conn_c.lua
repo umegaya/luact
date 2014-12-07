@@ -240,7 +240,7 @@ function conn_index:read_int(io, sr)
 	while self.dead ~= 1 do
 		rb:read(io, 1024) 
 		while true do 
-			local parsed, err = sr:unpack(rb)
+			local parsed, err = sr:unpack_packet(rb)
 			if not parsed then 
 				if err then exception.raise('invalid', 'encoding', err) end
 				break
@@ -255,7 +255,7 @@ function conn_index:read_ext(io, unstrusted, sr)
 	while self.dead ~= 1 do
 		rb:read(io, 1024) 
 		while true do 
-			local parsed, err = sr:unpack(rb)
+			local parsed, err = sr:unpack_packet(rb)
 			if not parsed then 
 				if err then exception.raise('invalid', 'encoding', err) end
 				break

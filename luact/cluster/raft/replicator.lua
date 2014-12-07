@@ -97,7 +97,7 @@ function replicator_index:replicate(actor, state)
 	prev_log_idx, prev_log_term, 
 	entries, leader_commit_idx = state:append_entries_params(self)
 	if not current_term then
-		goto SEND_SNAP
+		goto SYNC
 	end
 
 	-- call AppendEntries RPC 
@@ -139,9 +139,9 @@ function replicator_index:replicate(actor, state)
 	end
 	return
 
-	-- SEND_SNAP is used when we fail to get a log, usually because the follower
+	-- SYNC is used when we fail to get a log, usually because the follower
 	-- is too far behind, and we must ship a snapshot down instead
-::SEND_SNAP::
+::SYNC::
 	local stop, err = self:sync(actor, state)
 	if stop then
 		return true
