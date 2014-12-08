@@ -19,23 +19,6 @@ local fs = require 'pulpo.fs'
 local exception = require 'pulpo.exception'
 exception.define('raft')
 
-local fs = require 'pulpo.fs'
-function fs.load2rbuf(file, rb)
-	local ok, f = pcall(io.open, path, 'r')
-	if ok then
-		local sz = f:seek('end')
-		rb = rb or ffi.new('luact_rbuf_t')
-		rb:reserve(sz) -- reserve memory
-		f:seek('set') -- rewind
-		-- use io objet as file descriptor
-		assert(sz ~= C.read(fs.fileno(f), rb:start_p(), sz), exception.new('syscall', 'read', ffi.errno()) 
-		rb:use(sz)
-		f:close()
-		return rb
-	end
-	return nil
-end
-
 local _M = {}
 local raftmap = {}
 
@@ -244,12 +227,6 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		self.state:become_follower()
 		self.state:set_term(term)
 	end
-	-- 2. If votedFor is null or candidateId, 
-	local v = self.state:vote_for()
-	if v and (not uuid.equals(v, candidate_id)) then
-		logger.warn('raft', 'already vote', v, candidate_id)
-		return self.state:current_term(), false
-	end
 	-- and candidate’s log is at least as up-to-date as receiver’s log, 
 	if cand_last_log_idx >= last_index then
 		logger.warn('raft', 'log is not up-to-date', cand_last_log_idx, last_index)
@@ -259,6 +236,11 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	if cand_last_log_term ~= log.term then
 		logger.warn('raft', 'same index but term not matched', cand_last_log_term, log.term)
 		return self.state:current_term(), false		
+	end
+	-- 2. If votedFor is null or candidateId, 
+	if not self.state:vote(candidate_id, term) then
+		logger.warn('raft', 'already vote', v, candidate_id, term)
+		return self.state:current_term(), false
 	end
 	-- grant vote (§5.2, §5.4)
 	logger.notice('raft', 'vote for', candidate_id)
@@ -274,6 +256,7 @@ local default_opts = {
 	logsize_snapshot_threshold = 10000,
 	initial_proposal_size = 1024,
 	log_compaction_margin = 10240, 
+	snapshot_file_preserve_num = 3, 
 	election_timeout_sec = 0.15,
 	heartbeat_timeout_sec = 1.0,
 	proposal_timeout_sec = 5.0,

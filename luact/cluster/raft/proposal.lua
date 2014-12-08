@@ -7,7 +7,7 @@ local exception = require 'pulpo.exception'
 local pbuf = require 'pulpo.pbuf'
 local fs = require 'pulpo.fs'
 
-local ringbuf = require 'luact.cluster.raft.ringbuf'
+local ringbuf = require 'luact.util.ringbuf'
 
 local _M = {}
 

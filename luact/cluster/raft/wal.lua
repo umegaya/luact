@@ -7,7 +7,7 @@ local exception = require 'pulpo.exception'
 local fs = require 'pulpo.fs'
 
 local pbuf = require 'luact.pbuf'
-local ringbuf = require 'luact.cluster.raft.ringbuf'
+local ringbuf = require 'luact.util.ringbuf'
 
 local _M = {}
 
@@ -16,7 +16,7 @@ ffi.cdef [[
 typedef struct luact_raft_wal_writer {
 	luact_rbuf_t rb;
 	int fd;
-	uint64_t last_index;
+	uint64_t last_index, last_term;
 } luact_raft_wal_writer_t;
 ]]
 
@@ -59,6 +59,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		exception.raise('fatal', 'raft', 'fail to commit logs', r)
 	end
 	self.last_index = last_index
+	self.last_term = term
 	return self.last_index
 end
 function wal_writer_index:delete(store, start_idx, end_idx)
@@ -70,27 +71,6 @@ function wal_writer_index:write_state(store, kind, state, serde, logcache)
 end
 function wal_writer_index:read_state(store, kind, serde, logcache)
 	return store:get_object(kind, serde)
-end
-function wal_writer_index:restore(store, serde, index, fsm)
-	local verified
-	local term, data
-	local rb = self.rb
-	while true do
-		rb:reset()
-		local obj = store:get_log(index, serde)
-		if not obj then break end
-		term, index, data = obj.term, obj.index, obj.log
-		if (self.last_index > 0) and (index - self.last_index) ~= 1 then
-			exception.raise('fatal', 'invalid index leap', self.last_index, index)
-		end				
-		local ok, r = pcall(fsm.apply, fsm, data)
-		if not ok then
-			exception.raise('fatal', 'fail to apply log to fsm', r)
-		end
-		self.last_index = index
-		index = index + 1
-	end
-	return term, self.last_index
 end
 ffi.metatype('luact_raft_wal_writer_t', wal_writer_mt)
 
@@ -111,9 +91,6 @@ function wal_index:can_restore()
 	local obj = self:read_metadata()
 	return util.table_equals(self.meta, obj)
 end
-function wal_index:restore(index, fsm)
-	self.writer:restore(self.store, self.serde, index, fsm)
-end
 function wal_index:compaction(upto_idx)
 	-- remove in memory log with some margin (because minority node which hasn't replicate old log exists.)
 	self.store:compaction(upto_idx - self.opts.log_compaction_margin)
@@ -129,12 +106,6 @@ function wal_index:read_state()
 end
 function wal_index:write_state(state)
 	self.writer:write_state(self.store, 'state', state, self.serde, self.logcache)
-end
-function wal_index:read_replica_set()
-	return self.writer:read_state(self.store, 'replica_set', self.serde, self.logcache)
-end
-function wal_index:write_replica_set(replica_set)
-	self.writer:write_state(self.store, 'replica_set', replica_set, self.serde, self.logcache)
 end
 function wal_index:read_metadata()
 	return self.writer:read_state(self.store, 'meta', self.serde, self.logcache)
@@ -154,6 +125,9 @@ function wal_index:delete_logs(end_idx)
 end
 function wal_index:last_index()
 	return self.writer.last_index
+end
+function wal_index:last_index_and_term()
+	return self.writer.last_index, self.writer.last_term
 end
 function wal_index:dump()
 	print('logcache dump -- ')

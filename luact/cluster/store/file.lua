@@ -58,7 +58,7 @@ local wal_pattern = fs.path(".*", "([0-9a-f]+)%.wal$")
 function store_file_index:remove_files_by_index(dir, index)
 	local files = {}
 	local d = fs.opendir(dir)
-	for _, path in d:iter() do
+	for path in d:iter() do
 		if path:match(wal_pattern) then
 			table.insert(files, path)
 		end
@@ -81,7 +81,7 @@ end
 function store_file_index:covered_files_for_index(dir, index)
 	local files = {}
 	local d = fs.opendir(dir)
-	for _, path in d:iter() do
+	for path in d:iter() do
 		if path:match(wal_pattern) then
 			table.insert(files, path)
 		end

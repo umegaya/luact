@@ -1,15 +1,20 @@
 local ffi = require 'ffiex.init'
 local C = ffi.C
 
+local pbuf = require 'luact.pbuf'
+
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
-local pbuf = require 'pulpo.pbuf'
 local fs = require 'pulpo.fs'
 
 local sha2 = require 'lua-aws.deps.sha2'
 
+local _M = {}
+
+
 ffi.cdef [[
+// TODO : add encoding type (serpent, json, msgpack/compressed, plain)
 typedef struct luact_raft_snapshot_header {
 	uint8_t checksum[32]; //sha2 hash
 	uint64_t size;
@@ -31,17 +36,19 @@ local snapshot_header_mt = {
 	__index = snapshot_header_index
 }
 function snapshot_header_size(n_replica)
-	return ffi.sizeof('luact_raft_snapshot_header_t') + (n_replica * ffi.sizeof('luact_uuid_t')))
+	return ffi.sizeof('luact_raft_snapshot_header_t') + (n_replica * ffi.sizeof('luact_uuid_t'))
 end
 function snapshot_header_index.alloc(n_replica)
-	local p = memory.alloc_fill_typed(snapshot_header_size(n_replica))
+	local p = memory.alloc_fill(snapshot_header_size(n_replica))
+	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
-	return ffi.cast('luact_raft_snapshot_header_t*', p)
+	return p
 end
 function snapshot_header_index:realloc(n_replica)
 	local p = memory.realloc(self, snapshot_header_size(n_replica))
+	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
-	return ffi.cast('luact_raft_snapshot_header_t*', p)
+	return p
 end
 function snapshot_header_index:to_table()
 	local t = {}
@@ -49,6 +56,18 @@ function snapshot_header_index:to_table()
 		table.insert(t, self.replicas[i - 1])
 	end
 	return t
+end
+function snapshot_header_index:verify_checksum(p, size)
+	if self.size ~= size then
+		return false
+	end
+	local checksum = sha2.hash256(ffi.string(p, size))
+	for i=1,32 do
+		if checksum:byte(i) ~= self.checksum[i - 1] then
+			return false
+		end
+	end
+	return true
 end
 function snapshot_header_index.pack(tbl, arg)
 	return ffi.string(arg, snapshot_header_size(arg.n_replica))
@@ -72,12 +91,12 @@ function snapshot_writer_index:fin()
 	self.rb:fin()
 	self.rbfsm:fin()
 end
-function snapshot_writer_index:path(dir, last_applied_idx)
-	return util.rawsprintf(fs.path("%s", "%16x.snap"), dir, last_applied_idx)
+function snapshot_writer_index:snapshot_path(dir, last_applied_idx)
+	return util.rawsprintf(fs.path("%s", "%08x.snap"), #dir + 16 + #(".snap") + 1, dir, last_applied_idx)
 end
 function snapshot_writer_index:open(dir, last_applied_idx)
-	local path = self:path(dir, last_applied_idx)
-	local fd = C.open(path, bit.bor(fs.O_CREAT, fs.O_WRONLY))
+	local path = self:snapshot_path(dir, last_applied_idx)
+	local fd = C.open(path, bit.bor(fs.O_CREAT, fs.O_EXCL, fs.O_WRONLY), fs.mode("640"))
 	if fd < 0 then
 		exception.raise('fatal', 'cannot open snapshot file', ffi.string(path), ffi.errno())
 	end
@@ -93,51 +112,62 @@ function snapshot_writer_index:write(dir, fsm, st, serde)
 	end
 	self.rb:reset()
 	-- put metadata at first of snapshot file
-	if snapshot_header.n_replica < #st.replicas then
-		snapshot_header = snapshot_header:realloc(#st.replicas)
-	end
-	snapshot_header.term = st:current_term()
+	snapshot_header = st:write_snapshot_header(snapshot_header)
 	snapshot_header.size = self.rbfsm:available()
-	local checksum = sha2.hash256(self.rbfsm:start_p(), self.rbfsm:available())
+	local checksum = sha2.hash256(ffi.string(self.rbfsm:start_p(), self.rbfsm:available()))
 	ffi.copy(snapshot_header.checksum, checksum, 32)
-	snapshot_header.index = st.state.last_applied_idx
-	snapshot_header.n_replica = #st.replicas
-	snapshot_header.replica_transition = st.replica_transition and 1 or 0
-	for i=1,#st.replicas do
-		snapshot_header[i - 1] = st.replicas[i]
-	end
 	serde:pack(self.rb, snapshot_header)
-	local fd = self:open(dir, last_applied_idx)
+
+	local fd = self:open(dir, snapshot_header.index)
 	-- TODO : use pulpo.io and wait io when all bytes are written
 	C.write(fd, self.rb:start_p(), self.rb:available())
 	C.write(fd, self.rbfsm:start_p(), self.rbfsm:available())
 	C.fsync(fd)
 	C.close(fd)
-	self.last_snapshot_idx = last_applied_idx
-	self.last_snapshot_term = term
+	self.last_snapshot_idx = snapshot_header.index
+	self.last_snapshot_term = snapshot_header.term
 	return self.last_snapshot_idx
 end
-function snapshot_writer_index:latest_snapshot_path()
-	local d = fs.opendir(self.path)
+local pattern = "[0-9a-f]+%.snap$"
+function snapshot_writer_index:latest_snapshot_path(dir)
+	local d = fs.opendir(dir)
 	local latest 
-	for _, path in d:iter() do
-		if path:match(fs.path(".*", "[0-9a-f]+%.snap$")) then
-			if (not latest) or latest < path then
+	for path in d:iter() do
+		if path:match(pattern) then
+			if (not latest) or (latest < path) then
 				latest = path
 			end
 		end
 	end
-	return latest
+	return fs.path(dir, latest)
+end
+function snapshot_writer_index:remove_oldest_snapshot(dir, margin)
+	local d = fs.opendir(dir)
+	local oldest
+	local count = 0
+	for path in d:iter() do
+		if path:match(pattern) then
+			count = count + 1
+			if (not oldest) or (oldest > path) then
+				oldest = path
+			end
+		end
+	end
+	if margin < count then
+		fs.unlink(fs.path(dir, oldest))
+	end
 end
 function snapshot_writer_index:restore(dir, fsm, serde)
-	local latest = self:latest_snapshot_path()
+	local latest = self:latest_snapshot_path(dir)
 	if not latest then
+		logger.notice('will not restore: no snapshot under', dir)
 		return
 	end
+	logger.notice('restore with', latest)
 	local rb = fs.load2rbuf(latest)
 	if not rb then
 		-- TODO : can continue with older snapshot (or should not)?
-		exception.raise('fatal', 'cannot open snapshot file', latest)
+		exception.raise('fatal', 'cannot open snapshot file', latest, ffi.errno())
 	end
 	local meta, err = serde:unpack(rb)
 	if (not meta) or (not meta.index) then
@@ -145,13 +175,18 @@ function snapshot_writer_index:restore(dir, fsm, serde)
 		-- TODO : can continue with older snapshot (or should not)?
 		exception.raise('fatal', 'invalid snapshot file', latest, err)
 	end
+	if not meta:verify_checksum(rb:curr_p(), rb:available()) then
+		rb:fin()
+		exception.raise('fatal', 'invalid snapshot checksum')
+	end
 	local ok, r = pcall(fsm.restore, fsm, serde, rb)
 	rb:fin()
 	if not ok then
 		exception.raise('fatal', 'cannot restore from snapshot', latest, r)
 	end
 	self.last_snapshot_idx = meta.index
-	return self.last_snapshot_idx
+	self.last_snapshot_term = meta.term
+	return self.last_snapshot_idx, meta
 end
 ffi.metatype('luact_raft_snapshot_writer_t', snapshot_writer_mt)
 
@@ -162,6 +197,7 @@ local snapshot_mt = {
 }
 function snapshot_index:init()
 	self.writer:init()
+	fs.mkdir(self.dir)
 end
 function snapshot_index:fin()
 	self.writer:fin()
@@ -169,14 +205,17 @@ end
 function snapshot_index:write(fsm, state)
 	return self.writer:write(self.dir, fsm, state, self.serde)
 end
+function snapshot_index:trim(margin)
+	self.writer:remove_oldest_snapshot(self.dir, margin)
+end
 function snapshot_index:restore(fsm)
 	return self.writer:restore(self.dir, fsm, self.serde)
 end
 function snapshot_index:last_index_and_term()
-	return self.writer.last_snapshot_term, self.writer.last_snapshot_idx
+	return self.writer.last_snapshot_idx, self.writer.last_snapshot_term
 end
 function snapshot_index:latest_snapshot()
-	local path = self.writer:latest_snapshot_path()
+	local path = self.writer:latest_snapshot_path(self.dir)
 	local rb = (path and fs.load2rbuf(path))
 	if rb then 
 		return rb, self.serde, rb:available() 

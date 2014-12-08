@@ -190,6 +190,21 @@ end
 function _M.invalidate(uuid)
 	uuid.__detail__.machine_id = 0
 end
+function _M.debug_create_id(machine_id, thread_id)
+	local id = _M.new()
+	id.__detail__.thread_id = thread_id or 1
+	if type(machine_id) == 'number' then
+		id.__detail__.machine_id = machine_id
+	else
+		local mid
+		machine_id:gsub('([0-9]+)%.([0-9]+)%.([0-9]+)%.([0-9]+)', function (_1, _2, _3, _4)
+			-- print(_1, _2, _3, _4)
+			mid = bit.lshift(tonumber(_1), 24) + bit.lshift(tonumber(_2), 16) + bit.lshift(tonumber(_3), 8) + tonumber(_4)
+		end)
+		id.__detail__.machine_id = mid
+	end
+	return id
+end
 
 local sprintf_workmem_size = 32
 local sprintf_workmem = memory.alloc_typed('char', sprintf_workmem_size)

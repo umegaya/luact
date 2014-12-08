@@ -5,15 +5,15 @@ luact.start({
 	n_core = 1, exclusive = true,
 }, function ()
 local luact = require 'luact.init'
+local fs = require 'pulpo.fs'
 local ok,r = xpcall(function ()
 	local wal = require 'luact.cluster.raft.wal'
 	local rdbstore = require 'luact.cluster.store.rocksdb'
 	local serde = require 'luact.serde'
 	local util = require 'pulpo.util'
-	local fs = require 'pulpo.fs'
 
-	fs.rmdir('/tmp/rocksdb/testdb2')
-	local store = rdbstore.new('/tmp/rocksdb', 'testdb2')
+	fs.rmdir('/tmp/luact/rocksdb/testdb2')
+	local store = rdbstore.new('/tmp/luact/rocksdb/testdb2', 'test')
 	local opts = {
 		log_compaction_margin = 3,
 	}
@@ -105,25 +105,11 @@ local ok,r = xpcall(function ()
 	-- print((require 'serpent').dump(state), (require 'serpent').dump(st))
 	local ret, k = util.table_equals(state, st)
 	assert(ret, "same object which given to write_state() should returns:"..tostring(k).."|"..tostring(state[k]).."|"..tostring(st[k]))
-
-	-- recovery test
-	w:fin()
-	w = wal.new({hoge = 'fuga'}, store, serde[serde.kind.serpent], opts)
-	local fsm = new_fsm()
-	w:restore(last_removed+1, fsm)
-	for _, key in ipairs({"a", "b", "c", "d"}) do
-		assert(not fsm[key], "these keys should not be applied:"..tostring(key))
-	end
-	for k, v in pairs({x = "9", w = "6", z = 4}) do
-		assert(fsm[k] == v, "these keys should applied and has correct value:"..tostring(k).."|"..tostring(v).."|"..tostring(fsm[k]))
-	end
 end, function (e)
 	logger.error('err', e, debug.traceback())
 end)
 
-if not ok then
-	os.exit(-1)
-end
+fs.rmdir('/tmp/luact/rocksdb/testdb2')
 
 luact.stop()
 end)

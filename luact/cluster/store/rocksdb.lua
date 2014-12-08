@@ -60,26 +60,24 @@ end
 function store_rocksdb_index:state_key()
 	return util.rawsprintf("%s/state", _M.max_dbname_len, self.name)
 end
-function store_rocksdb_index:replica_set_key()
-	return util.rawsprintf("%s/replicas", _M.max_dbname_len, self.name)
+function store_rocksdb_index:metadata_key()
+	return util.rawsprintf("%s/meta", _M.max_dbname_len, self.name)
 end
 function store_rocksdb_index:key_by_kind(kind)
 	if kind == 'state' then
 		return self:state_key()
-	elseif kind == 'replica_set' then
-		return self:replica_set_key()
 	elseif kind == 'metadata' then
 		return self:metadata_key()
 	else
 		exception.raise('invalid', 'objects type', kind)
 	end
 end
-function store_rocksdb_index:column_family_name()
-	return 'luact_raft_logs'..pulpo.thread_id
+function store_rocksdb_index:column_family_name(name)
+	return 'luact_raft_logs'..tostring(pulpo.thread_id)..'_'..name
 end
 function store_rocksdb_index:open(dir, name, opts)
-	local path = fs.path(dir, name)
-	self.db = db.open(path, opts):column_family(self:column_family_name())
+	fs.mkdir(dir)
+	self.db = db.open(dir, opts):column_family(self:column_family_name(name))
 end
 function store_rocksdb_index:init_rbuf()
 	self.rb:reset()
@@ -111,12 +109,16 @@ end
 function store_rocksdb_index:get_object(kind, serde)
 	local k, kl = self:key_by_kind(kind)
 	local p, pl = self.db:rawget(k, kl)
-	local rb = self:to_rbuf(p, pl)
-	local obj, err = serde:unpack(rb)
-	if err then
-		exception.raise('invalid', 'object data', err)
+	if p ~= util.NULL then
+		local rb = self:to_rbuf(p, pl)
+		local obj, err = serde:unpack(rb)
+		if err then
+			exception.raise('invalid', 'object data', err)
+		end
+		return obj
+	else
+		return nil
 	end
-	return obj
 end
 function store_rocksdb_index:put_logs(logcache, serde, start_idx, end_idx)
 	local txn = self.db:new_txn()
@@ -168,6 +170,7 @@ function store_rocksdb_index:unsafe_delete_logs(txn, start_idx, end_idx)
 end
 function store_rocksdb_index:get_log(idx, serde)
 	local p, pl = self.db:rawget(self:logkey(idx))
+	if p == util.NULL then return nil end
 	if _M.DEBUG then
 		print('get_log', idx, ffi.string(p, pl))
 	end

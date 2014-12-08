@@ -1,6 +1,7 @@
 local luact = require 'luact.init'
 local memory = require 'pulpo.memory'
 local ffi = require 'ffiex.init'
+local fs = require 'pulpo.fs'
 
 local luact = require 'luact.init'
 
@@ -8,9 +9,10 @@ luact.start({
 	cache_dir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 }, function ()
-	local luact = require 'luact.init'
+local luact = require 'luact.init'
+local fs = require 'pulpo.fs'
+local ok,r = xpcall(function ()
 	local ffi = require 'ffiex.init'
-	local fs = require 'pulpo.fs'
 	local memory = require 'pulpo.memory'
 	local rocksdb = require 'luact.storage.rocksdb'
 
@@ -25,9 +27,8 @@ luact.start({
 	} valgen_t;
 	]]
 
-	fs.rmdir('/tmp/rocksdb')
-	fs.mkdir('/tmp/rocksdb')
-	local db = rocksdb.open('/tmp/rocksdb/testdb')
+	fs.rmdir('/tmp/luact/rocksdb/testdb')
+	local db = rocksdb.open('/tmp/luact/rocksdb/testdb')
 	local p = memory.alloc_typed('valgen_t')
 	for i=1,4 do
 		p.u[i - 1] = 0xdeadbeef
@@ -59,7 +60,7 @@ luact.start({
 	for i=txn_key_start,txn_key_start+100 do
 		keygen.ll = i
 		local ptr, pl = db:rawget(keygen.p, 8)
-		-- print('aftabort', ptr, pl)
+		-- print('aftabort', ptr, pl, ffi.string(ptr, pl))
 		assert(ffi.NULL == ptr, "if transaction is not commited, put key should not appear")
 	end
 
@@ -78,6 +79,11 @@ luact.start({
 			assert(ffi.cast('uint32_t*', ptr)[i - 1] == 0xdeadbeef, "data contents should never change")
 		end
 	end
+end, function (e)
+	logger.error('err', e, debug.traceback())
+end)
+	fs.rmdir('/tmp/luact/rocksdb/testdb')	
+
 	luact.stop()
 end)
 

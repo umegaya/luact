@@ -8,6 +8,7 @@ local fs = require 'pulpo.fs'
 -- pulpo_package.DEBUG= true
 local ffi = require 'ffiex.init'
 
+require 'luact.util.patch'
 local actor = require 'luact.actor'
 local optparse = require 'luact.optparse'
 local listener = require 'luact.listener'

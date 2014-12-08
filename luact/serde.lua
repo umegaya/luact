@@ -110,81 +110,100 @@ function b2s_conv_index:ptr2float(ptr)
 end
 local custom_pack = {}
 local custom_unpack = {}
-function b2s_conv_index:escape(obj)
-	local has_cdata 
-	local tmp = { __cdata__ = {}, __le__ = socket.little_endian() }
-	for idx,arg in pairs(obj) do
-		if type(arg) == "cdata" then
-			has_cdata = true
-			local refl = reflect.typeof(arg)
-			-- print('cdata arg:', refl.what, refl.name, tostring(arg))
-			if refl.what == 'int' or refl.what == 'enum' then
-				if refl.unsigned then
-					tmp[idx] = ffi.string(self:unsigned2ptr(arg, refl), refl.size)
-				else
-					tmp[idx] = ffi.string(self:signed2ptr(arg, refl), refl.size)
-				end
-				tmp.__cdata__[idx] = {name = 'int', unsigned = refl.unsigned}
-			elseif refl.what == 'float' then
-				tmp[idx] = ffi.string(self:float2ptr(arg, refl), refl.size)
-				tmp.__cdata__[idx] = {name = 'float'}
-			elseif refl.what == 'struct' or refl.what == 'union' then
-				-- print('refl.name = ', refl.name, 'size = ', refl.size, ffi.sizeof('struct luact_id_tag'))
-				local name = refl.what.." "..refl.name
-				if custom_pack[name] then
-					tmp[idx] = custom_pack[name](arg)
-				else
-					tmp[idx] = ffi.string(arg, refl.size)
-				end
-				tmp.__cdata__[idx] = {name = name}
-			elseif refl.what == 'array' then
-				tmp[idx] = ffi.string(arg, refl.size)
-				tmp.__cdata__[idx] = {name = 'array', tp = refl.element_type.name}
-			elseif refl.what == 'ptr' or refl.what == 'ref' then
-				tmp[idx] = ffi.string(arg, refl.element_type.size)
-				-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size, ffi.sizeof('struct luact_id_tag'))
-				local et = refl.element_type
-				tmp.__cdata__[idx] = {name = 'ptr', tp = et.what.." "..et.name}
-			end
-		elseif type(arg) == 'table' then
-			-- TODO : nested table which has cdata in it, need to pack?
-			tmp[idx] = self:escape(arg)
+function b2s_conv_index:escape_cdata(tmp, idx, arg)
+	local refl = reflect.typeof(arg)
+-- print('cdata arg:', refl.what, refl.name, tostring(arg))
+	if refl.what == 'int' or refl.what == 'enum' then
+		if refl.unsigned then
+			tmp[idx] = ffi.string(self:unsigned2ptr(arg, refl), refl.size)
 		else
-			-- such an complex structure should pass as uuid to remote. 
-			tmp[idx] = arg
+			tmp[idx] = ffi.string(self:signed2ptr(arg, refl), refl.size)
+		end
+		return {name = 'int', unsigned = refl.unsigned}
+	elseif refl.what == 'float' then
+		tmp[idx] = ffi.string(self:float2ptr(arg, refl), refl.size)
+		return {name = 'float'}
+	elseif refl.what == 'struct' or refl.what == 'union' then
+		-- print('refl.name = ', refl.name, 'size = ', refl.size)
+		local name = refl.what.." "..refl.name
+		if custom_pack[name] then
+			tmp[idx] = custom_pack[name](arg)
+		else
+			tmp[idx] = ffi.string(arg, refl.size)
+		end
+		return {name = name}
+	elseif refl.what == 'array' then
+		tmp[idx] = ffi.string(arg, refl.size)
+		return {name = 'array', tp = refl.element_type.name}
+	elseif refl.what == 'ptr' or refl.what == 'ref' then
+		tmp[idx] = ffi.string(arg, refl.element_type.size)
+		-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
+		local et = refl.element_type
+		return {name = 'ptr', tp = et.what.." "..et.name}
+	end
+end
+function b2s_conv_index:escape(obj)
+	local changed 
+	if type(obj) ~= 'table' then
+		local tmp = { __le__ = socket.little_endian() }
+		if type(obj) == "cdata" then
+			changed = true
+			tmp.__cdata__ = self:escape_cdata(tmp, 1, obj)
+		end
+		return changed and tmp or obj
+	else
+		local tmp = { __cdatas__ = {}, __le__ = socket.little_endian() }
+		for idx,arg in pairs(obj) do
+			if type(arg) == "cdata" then
+				changed = true
+				tmp.__cdatas__[idx] = self:escape_cdata(tmp, idx, arg)
+			elseif type(arg) == 'table' and (not (getmetatable(arg) and getmetatable(arg).__serialize)) then
+				changed = true
+				-- TODO : nested table which has cdata in it, need to pack?
+				tmp[idx] = self:escape(arg)
+			else
+				-- such an complex structure should pass as uuid to remote. 
+				tmp[idx] = arg
+			end
+		end
+		return changed and tmp or obj
+	end
+end
+function b2s_conv_index:unescape_cdata(src, tp)
+	if tp.name == 'int' then
+		if tp.unsigned then
+			return self:ptr2unsigned(src)
+		else
+			return self:ptr2signed(src)
+		end
+	elseif tp.name == 'float' then
+		return self:ptr2float(src)
+	elseif tp.name == 'array' or tp.name == 'ptr' then
+		local tmp = memory.alloc_typed(tp.tp, #(src) / ffi.sizeof(tp.tp))
+		ffi.copy(tmp, src, #src)
+		return tmp
+	elseif tp.name then
+		if custom_unpack[tp.name] then
+			return custom_unpack[tp.name](src)
+		else
+			local tmp = memory.alloc_typed(tp.name)
+			ffi.copy(tmp, src, ffi.sizeof(tp.name))
+			return tmp
 		end
 	end
-	return has_cdata and tmp or obj
 end
 function b2s_conv_index:unescape(obj)
 	-- TODO : check obj.le and if endian is not match with this node, do something like ntohs/ntohl/ntohll
 	if obj.__cdata__ then
-		for idx,tp in pairs(obj.__cdata__) do
-			if tp.name == 'int' then
-				if tp.unsigned then
-					obj[idx] = self:ptr2unsigned(obj[idx])
-				else
-					obj[idx] = self:ptr2signed(obj[idx])
-				end
-			elseif tp.name == 'float' then
-				obj[idx] = self:ptr2float(obj[idx])
-			elseif tp.name == 'array' or tp.name == 'ptr' then
-				local tmp = memory.alloc_typed(tp.tp, #(obj[idx]) / ffi.sizeof(tp.tp))
-				ffi.copy(tmp, obj[idx], #obj[idx])
-				obj[idx] = tmp
-			elseif tp.name then
-				if custom_unpack[tp.name] then
-					obj[idx] = custom_unpack[tp.name](obj[idx])
-				else
-					local tmp = memory.alloc_typed(tp.name)
-					ffi.copy(tmp, obj[idx], ffi.sizeof(tp.name))
-					obj[idx] = tmp
-				end
-			end
+		return self:unescape_cdata(obj[1], obj.__cdata__)
+	end
+	if obj.__cdatas__ then
+		for idx,tp in pairs(obj.__cdatas__) do
+			obj[idx] = self:unescape_cdata(obj[idx], tp)
 		end
 	end
 	for k,v in pairs(obj) do
-		if type(v) == 'table' and v.__cdata__ then
+		if type(v) == 'table' and (v.__cdata__ or v.__cdatas__) then
 			obj[k] = self:unescape(v)
 		end
 	end
@@ -211,7 +230,7 @@ end
 
 _M[kind.serpent] = serpent
 function serpent:pack_packet(buf, append, ...)
-	logger.notice('packer', ...)
+	logger.notice('packets', ...)
 	exception.serializer = serpent.serializer
 	local str = sp.dump(conv:escape({...}))
 	local data = tostring(#str)..":"..str

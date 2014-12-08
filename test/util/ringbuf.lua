@@ -1,5 +1,5 @@
 local luact = require 'luact.init'
-local ringbuf = require 'luact.cluster.raft.ringbuf'
+local ringbuf = require 'luact.util.ringbuf'
 
 local size = 16
 local b = ringbuf.new(size)
