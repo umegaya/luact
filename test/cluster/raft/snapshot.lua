@@ -1,7 +1,5 @@
 local luact = require 'luact.init'
 
-local luact = require 'luact.init'
-
 luact.start({
 	cache_dir = "/tmp/luact",
 	n_core = 1, exclusive = true,
@@ -101,7 +99,7 @@ end, function (e)
 	logger.error('err', e)
 end)
 
--- fs.rmdir('/tmp/luact/snapshot')
+fs.rmdir('/tmp/luact/snapshot')
 	
 luact.stop()
 end)

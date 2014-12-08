@@ -35,6 +35,9 @@ function fs.load2rbuf(file, rb)
 	rb:use(sz)
 ::ERROR::
 	if not e then
+		if fd >= 0 then
+			C.close(fd)
+		end
 		return rb
 	else
 		if fd >= 0 then

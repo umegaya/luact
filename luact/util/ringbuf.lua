@@ -18,6 +18,14 @@ local ringbuf_store_index = {}
 local ringbuf_store_mt = {
 	__index = ringbuf_store_index,
 }
+-- debug dump
+function ringbuf_store_index:dump()
+	print('dump ringbuf store:', self)
+	for k,v in pairs(self) do
+		print(k, v, v.index, v.term)
+	end
+end
+-- interface for storing ringbuffer data
 function ringbuf_store_index:fin()
 end
 function ringbuf_store_index:realloc()
@@ -26,15 +34,15 @@ end
 function ringbuf_store_index:delete(i)
 	self[i] = nil
 end
+function ringbuf_store_index:get_by_pos(i)
+	return self[i]
+end
+function ringbuf_store_index:set_by_pos(i, v)
+	self[i] = v
+end
 function ringbuf_store_index:copy(src_store, src_pos, dst_pos)
 	-- +1 for lua array index
 	self[dst_pos] = src_store[src_pos]
-end
-function ringbuf_store_index:dump()
-	print('dump ringbuf store:', self)
-	for k,v in pairs(self) do
-		print(k, v, v.index, v.term)
-	end
 end
 function ringbuf_store_index:from(spos, epos)
 	if spos < epos then
@@ -64,7 +72,7 @@ end
 function ringbuf_header_index:at(idx, store)
 	if self:verify_range(idx) then
 		local pos = self:index2pos(idx)
-		return store[pos]
+		return store:get_by_pos(pos)
 	end
 	return nil
 end
@@ -114,7 +122,7 @@ function ringbuf_header_index:put_at(idx, store, log)
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end
-		store[self:index2pos(idx)] = log
+		store:set_by_pos(self:index2pos(idx), log)
 		if diff > 0 then
 			self.end_idx = idx
 		end
@@ -127,7 +135,7 @@ function ringbuf_header_index:init_at(idx, store, init, ...)
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end
-		init(store[self:index2pos(idx)], ...)
+		init(store:get_by_pos(self:index2pos(idx)), ...)
 		if diff > 0 then
 			self.end_idx = idx
 		end
@@ -137,12 +145,13 @@ end
 function ringbuf_header_index:delete_elements(end_idx, store)
 	if self:verify_range(end_idx) then
 		local start_idx = tonumber(self.start_idx)
-		end_idx = end_idx or self.end_idx
+		end_idx = tonumber(end_idx or self.end_idx)
 		for idx=start_idx,end_idx do
 			local pos = self:index2pos(idx)
 			store:delete(pos)
 		end
 		self.start_idx = end_idx + 1
+		-- if all elements are removed
 		if self.end_idx <= end_idx then
 			self.end_idx = end_idx + 1
 		end
