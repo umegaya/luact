@@ -35,22 +35,27 @@ function replicator_index:fin()
 end
 function replicator_index:start(actor, state)
 	self:init(state)
-	tentacle(self.heartbeat, self, actor, state)
-	tentacle(self.run, self, actor, state)
+	local ev = tentacle(self.heartbeat, self, actor, state)
+	return tentacle(self.run, self, actor, state, ev)
 end
-function replicator_index:run(actor, state)
+function replicator_index:run(actor, state, hbev)
 	event.select({
 		self = self, 
 		actor = actor, 
 		state = state, 
+		[hbev] = function (t)
+			t.self:fin()
+			return true
+		end, 
 		[state.ev_close] = function (t)
-			t.self.alive = 0
+			t.self:fin()
 			return true
 		end,
 		[state.ev_log] = function (t, tp, ...)
 			if not t.running then
 				t.running = true
 				local ok, r = pcall(t.self.replicate, t.self, t.actor, t.state)
+				t.running = false
 				if not ok then
 					logger.error('raft', 'replicate', r)
 				end
@@ -233,8 +238,8 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 -- module functions
 function _M.new(actor, state)
 	local r = memory.alloc_fill_typed('luact_raft_replicator_t')
-	r:start(actor, state)
-	return r
+	local term_ev = r:start(actor, state)
+	return r, term_ev
 end
 
 return _M

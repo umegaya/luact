@@ -16,6 +16,7 @@ local ok,r = xpcall(function ()
 	local sr = serde[serde.kind.serpent]
 	local uuid = require 'luact.uuid'
 	local clock = require 'luact.clock'
+	local event = require 'pulpo.event'
 	local util = require 'pulpo.util'
 	local fs = require 'pulpo.fs'
 	local memory = require 'pulpo.memory'
@@ -84,6 +85,50 @@ local ok,r = xpcall(function ()
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
 	local st = state.new(fsm, w, ss, opts)
 	local p = st.proposals
+	function st:quorum()
+		return 3
+	end
+	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
+		if not entries then
+			print('heartbeat:', term, leader)
+			return term, true
+		end
+		print('append entries', term, prev_log_idx, prev_log_term)
+		assert(term == 0 and prev_log_idx == 0 and prev_log_term == 0, "its first append entries, so log index and term is initial")
+		assert(uuid.equals(leader, opts.debug_leader_id), "leader id should be same as specified")
+		assert(#entries == FIRST_LOGSIZE, "correct entries should be sent")
+		for i=1,FIRST_LOGSIZE do
+			assert(entries[i].log.value == i, "correct entries should be sent")
+		end
+		return term, true, entries[FIRST_LOGSIZE].index
+	end
+
+	local rep, endev = replicator.new(actor, st)
+	local logs = {}
+	for i=1,FIRST_LOGSIZE do
+		table.insert(logs, { value = i })
+	end
+	st:write_logs(nil, logs)
+	clock.sleep(0.5)
+
+	for i=1,FIRST_LOGSIZE do
+		local s = p.progress:at(i)
+		assert(s:valid() and s.quorum == 3 and s.current == 1, "proposal should be committed")
+	end
+
+	rep:fin()
+	event.wait(false, endev)
+	st:fin()
+	end)()
+
+	--[[ failure
+	x = (function ()
+	local fsm = new_fsm()
+	local store = rdbstore.new(TESTDB_DIR, 'state_test')
+	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
+	local ss = snapshot.new(SNAPSHOT_DIR, sr)
+	local st = state.new(fsm, w, ss, opts)
+	local p = st.proposals
 	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
 		if not entries then
 			print('heartbeat:', term, leader)
@@ -108,6 +153,7 @@ local ok,r = xpcall(function ()
 	clock.sleep(0.5)
 
 	end)()
+	]]
 
 end, function (e)
 	logger.error('err', e)

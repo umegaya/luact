@@ -118,10 +118,12 @@ function raft_state_container_index:quorum()
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	local q = self:quorum()
+	if q < 2 then
+		exception.raise('invalid', 'quorum too short', q)
+	end
 	local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
 	self.proposals:add(q, start_idx, end_idx)
 	self.ev_log:emit('add')
-	print('emit end:add')
 end
 function raft_state_container_index:write_logs(msgid, logs)
 	self:write_any_logs(nil, msgid, logs)
