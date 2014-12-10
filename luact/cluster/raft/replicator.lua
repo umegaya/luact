@@ -38,6 +38,17 @@ function replicator_index:start(actor, state)
 	local ev = tentacle(self.heartbeat, self, actor, state)
 	return tentacle(self.run, self, actor, state, ev)
 end
+function replicator_index:start_replication(t)
+	t.running = true
+	local ok, r = pcall(self.replicate, self, t.actor, t.state)
+	t.running = false
+	if not ok then
+		logger.error('raft', 'replicate', r)
+	end
+	if ok and r then
+		self.alive = 0
+	end
+end
 function replicator_index:run(actor, state, hbev)
 	event.select({
 		self = self, 
@@ -53,13 +64,7 @@ function replicator_index:run(actor, state, hbev)
 		end,
 		[state.ev_log] = function (t, tp, ...)
 			if not t.running then
-				t.running = true
-				local ok, r = pcall(t.self.replicate, t.self, t.actor, t.state)
-				t.running = false
-				if not ok then
-					logger.error('raft', 'replicate', r)
-				end
-				return ok and r
+				tentacle(t.self.start_replication, t.self, t)
 			end
 		end,
 	})
