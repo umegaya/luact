@@ -142,6 +142,11 @@ function ringbuf_header_index:init_at(idx, store, init, ...)
 	end
 	return store
 end
+function ringbuf_header_index:rollback_index(idx)
+	if self:verify_range(idx) then
+		self.end_idx = idx
+	end	
+end
 function ringbuf_header_index:delete_elements(end_idx, store)
 	if self:verify_range(end_idx) then
 		local start_idx = tonumber(self.start_idx)
@@ -201,6 +206,9 @@ function ringbuf_index:init_at(idx, fn, ...)
 end
 function ringbuf_index:delete_elements(eidx)
 	self.header:delete_elements(eidx, self.store)
+end
+function ringbuf_index:rollback_index(idx)
+	self.header:rollback_index(idx)
 end
 function ringbuf_index:from(sidx)
 	return self.header:from(sidx, self.store)

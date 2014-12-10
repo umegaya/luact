@@ -87,6 +87,7 @@ end
 function _M.addr(t) 
 	return t.__tag__.machine_id 
 end
+_M.machine_id = _M.addr
 function _M.clone(t)
 	local buf = idgen:new()
 	buf.local_id = t.local_id

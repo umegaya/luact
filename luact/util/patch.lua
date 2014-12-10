@@ -29,7 +29,7 @@ function fs.load2rbuf(file, rb)
 	rb:reserve(sz)
 	r = C.read(fd, rb:start_p(), sz)
 	if sz ~= r then
-		e = exception.raise('invalid', 'readsize', sz, r)
+		e = exception.raise('invalid', 'readsize', file, sz, r)
 		goto ERROR
 	end
 	rb:use(sz)

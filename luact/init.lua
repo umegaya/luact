@@ -35,7 +35,6 @@ local opts_defs = {
 local factory 
 factory = {
 	["table"] = function (tbl)
-	print('tbl:', tbl)
 		return tbl
 	end,
 	["cdata"] = function (cdata)

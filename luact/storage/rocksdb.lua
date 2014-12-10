@@ -3,9 +3,11 @@ local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
 local thread = require 'pulpo.thread'
 local exception = require 'pulpo.exception'
+local wp = require 'pulpo.debug.watchpoint'
 exception.define('rocksdb')
 
 local _M = {}
+local dbpath_map = {}
 
 -- cdefs 
 local C = ffi.C
@@ -15,6 +17,17 @@ typedef struct luact_rocksdb_column_family {
 	rocksdb_t *db;
 	rocksdb_column_family_handle_t *cf;
 } luact_rocksdb_column_family_t;
+typedef struct luact_rocksdb_cf_handle {
+	int32_t refc;
+	rocksdb_column_family_handle_t *cf;
+} luact_rocksdb_cf_handle_t;
+typedef struct luact_rocksdb {
+	rocksdb_t *db;
+	int32_t refc;
+	size_t cfsize, cfused;
+	const char **names;
+	luact_rocksdb_cf_handle_t *handles;
+} luact_rocksdb_t;
 typedef struct luact_rocksdb_txn {
 	rocksdb_t *db;
 	rocksdb_writebatch_t *b;
@@ -49,6 +62,18 @@ local function setopts(opts, prefix, opts_table)
 	end
 	return opts
 end
+local function shmem_key(path)
+	return 'rocksdb:'..path
+end
+local function db_from_key(db)
+	for k,v in pairs(dbpath_map) do
+		-- print('dbpath_map:', k, v, db)
+		if v == db then
+			return k
+		end
+	end
+end
+
 
 
 -- rocksdb primitives cache
@@ -98,6 +123,79 @@ open_opts:init({
 	create_if_missing = 1, 
 })
 
+
+-- luact_rocksdb
+local luact_rocksdb_index = {}
+local luact_rocksdb_mt = {
+	__index = luact_rocksdb_index,
+}
+function luact_rocksdb_index:fin()
+	for i=0,tonumber(self.cfused)-1 do
+		if self.handles[i].refc > 0 then
+			logger.warn('rocksdb', 'column_family leak', self.names[i])
+		end
+		-- only when database itself finished, column family can destroy.
+		-- otherwise we never be able to re-create it.
+		memory.free(ffi.cast('void *', self.names[i]))
+		LIB.rocksdb_column_family_handle_destroy(self.handles[i].cf)
+	end
+	if self.names ~= util.NULL then
+		memory.free(self.names)
+	end
+	if self.handles ~= util.NULL then
+		memory.free(self.handles)
+	end
+	if self.db ~= util.NULL then
+		self.db:fin()
+	end
+end
+function luact_rocksdb_index:close_column_family(cf, destroy)
+	for i=0,tonumber(self.cfused)-1 do
+		if (self.handles[i].cf == cf) then
+			if destroy then
+				-- mark when database closed, this column family destroyed
+				callapi(LIB.rocksdb_drop_column_family, self.db, cf)
+			end
+			self.handles[i].refc = self.handles[i].refc - 1
+			return true
+		end
+	end
+	return found
+end
+function luact_rocksdb_index:destroy_column_family(cf)
+	return self:close_column_family(cf, true)
+end
+function luact_rocksdb_index:reserve_cf_entry(size)
+	local required = self.cfused + size
+	while required > self.cfsize do
+		self.cfsize = self.cfsize * 2
+	end
+	local new_names, new_handles = 
+		memory.realloc_typed('const char *', self.names, self.cfsize), 
+		memory.realloc_typed('luact_rocksdb_cf_handle_t', self.handles, self.cfsize)
+	if new_names == util.NULL or new_handles == util.NULL then
+		exception.raise('fatal', 'rocksdb memory allocation error', new_names, new_handles)
+	end
+	self.names = new_names
+	self.handles = new_handles
+end
+function luact_rocksdb_index:open_column_family(name, opts)
+	for i=0,tonumber(self.cfused)-1 do
+		if util.strcmp(self.names[i], name, #name) then
+			self.handles[i].refc = self.handles[i].refc + 1
+			return self.handles[i].cf
+		end
+	end
+	self:reserve_cf_entry(1)
+	local cf = callapi(LIB.rocksdb_create_column_family, self.db, opts, name)
+	local r = self.handles[self.cfused]
+	self.names[self.cfused] = memory.strdup(name)
+	r.cf = cf
+	r.refc = 1
+	self.cfused = self.cfused + 1
+	return cf
+end
+ffi.metatype('luact_rocksdb_t', luact_rocksdb_mt)
 
 -- rocksdb iter
 local rocksdb_iter_index = {}
@@ -158,11 +256,17 @@ local rocksdb_mt = {
 	__index = rocksdb_index
 }
 local vsz = ffi.new('size_t[1]')
+local wpset
 function rocksdb_index:column_family(name, opts)
-	-- if gc metamethod is specified, don't use managed_alloc_typed.
-	local p = memory.alloc_typed('luact_rocksdb_column_family_t')
+	local key = db_from_key(self)
+	-- decrement ref count
+	local cf = thread.lock_shared_memory(key, function (ptr, dbname, options)
+		local p = ffi.cast('luact_rocksdb_t*', ptr)
+		return p:open_column_family(dbname, options)
+	end, name, opts or open_opts)
+	local p = memory.managed_alloc_typed('luact_rocksdb_column_family_t')
+	p.cf = cf
 	p.db = self
-	p.cf = callapi(LIB.rocksdb_create_column_family, self, opts or open_opts, name)
 	return p
 end
 function rocksdb_index:get(k, opts)
@@ -220,6 +324,21 @@ end
 function rocksdb_index:pairs(opts)
 	return rocksdb_iter_next_str, self:iterator(opts)
 end
+function rocksdb_index:close()
+	local key = db_from_key(self)
+	print(key)
+	-- decrement ref count
+	local cnt = thread.lock_shared_memory(key, function (ptr)
+		local p = ffi.cast('luact_rocksdb_t*', ptr)
+		p.refc = p.refc - 1
+		return p.refc
+	end)
+	if cnt <= 0 then
+		-- remove from shared memory
+		dbpath_map[key] = nil
+		thread.shared_memory(key, nil)
+	end
+end
 function rocksdb_index:fin()
 	LIB.rocksdb_close(self)
 end
@@ -228,10 +347,10 @@ ffi.metatype('rocksdb_t', rocksdb_mt)
 
 -- rocksdb column family
 local rocksdb_cf_index = util.copy_table(rocksdb_index)
+rocksdb_cf_index.close = nil
 local function rocksdb_cf_gc(t) t:fin() end
 local rocksdb_cf_mt = {
 	__index = rocksdb_cf_index,
-	__gc = rocksdb_cf_gc,
 }
 function rocksdb_cf_index:rawget(k, kl, opts)
 	return callapi(LIB.rocksdb_get_cf, self.db, opts or read_opts, self.cf, k, kl, vsz), vsz[0]
@@ -252,6 +371,20 @@ function rocksdb_cf_index:new_txn()
 	return rocksdb_txn_new(self.db)
 end
 function rocksdb_cf_index:fin()
+	local key = db_from_key(self.db)
+	-- decrement ref count
+	thread.lock_shared_memory(key, function (ptr, cf)
+		local p = ffi.cast('luact_rocksdb_t*', ptr)
+		p:close_column_family(cf)
+	end, self.cf)
+end
+function rocksdb_cf_index:destroy()
+	local key = db_from_key(self.db)
+	-- decrement ref count
+	thread.lock_shared_memory(key, function (ptr, cf)
+		local p = ffi.cast('luact_rocksdb_t*', ptr)
+		p:destroy_column_family(cf)
+	end, self.cf)
 	callapi(LIB.rocksdb_drop_column_family, self.db, self.cf)
 end
 ffi.metatype('luact_rocksdb_column_family_t', rocksdb_cf_mt)
@@ -267,7 +400,7 @@ function rocksdb_txn_index:rawput(k, kl, v, vl)
 	return LIB.rocksdb_writebatch_put(self.b, k, kl, v, vl)
 end
 function rocksdb_txn_index:rawdelete(k, kl)
-	return LIB.rocksdb_writebatch_put(self.b, k, kl)
+	return LIB.rocksdb_writebatch_delete(self.b, k, kl)
 end
 function rocksdb_txn_index:rawmerge(k, kl, v, vl)
 	return LIB.rocksdb_writebatch_merge(self.b, k, kl, v, vl)
@@ -282,7 +415,7 @@ function rocksdb_txn_index:delete_cf(cf, k)
 	return self:rawdelete_cf(cf, k, #k)
 end
 function rocksdb_txn_index:rawdelete_cf(cf, k, kl)
-	return LIB.rocksdb_writebatch_put_cf(self.b, cf.cf, k, kl)
+	return LIB.rocksdb_writebatch_delete_cf(self.b, cf.cf, k, kl)
 end
 function rocksdb_txn_index:merge_cf(cf, k, v)
 	return self:rawmerge_cf(cf, k, #k, v, #v)
@@ -300,10 +433,61 @@ ffi.metatype('luact_rocksdb_txn_t', rocksdb_txn_mt)
 
 
 -- module interface
-function _M.open(name, opts)
-	return thread.shared_memory('rocksdb:'..name, function ()
-		return 'rocksdb_t', callapi(LIB.rocksdb_open, opts or open_opts, name)
+function _M.open(name, opts, debug_conf)
+	local key = shmem_key(name)
+	local ldb = thread.shared_memory(key, function ()
+		debug_conf = debug_conf or {}
+		opts = opts or open_opts
+		local size_p = ffi.new('size_t[1]')
+		local ok, r = pcall(callapi, LIB.rocksdb_list_column_families, opts, name, size_p)
+		local mem = memory.alloc_fill_typed('luact_rocksdb_t')
+		if ok then
+			mem.names = ffi.cast('const char **', r)
+			mem.cfsize = size_p[0]
+			local handles = ffi.new('rocksdb_column_family_handle_t*[?]', mem.cfsize)
+			local options_p = ffi.new('const rocksdb_options_t*[?]', mem.cfsize)
+			for i=0,tonumber(mem.cfsize)-1 do
+				options_p[i] = opts
+			end
+			ok, r = pcall(callapi, LIB.rocksdb_open_column_families, 
+				opts, name, mem.cfsize, mem.names, options_p, handles)
+			if not ok then
+				mem:fin()
+				error(r)
+			end
+			mem.handles = memory.alloc_fill_typed('luact_rocksdb_cf_handle_t', mem.cfsize)
+			for i=0,tonumber(mem.cfsize)-1 do
+				mem.handles[i].cf = handles[i]
+				mem.handles[i].refc = 0
+			end
+			mem.cfused = mem.cfsize
+			mem.db = r
+			return 'luact_rocksdb_t', mem
+		else
+			if (type(r) ~= 'table') or (not r:get_arg(2):match('No such file or directory')) then 
+				mem:fin()
+				error(r) 
+			end
+			ok, r = pcall(callapi, LIB.rocksdb_open, opts, name)
+			if not ok then
+				mem:fin()
+				error(r)
+			end	
+			mem.cfsize = debug_conf.initial_column_family_buffer_size or 16
+			mem.cfused = 0
+			mem.names = memory.alloc_fill_typed('const char *', mem.cfsize)
+			mem.handles = memory.alloc_fill_typed('luact_rocksdb_cf_handle_t', mem.cfsize)
+			mem.db = r
+			return 'luact_rocksdb_t', mem
+		end
 	end)
+	thread.lock_shared_memory(key, function (ptr)
+		local mem = ffi.cast('luact_rocksdb_t*', ptr)
+		mem.refc = mem.refc + 1
+	end)
+	local db = ldb.db
+	dbpath_map[key] = db
+	return db
 end
 -- you can change global options only once by using init
 _M.open_options, _M.read_options, _M.write_options = open_opts, read_opts, write_opts

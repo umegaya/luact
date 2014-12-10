@@ -24,7 +24,7 @@ local replicator_mt = {
 	__index = replicator_index
 }
 function replicator_index:init(state)
-	self.next_idx = state.wal.last_index + 1
+	self.next_idx = state.wal:last_index() + 1
 	self.match_idx = 0
 	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec / 10
 end
@@ -136,8 +136,9 @@ function replicator_index:replicate(actor, state)
 	-- Check if there are more logs to replicate
 	if self.next_idx <= state.wal.last_index then
 		goto START
+	else
+		return
 	end
-	return
 
 	-- SYNC is used when we fail to get a log, usually because the follower
 	-- is too far behind, and we must ship a snapshot down instead
@@ -221,6 +222,7 @@ function replicator_index:heartbeat(actor, state)
 		end
 	end
 end
+ffi.metatype('luact_raft_replicator_t', replicator_mt)
 
 
 -- module functions

@@ -28,7 +28,6 @@ local wal_writer_mt = {
 }
 function wal_writer_index:init()
 	self.rb:init()
-	self.last_index = 0
 	self.fd = -1
 end
 function wal_writer_index:fin()
@@ -44,9 +43,6 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 	local last_index = self.last_index
 	for i=1,#logs,1 do
 		last_index = last_index + 1
-		if self.last_index <= 0 then
-			self.last_index = last_index
-		end
 		local log = self:new_log(kind, term, last_index, logs[i])
 		-- last log have coroutine object to resume after these logs are accepted.
 		-- (its not necessary for persisted data, so after serde:pack)
@@ -54,13 +50,16 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		logcache:put_at(last_index, log)
 		print('logat', last_index, logcache:at(last_index))
 	end
-	local ok, r = store:put_logs(logcache, serde, self.last_index, last_index)
+	local first_index = self.last_index + 1
+	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
 	if not ok then
-		exception.raise('fatal', 'raft', 'fail to commit logs', r)
+		logcache:rollback_index(self.last_index)
+		return nil
 	end
+	-- print('last_index:', self.last_index, "=>", last_index)
 	self.last_index = last_index
 	self.last_term = term
-	return self.last_index
+	return first_index, last_index
 end
 function wal_writer_index:delete(store, start_idx, end_idx)
 	store:delete_logs(start_idx, end_idx)
@@ -93,13 +92,15 @@ function wal_index:can_restore()
 end
 function wal_index:compaction(upto_idx)
 	-- remove in memory log with some margin (because minority node which hasn't replicate old log exists.)
-	self.store:compaction(upto_idx - self.opts.log_compaction_margin)
-	self.logcache:delete_elements(upto_idx - self.opts.log_compaction_margin)
+	if upto_idx > self.opts.log_compaction_margin then
+		self.store:compaction(upto_idx - self.opts.log_compaction_margin)
+		self.logcache:delete_elements(upto_idx - self.opts.log_compaction_margin)
+	else
+		logger.warn('raft', 'upto_idx too short', upto_idx, self.opts.log_compaction_margin)
+	end
 end
 function wal_index:write(kind, term, logs, msgid)
-	if not pcall(self.writer.write, self.writer, self.store, kind, term, logs, self.serde, self.logcache, msgid) then
-		self.store:rollback()
-	end
+	return self.writer:write(self.store, kind, term, logs, self.serde, self.logcache, msgid)
 end
 function wal_index:read_state()
 	return self.writer:read_state(self.store, 'state', self.serde, self.logcache)
@@ -137,7 +138,7 @@ end
 -- module function
 function _M.new(meta, store, serde, opts)
 	local wal = setmetatable({
-		writer = memory.alloc_typed('luact_raft_wal_writer_t'),
+		writer = memory.alloc_fill_typed('luact_raft_wal_writer_t'),
 		store = store,
 		-- TODO : using cdata array if serde is such kind.
 		logcache = ringbuf.new(opts.log_compaction_margin),

@@ -28,6 +28,9 @@ exception.define('actor_temporary_fail')
 --[[
 	manages relation of actor
 --]]
+-- TODO : sometimes cdata is resulting different table key.
+-- eg) refer member cdata (even if it is pointer!!)
+-- use FFI implementation of map
 local actormap = {}
 local actor_index = {}
 local actor_mt = {

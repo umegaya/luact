@@ -294,6 +294,7 @@ local function create(id, fsm, opts)
 	return rft
 end
 -- create new raft state machine
+_M.default_opts = default_opts
 function _M.new(id, fsm, opts)
 	local rft = raftmap[id]
 	if not rft then

@@ -28,7 +28,10 @@ local ok,r = xpcall(function ()
 	]]
 
 	fs.rmdir('/tmp/luact/rocksdb/testdb')
-	local db = rocksdb.open('/tmp/luact/rocksdb/testdb')
+	fs.mkdir('/tmp/luact/rocksdb/testdb')
+	local db = rocksdb.open('/tmp/luact/rocksdb/testdb', nil, {
+		initial_column_family_buffer_size = 1,
+	})
 	local p = memory.alloc_typed('valgen_t')
 	for i=1,4 do
 		p.u[i - 1] = 0xdeadbeef
@@ -61,7 +64,7 @@ local ok,r = xpcall(function ()
 		keygen.ll = i
 		local ptr, pl = db:rawget(keygen.p, 8)
 		-- print('aftabort', ptr, pl, ffi.string(ptr, pl))
-		assert(ffi.NULL == ptr, "if transaction is not commited, put key should not appear")
+		assert(ffi.NULL == ptr, "if transaction is not committed, put key should not appear")
 	end
 
 	txn = db:new_txn()
@@ -74,15 +77,45 @@ local ok,r = xpcall(function ()
 		keygen.ll = i
 		local ptr, pl = db:rawget(keygen.p, 8)
 		-- print('aftcommit', ptr, pl)
-		assert(ffi.NULL ~= ptr and pl == 16, "if transaction is commited, put key should appear")
+		assert(ffi.NULL ~= ptr and pl == 16, "if transaction is committed, put key should appear")
 		for i=1,4 do
 			assert(ffi.cast('uint32_t*', ptr)[i - 1] == 0xdeadbeef, "data contents should never change")
 		end
 	end
+
+	txn = db:new_txn()
+	for i=txn_key_start,txn_key_start+100 do
+		keygen.ll = i
+		txn:rawdelete(keygen.p, 8)
+	end
+	txn:commit()
+	for i=txn_key_start,txn_key_start+100 do
+		keygen.ll = i
+		local ptr, pl = db:rawget(keygen.p, 8)
+		-- print('aftabort', ptr, pl, ffi.string(ptr, pl))
+		assert(ffi.NULL == ptr, "if key is deleted, put key should not appear")
+	end
+
+
+	local cf1, cf2 = db:column_family('hoge'), db:column_family('fuga')
+	cf1:put('key', 'val')
+	cf2:put('key', 'value')
+	assert(cf1:get('key') == 'val', "column family should store key value pair correctly")
+	assert(cf2:get('key') == 'value', "column family should store key value pair correctly")
+	cf1:fin()
+	cf2:fin()
+	db:close()
+
+	-- reopen
+	db = rocksdb.open('/tmp/luact/rocksdb/testdb')
+	cf1, cf2 = db:column_family('hoge'), db:column_family('fuga')
+	assert(cf1:get('key') == 'val', "column family should store key value pair correctly")
+	assert(cf2:get('key') == 'value', "column family should store key value pair correctly")
+
 end, function (e)
 	logger.error('err', e, debug.traceback())
 end)
-	fs.rmdir('/tmp/luact/rocksdb/testdb')	
+	-- fs.rmdir('/tmp/luact/rocksdb/testdb')	
 
 	luact.stop()
 end)

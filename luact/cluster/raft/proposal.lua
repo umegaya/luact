@@ -88,9 +88,9 @@ local proposals_mt = {
 function proposals_index:fin()
 	memory.free(self.progress.store)
 end
-function proposals_index:add(quorum, logs)
-	for _, log in ipairs(logs) do
-		self.progress:init_at(log.index, function (st, q)
+function proposals_index:add(quorum, start_idx, end_idx)
+	for idx = tonumber(start_idx), tonumber(end_idx) do
+		self.progress:init_at(idx, function (st, q)
 			st:init(q)
 		end, quorum)
 	end
@@ -135,7 +135,7 @@ function proposals_index:commit(index)
 end
 function proposals_index:range_commit(actor, sidx, eidx)
 	local accepted
-	for i=sidx,eidx,1 do
+	for i=sidx,eidx do
 		if self:commit(i) then
 			accepted = true
 		end
@@ -149,7 +149,6 @@ function _M.new(wal, size)
 	return setmetatable({
 		progress = ringbuf.new(size, proposal_list_alloc(size)), 
 		wal = wal,
-		-- logs = {}, 
 		accepted = {},
 	}, proposals_mt)
 end

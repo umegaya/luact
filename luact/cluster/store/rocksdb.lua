@@ -96,8 +96,10 @@ end
 
 -- interfaces for consensus modules
 function store_rocksdb_index:compaction(upto_idx)
+	logger.notice('compaction', upto_idx, self.min_idx)--, debug.traceback())
 	if upto_idx >= self.min_idx then
 		self:delete_logs(self.min_idx, upto_idx)
+		-- print('aft compaction:', self.min_idx)
 	end
 end
 function store_rocksdb_index:put_object(kind, serde, object)
@@ -161,10 +163,11 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 		end
 		return true
 	end
+	logger.error('raft', 'fail to delete_logs', r)
 	return nil, r
 end
 function store_rocksdb_index:unsafe_delete_logs(txn, start_idx, end_idx)
-	for idx=start_idx,end_idx do
+	for idx=tonumber(start_idx),tonumber(end_idx) do
 		txn:rawdelete_cf(self.db, self:logkey(idx))
 	end
 end

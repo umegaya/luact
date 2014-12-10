@@ -54,8 +54,8 @@ local ok,r = xpcall(function ()
 	})
 	local actor = luact(body)
 
-	p:add(3, {unpack(logs, 1, 8)})
-	p:add(2, {unpack(logs, 9, 16)})
+	p:add(3, 1, 8)
+	p:add(2, 9, 16)
 	assert(p.progress.header.n_size == 16)
 	local s
 	for i=1,8 do
@@ -67,22 +67,22 @@ local ok,r = xpcall(function ()
 		assert(s.quorum == 2 and s.current == 0, "quorum should be same as specified at proposal:add() and size initialized")
 	end
 	
-	p:add(3, {unpack(logs, 17, 19)})
+	p:add(3, 17, 19)
 	assert(p.progress.header.n_size == 32)
 	
 	s = p.progress:at(1)
 	p:range_commit(actor, 1, 1)
-	assert(s.current == 1, "if commited, size should increase")
-	assert((not s:granted()) and (not body.a), "if commited and still not reach to quorum, logs should not be processed")
+	assert(s.current == 1, "if committed, size should increase")
+	assert((not s:granted()) and (not body.a), "if committed and still not reach to quorum, logs should not be processed")
 
 	p:range_commit(actor, 1, 1)
-	assert(s.current == 2, "if commited, size should increase")
-	assert((not s:granted()) and (not body.a), "if commited and still not reach to quorum, logs should not be processed")
+	assert(s.current == 2, "if committed, size should increase")
+	assert((not s:granted()) and (not body.a), "if committed and still not reach to quorum, logs should not be processed")
 
 	p:range_commit(actor, 1, 1)
 	clock.sleep(0.1)
-	assert(s.current == 3, "if commited, size should increase")
-	assert(body.check[1] and body.a == 1, "if commited and reach to quorum, logs should be processed")
+	assert(s.current == 3, "if committed, size should increase")
+	assert(body.check[1] and body.a == 1, "if committed and reach to quorum, logs should be processed")
 	
 	local log
 	p:range_commit(actor, 1, 16)

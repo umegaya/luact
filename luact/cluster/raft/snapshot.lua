@@ -69,7 +69,11 @@ function snapshot_header_index:verify_checksum(p, size)
 	end
 	return true
 end
-function snapshot_header_index.pack(tbl, arg)
+function snapshot_header_index.pack(arg)
+	--for i=1,arg.n_replica do
+	--	print('id', arg.replicas[i - 1])
+	--end
+	--print('len', arg.n_replica, snapshot_header_size(arg.n_replica))
 	return ffi.string(arg, snapshot_header_size(arg.n_replica))
 end
 function snapshot_header_index.unpack(arg)
@@ -92,7 +96,10 @@ function snapshot_writer_index:fin()
 	self.rbfsm:fin()
 end
 function snapshot_writer_index:snapshot_path(dir, last_applied_idx)
-	return util.rawsprintf(fs.path("%s", "%08x.snap"), #dir + 16 + #(".snap") + 1, dir, last_applied_idx)
+	return util.rawsprintf(fs.path("%s", "%08x.snap"), 
+		#dir + 16 + #(".snap") + 1, dir, 
+		ffi.new('uint64_t', last_applied_idx)
+	)
 end
 function snapshot_writer_index:open(dir, last_applied_idx)
 	local path = self:snapshot_path(dir, last_applied_idx)
@@ -126,27 +133,27 @@ function snapshot_writer_index:write(dir, fsm, st, serde)
 	C.close(fd)
 	self.last_snapshot_idx = snapshot_header.index
 	self.last_snapshot_term = snapshot_header.term
+	--print('wr',self.last_snapshot_idx)
 	return self.last_snapshot_idx
 end
-local pattern = "[0-9a-f]+%.snap$"
 function snapshot_writer_index:latest_snapshot_path(dir)
 	local d = fs.opendir(dir)
 	local latest 
 	for path in d:iter() do
-		if path:match(pattern) then
+		if path:match(_M.path_pattern) then
 			if (not latest) or (latest < path) then
 				latest = path
 			end
 		end
 	end
-	return fs.path(dir, latest)
+	return latest and fs.path(dir, latest)
 end
 function snapshot_writer_index:remove_oldest_snapshot(dir, margin)
 	local d = fs.opendir(dir)
 	local oldest
 	local count = 0
 	for path in d:iter() do
-		if path:match(pattern) then
+		if path:match(_M.path_pattern) then
 			count = count + 1
 			if (not oldest) or (oldest > path) then
 				oldest = path
@@ -154,7 +161,7 @@ function snapshot_writer_index:remove_oldest_snapshot(dir, margin)
 		end
 	end
 	if margin < count then
-		fs.unlink(fs.path(dir, oldest))
+		fs.rm(fs.path(dir, oldest))
 	end
 end
 function snapshot_writer_index:restore(dir, fsm, serde)
@@ -201,6 +208,7 @@ function snapshot_index:init()
 end
 function snapshot_index:fin()
 	self.writer:fin()
+	memory.free(self.writer)
 end
 function snapshot_index:write(fsm, state)
 	return self.writer:write(self.dir, fsm, state, self.serde)
@@ -211,8 +219,14 @@ end
 function snapshot_index:restore(fsm)
 	return self.writer:restore(self.dir, fsm, self.serde)
 end
+function snapshot_index:last_index()
+	return self.writer.last_snapshot_idx
+end
 function snapshot_index:last_index_and_term()
 	return self.writer.last_snapshot_idx, self.writer.last_snapshot_term
+end
+function snapshot_index:path_of(idx)
+	return self.writer:snapshot_path(self.dir, idx)
 end
 function snapshot_index:latest_snapshot()
 	local path = self.writer:latest_snapshot_path(self.dir)
@@ -225,9 +239,10 @@ end
 
 -- module functions
 _M.serde_initialized = false
+_M.path_pattern = "[0-9a-f]+%.snap$"
 function _M.new(dir, serde)
 	local ss = setmetatable({
-		writer = memory.alloc_typed('luact_raft_snapshot_writer_t'),
+		writer = memory.alloc_fill_typed('luact_raft_snapshot_writer_t'),
 		serde = serde,
 		dir = dir,
 	}, snapshot_mt)

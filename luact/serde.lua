@@ -136,10 +136,15 @@ function b2s_conv_index:escape_cdata(tmp, idx, arg)
 		tmp[idx] = ffi.string(arg, refl.size)
 		return {name = 'array', tp = refl.element_type.name}
 	elseif refl.what == 'ptr' or refl.what == 'ref' then
-		tmp[idx] = ffi.string(arg, refl.element_type.size)
-		-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
 		local et = refl.element_type
-		return {name = 'ptr', tp = et.what.." "..et.name}
+		local name = et.what.." "..et.name
+		if custom_pack[name] then
+			tmp[idx] = custom_pack[name](arg)
+		else
+			tmp[idx] = ffi.string(arg, refl.element_type.size)
+		end
+		-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
+		return {name = 'ptr', tp = name}
 	end
 end
 function b2s_conv_index:escape(obj)
@@ -179,9 +184,13 @@ function b2s_conv_index:unescape_cdata(src, tp)
 	elseif tp.name == 'float' then
 		return self:ptr2float(src)
 	elseif tp.name == 'array' or tp.name == 'ptr' then
-		local tmp = memory.alloc_typed(tp.tp, #(src) / ffi.sizeof(tp.tp))
-		ffi.copy(tmp, src, #src)
-		return tmp
+		if tp.name == 'ptr' and custom_unpack[tp.tp] then
+			return custom_unpack[tp.tp](src)
+		else
+			local tmp = memory.alloc_typed(tp.tp, #(src) / ffi.sizeof(tp.tp))
+			ffi.copy(tmp, src, #src)
+			return tmp
+		end
 	elseif tp.name then
 		if custom_unpack[tp.name] then
 			return custom_unpack[tp.name](src)
