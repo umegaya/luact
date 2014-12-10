@@ -8,13 +8,14 @@ local tentacle = require 'pulpo.tentacle'
 local event = require 'pulpo.event'
 
 local clock = require 'luact.clock'
+local uuid = require 'luact.uuid'
 
 local _M = {}
 
 ffi.cdef[[
 typedef struct luact_raft_replicator {
 	uint64_t next_idx, match_idx;
-	uint8_t alive, allow_pipeline, failures, padd;
+	uint8_t alive, failures, padd[2];
 	double last_access, heartbeat_span_sec;
 } luact_raft_replicator_t;
 ]]
@@ -26,6 +27,7 @@ local replicator_mt = {
 function replicator_index:init(state)
 	self.next_idx = state.wal:last_index() + 1
 	self.match_idx = 0
+	self.alive = 1
 	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec / 10
 end
 function replicator_index:fin()
@@ -37,7 +39,7 @@ function replicator_index:start(actor, state)
 	tentacle(self.run, self, actor, state)
 end
 function replicator_index:run(actor, state)
-	local selector = {
+	event.select({
 		self = self, 
 		actor = actor, 
 		state = state, 
@@ -46,24 +48,28 @@ function replicator_index:run(actor, state)
 			return true
 		end,
 		[state.ev_log] = function (t, tp, ...)
-			return t.self:replicate(t.actor, t.state)
+			if not t.running then
+				t.running = true
+				local ok, r = pcall(t.self.replicate, t.self, t.actor, t.state)
+				if not ok then
+					logger.error('raft', 'replicate', r)
+				end
+				return ok and r
+			end
 		end,
-	}
-	while self.alive ~= 0 do
-		event.select(selector)
-	end
+	})
 end
 function replicator_index:handle_stale_term()
 	state:become_follower()
 	self:on_leader_auth_result(false) -- no more leader
 end
 function replicator_index:update_last_access()
-	self.last_access = clock.now()
+	self.last_access = clock.get()
 end
-function replicator_index:update_last_appended(state, entries)
+function replicator_index:update_last_appended(actor, state, entries)
 	-- Mark any proposals as committed
 	local first, last = entries[1], entries[#entries]
-	state.proposals:range_commit(first.index, last.index)
+	state.proposals:range_commit(actor, first.index, last.index)
 
 	-- Update the indexes
 	self.match_idx = last.index
@@ -95,19 +101,19 @@ function replicator_index:replicate(actor, state)
 	-- prepare parameters to send remote raft actor
 	current_term, leader, 
 	prev_log_idx, prev_log_term, 
-	entries, leader_commit_idx = state:append_entries_params(self)
+	entries, leader_commit_idx = state:append_param_for(self)
 	if not current_term then
 		goto SYNC
 	end
 
 	-- call AppendEntries RPC 
-	-- TODO : call with timed_ style? and how long timeout is?
+	-- TODO : how long timeout should be?
 	term, success, last_index = actor:timed_append_entries(
 												self.heartbeat_span_sec, 
 												current_term, leader, 
 												prev_log_idx, prev_log_term, 
 												entries, leader_commit_idx)
-
+-- print(term, success, last_index)
 	if self.alive == 0 then return true end
 	-- term is updated, step down leader
 	if term > current_term then
@@ -121,10 +127,9 @@ function replicator_index:replicate(actor, state)
 	-- Update based on success
 	if success then
 		-- Update our replication state
-		self:update_last_appended(state, entries)
+		self:update_last_appended(actor, state, entries)
 		-- Clear any failures, allow pipelining
 		self.failures = 0
-		self.allowpipeline = 1
 	else
 		s.next_idx = math.max(math.min(self.next_idx-1, last_index+1), 1)
 		self.match_idx = s.next_idx - 1
@@ -134,7 +139,7 @@ function replicator_index:replicate(actor, state)
 
 ::CHECK_MORE::
 	-- Check if there are more logs to replicate
-	if self.next_idx <= state.wal.last_index then
+	if self.next_idx <= state.wal:last_index() then
 		goto START
 	else
 		return
@@ -209,7 +214,7 @@ function replicator_index:heartbeat(actor, state)
 
 		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader())
 		if (not ok) or (not success) then
-			logger.error(("raft: Failed to heartbeat to %x:"):format(uuid.addr(actor)), term)
+			logger.error(("raft: Failed to heartbeat to %x:%x"):format(uuid.addr(actor), uuid.thread_id(actor)))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else

@@ -100,7 +100,7 @@ function rbuf_index:reserve_and_reduce_unsed(sz)
 		if copyb > 0 then 
 			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
-		logger.report('reserve2 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
+		logger.info('reserve2 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
 		self.hpos = 0
 		self.used = copyb
 		memory.free(self.buf)

@@ -83,8 +83,14 @@ local raft_state_container_mt = {
 function raft_state_container_index:init()
 	self:restore() -- try to recover from previous persist state
 	self.fsm:attach()
-	if self.opts.debug_node_kind then
-		self:debug_set_node_kind(self.opts.debug_node_kind)
+	self:apply_debug_opts(self.opts)
+end
+function raft_state_container_index:apply_debug_opts(opts)
+	if opts.debug_node_kind then
+		self:debug_set_node_kind(opts.debug_node_kind)
+	end
+	if opts.debug_leader_id then
+		self.state.leader_id = opts.debug_leader_id
 	end
 end
 function raft_state_container_index:fin()
@@ -115,6 +121,7 @@ function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
 	self.proposals:add(q, start_idx, end_idx)
 	self.ev_log:emit('add')
+	print('emit end:add')
 end
 function raft_state_container_index:write_logs(msgid, logs)
 	self:write_any_logs(nil, msgid, logs)
@@ -263,7 +270,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 	end
 end
 function raft_state_container_index:leader()
-	return self.leader_id
+	return self.state.leader_id
 end
 function raft_state_container_index:is_leader()
 	return self.state.node_kind == NODE_LEADER
@@ -363,14 +370,14 @@ function raft_state_container_index:write_snapshot()
 end
 function raft_state_container_index:append_param_for(replicator)
 	local prev_log_idx, prev_log_term
-	if replicator.next_index == 1 then
+	if replicator.next_idx == 1 then
 		prev_log_idx, prev_log_term = 0, 0
-	elseif (replicator.next_index - 1) == self.snapshot.writer.last_snapshot_idx then
+	elseif (replicator.next_idx - 1) == self.snapshot.writer.last_snapshot_idx then
 		prev_log_idx, prev_log_term = self.snapshot:last_index_and_term()
 	else
-		local log = self.wal:at(replicator.next_index)
+		local log = self.wal:at(replicator.next_idx)
 		if not log then
-			exception.raise('raft', 'invalid', 'next_index', replicator.next_index)
+			exception.raise('raft', 'invalid', 'next_index', replicator.next_idx)
 		end
 		prev_log_idx = log.index
 		prev_log_term = log.term

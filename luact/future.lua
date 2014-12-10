@@ -16,7 +16,7 @@ end
 function future_index:unsafe_get(timeout)
 	if not self:finished() then
 		local alarm = timeout and clock.alarm(timeout) or nil
-		local type,obj = event.select(nil, self.cev, alarm)
+		local type,obj = event.wait(nil, self.cev, alarm)
 		if obj == alarm then
 			exception.raise('actor_timeout')
 		end
@@ -40,7 +40,7 @@ end
 
 local function check_completion(f)
 	-- it must finish because at least f.ev emits timeout error.
-	f.ret = {event.select(nil, f.ev)}
+	f.ret = {event.wait(nil, f.ev)}
 end
 
 

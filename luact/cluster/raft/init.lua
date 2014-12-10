@@ -69,7 +69,7 @@ function raft_index:start_election()
 			table.insert(votes, set[i]:async_request_vote())
 		end
 		local timeout = math.random(self.election_timeout_sec, self.election_timeout_sec * 2)
-		local ret = event.wait(clock.alarm(timeout), unpack(votes))
+		local ret = event.join(clock.alarm(timeout), unpack(votes))
 		local grant = 0
 		for i=1,#ret-1 do
 			local r = ret[i]

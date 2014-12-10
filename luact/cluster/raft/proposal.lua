@@ -135,7 +135,7 @@ function proposals_index:commit(index)
 end
 function proposals_index:range_commit(actor, sidx, eidx)
 	local accepted
-	for i=sidx,eidx do
+	for i=tonumber(sidx),tonumber(eidx) do
 		if self:commit(i) then
 			accepted = true
 		end

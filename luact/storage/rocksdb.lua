@@ -326,7 +326,6 @@ function rocksdb_index:pairs(opts)
 end
 function rocksdb_index:close()
 	local key = db_from_key(self)
-	print(key)
 	-- decrement ref count
 	local cnt = thread.lock_shared_memory(key, function (ptr)
 		local p = ffi.cast('luact_rocksdb_t*', ptr)
@@ -336,7 +335,7 @@ function rocksdb_index:close()
 	if cnt <= 0 then
 		-- remove from shared memory
 		dbpath_map[key] = nil
-		thread.shared_memory(key, nil)
+		thread.unmap_shared_memory(key)
 	end
 end
 function rocksdb_index:fin()

@@ -153,7 +153,7 @@ function conn_index:start_io(opts, sr)
 	tentacle(self.sweeper, self, rev, wev)
 end
 function conn_index:sweeper(rev, wev)
-	local tp,obj = event.select(nil, rev, wev)
+	local tp,obj = event.wait(nil, rev, wev)
 	machine_stats[self:machine_id()] = nil
 	conn_tasks:remove(self)
 	-- these 2 line assures another tentacle (read for write/write for read)
@@ -289,7 +289,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_sys(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return future.new(tentacle(self.sys, self, id, t.method, timeout, select(args_idx, ...)))
+			return tentacle(self.sys, self, id, t.method, timeout, select(args_idx, ...))
 		else
 			r = {self:sys(id, t.method, timeout, select(args_idx, ...))}
 			goto return_value
@@ -299,7 +299,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_send(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return future.new(tentacle(self.send, self, id, t.method, timeout, select(args_idx, ...)))
+			return tentacle(self.send, self, id, t.method, timeout, select(args_idx, ...))
 		else
 			r = {self:send(id, t.method, timeout, select(args_idx, ...))}
 			goto return_value
@@ -308,7 +308,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_call(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return future.new(tentacle(self.call, self, id, t.method, timeout, select(args_idx, ...)))
+			return tentacle(self.call, self, id, t.method, timeout, select(args_idx, ...))
 		else
 			r = {self:call(id, t.method, timeout, select(args_idx, ...))}
 			goto return_value
