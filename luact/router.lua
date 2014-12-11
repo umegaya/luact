@@ -85,11 +85,13 @@ function _M.internal(conn, message)
 		end
 	elseif notice then
 		tentacle(function (msg)
-			pcall(msg[UUID][msg[METHOD]], unpack(msg[ARGS]))
-		end)
+			local s = uuid.from_local_id(msg[NOTIFY_UUID])
+			pcall(s[msg[NOTIFY_METHOD]], unpack(msg, NOTIFY_ARGS))
+		end, message)
 	else
 		tentacle(function (sock, msg)
-			sock:resp(msg[MSGID], pcall(msg[UUID][msg[METHOD]], unpack(msg[ARGS])))
+			local s = uuid.from_local_id(msg[UUID])
+			sock:resp(msg[MSGID], pcall(s[msg[METHOD]], unpack(msg, ARGS)))
 		end, conn, message)
 	end	
 end

@@ -1,6 +1,8 @@
 local data = debug.getinfo(1)
 local root = {data.source:find('@(.+)/.+$')}
-package.path = root[3]..'/lib/?.lua;'..package.path
+if not package.path:match(root[3]..'/lib/%?%.lua;') then
+	package.path = root[3]..'/lib/?.lua;'..package.path
+end
 -- print(package.path)
 
 local _M = {}

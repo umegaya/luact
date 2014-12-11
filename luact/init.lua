@@ -8,6 +8,8 @@ local fs = require 'pulpo.fs'
 -- pulpo_package.DEBUG= true
 local ffi = require 'ffiex.init'
 
+local serpent = require 'serpent'
+
 require 'luact.util.patch'
 local actor = require 'luact.actor'
 local optparse = require 'luact.optparse'
@@ -76,24 +78,25 @@ factory = {
 local from_file, from_module = factory["file"], factory["module"]
 
 -- additional thread startup routines
-local function init_worker()
+local function init_worker(opts)
+	opts = assert(loadstring(opts))()
 	local _luact = require 'luact.init'
-	_luact.initialize()
+	_luact.initialize(opts)
 end
-local function init_worker_and_global_ref()
+local function init_worker_and_global_ref(opts)
+	opts = assert(loadstring(opts))()
 	_G.luact = require 'luact.init'
-	_G.luact.initialize()
+	_G.luact.initialize(opts)
 end
 
 
 -- module function 
 function _M.start(opts, executable)
+	opts.init_params = serpent.dump(opts)
 	opts.init_proc = _G.luact and init_worker or init_worker_and_global_ref
 	pulpo.initialize(opts)
-	-- initialize deferred modules in luact
-	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
-	-- TODO : need to change pulpo configuration from commandline?
-	_M.initialize()
+	-- TODO : need to change pulpo configuration from commandline
+	_M.initialize(opts)
 	pulpo.run(opts, executable)
 end
 function _M.stop()
@@ -102,6 +105,9 @@ end
 function _M.initialize(opts)
 	opts = opts or {}
 	local cmdl_args = optparse(_G.arg, opts_defs)
+	-- initialize deferred modules in luact
+	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
+	-- initialize other modules
 	util.merge_table(opts, cmdl_args)
 	conn.initialize(opts)
 	dht.initialize(opts)
@@ -122,10 +128,11 @@ function _M.initialize(opts)
 	_M.root_actor = actor.new_root(function (options)
 		local ca = options.consensus_algorithm or "raft"
 		-- local mediator_module = _M.require('luact.cluster.'..ca).new(options)
-		return {
+		_M.root = {
 			new = actor.new,
-			new_link = actor.new_link,
 			register = actor.register,
+			["require"] = _M.require, 
+			load = _M.load, 
 			mediator = function (self)
 				return mediator_module
 			end,
@@ -135,12 +142,13 @@ function _M.initialize(opts)
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
 			end,
 		}
+		return _M.root
 	end, opts)
 end
-function _M.load(file)
+function _M.load(file, opts)
 	return actor.new(from_file, file, opts)
 end
-function _M.require(module)
+function _M.require(module, opts)
 	return actor.new(from_module, module, opts)
 end
 function _M.supervise(target, opts, ...)

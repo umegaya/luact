@@ -14,16 +14,16 @@ function fs.load2rbuf(file, rb)
 	end
 	local fd = C.open(file, fs.O_RDONLY)
 	if fd < 0 then
-		e = exception.raise('syscall', 'open', ffi.errno(), fd)
+		e = exception.raise('syscall', 'open', fd)
 		goto ERROR
 	end
 	sz = C.lseek(fd, 0, fs.SEEK_END)
 	if sz < 0 then
-		e = exception.raise('syscall', 'lseek', ffi.errno(), fd)
+		e = exception.raise('syscall', 'lseek', fd)
 		goto ERROR
 	end		
 	if C.lseek(fd, 0, fs.SEEK_SET) < 0 then
-		e = exception.raise('syscall', 'lseek', ffi.errno(), fd)
+		e = exception.raise('syscall', 'lseek', fd)
 		goto ERROR
 	end
 	rb:reserve(sz)

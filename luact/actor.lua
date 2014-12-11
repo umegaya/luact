@@ -236,8 +236,8 @@ function _M.monitor(watcher_actor, target_actor)
 	if not t then exception.raise('not_found', 'target_actor') end
 	table.insert(t.links, w.uuid)
 end
-function _M.root_actor_of(machine_id, thread_id)
-	return uuid.first(machine_id, thread_id)
+function _M.root_of(machine_id, thread_id)
+	return uuid.first(machine_id or uuid.node_address, thread_id)
 end
 function _M.register(name, ctor, ...)
 	-- TODO : choose owner thread of this actor

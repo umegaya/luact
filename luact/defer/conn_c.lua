@@ -21,6 +21,7 @@ local memory = require 'pulpo.memory'
 local gen = require 'pulpo.generics'
 local socket = require 'pulpo.socket'
 local event = require 'pulpo.event'
+local util = require 'pulpo.util'
 local linda = pulpo.evloop.io.linda
 
 local _M = (require 'pulpo.package').module('luact.defer.conn_c')
@@ -169,9 +170,10 @@ end
 function conn_index:tick()
 	-- do keep alive
 	local mid = self:machine_id()
-	local ra = actor.root_actor_of(mid, 1)
+	local ra = actor.root_of(mid, 1)
 	_M.stats[mid] = ra:stat() -- used as heartbeat message
 	-- TODO : check which thread accept this connection and use corresponding root actor.
+	-- change second argument of actor.root_of
 end
 function conn_index:new(machine_ipv4, opts)
 	local hostname = _M.hostname_of(machine_ipv4)
@@ -179,6 +181,7 @@ function conn_index:new(machine_ipv4, opts)
 	self.dead = 0
 	self:store_peername()
 	self:start_io(opts, self:serde())
+	-- for example, normal http (not 2.0) is volatile.
 	if not opts.volatile_connection then
 		conn_tasks:add(self) -- start keeping alive
 	end
@@ -438,18 +441,24 @@ local local_conn_free_list = {}
 local local_conn_mt = {
 	__index = local_conn_index,
 }
-function local_conn_index:start_io(opts, sr)
-	local rev, web
-	rev = tentacle(self.read_int, self, self.io:reader(), sr)
-	web = tentacle(self.write, self, self.io:writer())
-	tentacle(self.sweeper, self, rev, web)
+function local_conn_index:start_io(opts, sr, reader, writer)
+	local web, rev
+	rev = tentacle(self.read_int, self, reader, sr)
+	wev = tentacle(self.write, self, writer)
+	tentacle(self.sweeper, self, wev, rev)
+end
+local function make_channel_name(id1, id2)
+	-- like 1_1, 1_2, 1_3, .... x_1, x_2, ... x_y (for all x, y <= n_threads)
+	return tostring(id1).."_"..tostring(id2)
 end
 function local_conn_index:new_local(thread_id, opts)
 	self.thread_id = thread_id
 	self.dead = 0
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
-	self.io = linda.new(tostring(thread_id), opts)
-	self:start_io(opts, self:serde())
+	local mine, yours = 
+		linda.new(make_channel_name(pulpo.thread_id, thread_id)),
+		linda.new(make_channel_name(thread_id, pulpo.thread_id))
+	self:start_io(opts, self:serde(), mine:reader(), yours:writer())
 	return self
 end
 function local_conn_index:cmapkey()
@@ -494,10 +503,13 @@ function _M.initialize(opts)
 	hostname_buffer[3] = (":"..tostring(opts.port))
 	_M.opts = opts
 	_M.use_connection_cache = opts.use_connection_cache
+	-- open connection for my thread
+	for i=1,tonumber(opts.n_core or util.n_cpu()) do
+		new_local_conn(i, opts)
+	end
 end
 
 -- socket options for created connection
--- TODO : find a way to 
 _M.opts = false
 
 -- get (or create) connection to the node which id is exists.

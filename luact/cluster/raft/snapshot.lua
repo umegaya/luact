@@ -2,6 +2,7 @@ local ffi = require 'ffiex.init'
 local C = ffi.C
 
 local pbuf = require 'luact.pbuf'
+local serde = require 'luact.serde'
 
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
@@ -79,6 +80,10 @@ end
 function snapshot_header_index.unpack(arg)
 	return ffi.cast('luact_raft_snapshot_header_t*', arg)
 end
+serde[serde.kind.serpent]:customize(
+	'struct luact_raft_snapshot_header', 
+	snapshot_header_index.pack, snapshot_header_index.unpack
+)
 ffi.metatype('luact_raft_snapshot_header_t', snapshot_header_mt)
 
 
@@ -240,16 +245,13 @@ end
 -- module functions
 _M.serde_initialized = false
 _M.path_pattern = "[0-9a-f]+%.snap$"
-function _M.new(dir, serde)
+function _M.new(dir, sr)
 	local ss = setmetatable({
 		writer = memory.alloc_fill_typed('luact_raft_snapshot_writer_t'),
-		serde = serde,
+		serde = sr,
 		dir = dir,
 	}, snapshot_mt)
 	ss:init()
-	if not _M.serde_initialized then
-		serde:customize('struct luact_raft_snapshot_header', snapshot_header_index.pack, snapshot_header_index.unpack)
-	end
 	return ss
 end
 
