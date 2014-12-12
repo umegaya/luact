@@ -123,8 +123,11 @@ function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	end
 	local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
 	self.proposals:add(q, start_idx, end_idx)
-	self.ev_log:emit('add')
+	self:kick_replicator()
 end
+function raft_state_container_index:kick_replicator()
+	self.ev_log:emit('add')
+end	
 function raft_state_container_index:write_logs(msgid, logs)
 	self:write_any_logs(nil, msgid, logs)
 end
@@ -155,6 +158,10 @@ function raft_state_container_index:vote(v, term)
 		return true
 	end
 	return false
+end
+function raft_state_container_index:set_leader(leader_id)
+	logger.info('set leader', leader_id)
+	self.state.leader_id = leader_id
 end
 -- only for debug
 function raft_state_container_index:debug_set_node_kind(k)
@@ -295,6 +302,7 @@ end
 function raft_state_container_index:snapshot_if_needed()
 	if (self.state.last_applied_idx - self.snapshot:last_index()) >= self.opts.logsize_snapshot_threshold then
 		-- print('if_needed', self.state.last_applied_idx, self.snapshot:last_index(), self.opts.logsize_snapshot_threshold)
+		logger.info('snapshot', self.state.last_applied_idx)
 		self:write_snapshot()
 	end
 end
@@ -312,22 +320,23 @@ function raft_state_container_index:applied(log_idx)
 	self.state.last_applied_idx = log_idx
 	self:snapshot_if_needed()
 end
-function raft_state_container_index:apply_system(log)
-	if log.kind == SYSLOG_ADD_REPLICA_SET then
-		self:add_replica_set(log.log)
+function raft_state_container_index:apply(log)
+	self:committed(log.index)
+	local ok, r
+	if not log.kind then
+		-- apply to fsm
+		ok, r = pcall(self.fsm.apply, self.fsm, log.log)
+	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
+		ok, r = pcall(self.add_replica_set, self, log.log)
 	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
-		self:remove_replica_set(log.log)
+		ok, r = pcall(self.remove_replica_set, self, log.log)
 	else
 		logger.warn('invalid raft system log committed', log.kind)
 	end
-	self:applied(log.index)
-end
-function raft_state_container_index:apply(log)
-	self.fsm:apply(log.log)
-	if (log.index - self.state.last_applied_idx) ~= 1 then
-		exception.raise('fatal', 'invalid committed log idx', log.index, self.state.last_applied_idx)
-	end		
-	self:applied(log.index)
+	if ok then
+		self:applied(log.index)
+	end
+	return ok, r
 end
 function raft_state_container_index:restore()
 	local r = self:read_state()
@@ -341,6 +350,17 @@ function raft_state_container_index:restore()
 			self.state.current.term = self.snapshot:last_index()
 			-- start with no vote
 		end
+	end
+end
+function raft_state_container_index:restore_from_snapshot(ssrb)
+	local idx,hd = self.snapshot:restore(self.fsm, ssrb)
+	if hd then 
+		self:read_snapshot_header(hd)
+		-- we have unapplied WAL but its unclear all contents of it, is committed.
+		-- so, we wait for next commit (whether if this node become leader or follower)
+		-- restore state from snapshot
+		self.state.current.term = self.snapshot:last_index()
+		-- start with no vote
 	end
 end
 function raft_state_container_index:write_snapshot_header(hd)
@@ -378,6 +398,8 @@ function raft_state_container_index:append_param_for(replicator)
 		prev_log_idx, prev_log_term = self.snapshot:last_index_and_term()
 	else
 		local log = self.wal:at(replicator.next_idx)
+		-- TODO : this actually happens because quorum of this index is already satisfied, 
+		-- log may be compacted already. compaction margin make some help, but not perfect.
 		if not log then
 			exception.raise('raft', 'invalid', 'next_index', replicator.next_idx)
 		end

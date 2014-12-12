@@ -9,6 +9,8 @@ local event = require 'pulpo.event'
 
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
+local rio = require 'luact.util.rio'
+local actor_module = require 'luact.actor'
 
 local _M = {}
 
@@ -35,19 +37,23 @@ function replicator_index:fin()
 end
 function replicator_index:start(actor, state)
 	self:init(state)
-	local ev = tentacle(self.heartbeat, self, actor, state)
-	return tentacle(self.run, self, actor, state, ev)
+	local hbev = tentacle(self.heartbeat, self, actor, state)
+	local runev = tentacle(self.run, self, actor, state, hbev)
+	state:kick_replicator()
+	return runev
+end
+local function err_handler(e)
+	if type(e) == 'table' then
+		logger.error('raft', 'replicate', e)
+	else
+		logger.error('raft', 'replicate', tostring(e), debug.traceback())
+	end
 end
 function replicator_index:start_replication(t)
 	t.running = true
-	local ok, r = pcall(self.replicate, self, t.actor, t.state)
+	local ok, r = xpcall(self.replicate, err_handler, self, t.actor, t.state)
 	t.running = false
-	if not ok then
-		logger.error('raft', 'replicate', r)
-	end
-	if ok and r then
-		self.alive = 0
-	end
+	return r
 end
 function replicator_index:run(actor, state, hbev)
 	event.select({
@@ -77,14 +83,15 @@ function replicator_index:update_last_access()
 	self.last_access = clock.get()
 end
 function replicator_index:update_last_appended(actor, state, entries)
-	-- Mark any proposals as committed
-	local first, last = entries[1], entries[#entries]
-	state.proposals:range_commit(actor, first.index, last.index)
+	if #entries > 0 then
+		-- Mark any proposals as committed
+		local first, last = entries[1], entries[#entries]
+		state.proposals:range_commit(actor, first.index, last.index)
 
-	-- Update the indexes
-	self.match_idx = last.index
-	self.next_idx = last.index + 1
-
+		-- Update the indexes
+		self.match_idx = last.index
+		self.next_idx = last.index + 1
+	end
 	-- still leader
 	self:on_leader_auth_result(true)
 end
@@ -113,8 +120,10 @@ function replicator_index:replicate(actor, state)
 	prev_log_idx, prev_log_term, 
 	entries, leader_commit_idx = state:append_param_for(self)
 	if not current_term then
+	print('sync')
 		goto SYNC
 	end
+	print('replicate', current_term)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
@@ -170,41 +179,34 @@ function replicator_index:replicate(actor, state)
 end
 -- send snap shot and sync fsm 
 function replicator_index:sync(actor, state)
-	-- Get the snapshots
-	local rb, serde, size = state.snapshot:latest_snapshot()
-	if not rb then
-		return false, exception.new('not_found', 'snapshot')
+	print('------------------ sync --------------------')
+	-- Get the snapshot path
+	local path, last_snapshot_index = state.snapshot:latest_snapshot_path()
+	-- no snapshot
+	if not path then 
+		return false 
 	end
-	local obj, err = serde:unpack(rb)
-	if err then
-		return false, exception.new('invalid', 'snapshot', err)
-	end
-
-	local term, success, last_index = actor:install_snapshot(
-		state:current_term(), state:leader(), obj.index, obj.term, obj:to_table(), size
+	-- create remote io and send install snapshot RPC
+	local fd = rio.file(path)
+	local ok, success = pcall(
+		actor.timed_install_snapshot, actor, 120, -- 2 min timeout 
+		state:current_term(), state:leader(), last_snapshot_index, fd
 	)
-	if self.alive == 0 then return true end
-	-- TODO : how to pass snapshot *body*?
-	success = false
-
-	if self.alive == 0 then return true end
-	-- Check for a newer term, stop running
-	if term > state:current_term() then
-		self:handle_stale_term(actor, state)
-		return false
-	end
-
+	-- remove rio
+	actor_module.destroy(fd)
+	if not (ok and success) then return false, success end
+	
 	-- Update the last contact
 	self:update_last_access()
 
 	-- Check for success
 	if success then
 		-- Mark any proposals are committed
-		state.proposals:range_commit(self.match_idx+1, obj.index)
+		state.proposals:range_commit(actor, self.match_idx+1, last_snapshot_index)
 
 		-- Update the indexes
-		self.match_idx = obj.index
-		self.next_idx = s.match_idx + 1
+		self.match_idx = last_snapshot_index
+		self.next_idx = self.match_idx + 1
 
 		-- Clear any failures
 		self.failures = 0
@@ -215,7 +217,7 @@ function replicator_index:sync(actor, state)
 		self.failures = self.failures + 1
 		logger.warn(("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
 	end
-	return false
+	return false -- keep on checking replication log is exist.
 end
 function replicator_index:heartbeat(actor, state)
 	local failures = 0
@@ -243,8 +245,7 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 -- module functions
 function _M.new(actor, state)
 	local r = memory.alloc_fill_typed('luact_raft_replicator_t')
-	local term_ev = r:start(actor, state)
-	return r, term_ev
+	return r, r:start(actor, state)
 end
 
 return _M

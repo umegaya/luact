@@ -455,6 +455,7 @@ function local_conn_index:new_local(thread_id, opts)
 	self.thread_id = thread_id
 	self.dead = 0
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
+	-- TODO : this uses too much fd (1 connection = 4 fd). should use unix domain socket?
 	local mine, yours = 
 		linda.new(make_channel_name(pulpo.thread_id, thread_id)),
 		linda.new(make_channel_name(thread_id, pulpo.thread_id))

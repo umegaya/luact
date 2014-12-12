@@ -264,7 +264,7 @@ function rocksdb_index:column_family(name, opts)
 		local p = ffi.cast('luact_rocksdb_t*', ptr)
 		return p:open_column_family(dbname, options)
 	end, name, opts or open_opts)
-	local p = memory.managed_alloc_typed('luact_rocksdb_column_family_t')
+	local p = memory.alloc_typed('luact_rocksdb_column_family_t')
 	p.cf = cf
 	p.db = self
 	return p
@@ -326,6 +326,7 @@ function rocksdb_index:pairs(opts)
 end
 function rocksdb_index:close()
 	local key = db_from_key(self)
+	if not key then exception.raise('not_found', 'db_from_key', self) end
 	-- decrement ref count
 	local cnt = thread.lock_shared_memory(key, function (ptr)
 		local p = ffi.cast('luact_rocksdb_t*', ptr)
@@ -371,6 +372,7 @@ function rocksdb_cf_index:new_txn()
 end
 function rocksdb_cf_index:fin()
 	local key = db_from_key(self.db)
+	if not key then exception.raise('not_found', 'db_from_key', self.db) end
 	-- decrement ref count
 	thread.lock_shared_memory(key, function (ptr, cf)
 		local p = ffi.cast('luact_rocksdb_t*', ptr)
@@ -379,6 +381,7 @@ function rocksdb_cf_index:fin()
 end
 function rocksdb_cf_index:destroy()
 	local key = db_from_key(self.db)
+	if not key then exception.raise('not_found', 'db_from_key', self.db) end
 	-- decrement ref count
 	thread.lock_shared_memory(key, function (ptr, cf)
 		local p = ffi.cast('luact_rocksdb_t*', ptr)

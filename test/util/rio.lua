@@ -35,11 +35,9 @@ local ok,r = xpcall(function ()
 	C.close(fd)
 	clock.sleep(0.5) -- wait for all thread come here
 
-	print('--- resume thread', thread_id)
-
 	local fno = (thread_id % 4) + 1
 	local rrio = actor.root_of(nil, fno).require 'luact.util.rio'
-	local fd = rrio.open('/tmp/luact/rio/'..fno)
+	local fd = rrio.file('/tmp/luact/rio/'..fno)
 
 	local rbuf, rsize = fd:read()
 	fd:close()

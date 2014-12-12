@@ -99,8 +99,8 @@ end, function (e)
 	logger.error('err', e)
 end)
 
-fs.rmdir('/tmp/luact/snapshot')
-	
+-- fs.rmdir('/tmp/luact/snapshot')
+
 luact.stop()
 end)
 

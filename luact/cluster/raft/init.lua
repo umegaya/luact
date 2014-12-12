@@ -126,14 +126,7 @@ function raft_index:accepted()
 end
 function raft_index:apply_log(log)
 	-- proceed commit log index
-	self.state:committed(log.index)
-	if not log.kind then
-		-- apply to fsm
-		ok, r = pcall(self.state.apply, self.state, log)
-	else
-		-- apply to raft itself
-		ok, r = pcall(self.state.apply_system, self.state, log)
-	end
+	local ok, r = self.state:apply(log)
 	if log.msgid then
 		router.respond_by_msgid(log.msgid, ok, r)
 	end
@@ -246,9 +239,34 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	logger.notice('raft', 'vote for', candidate_id)
 	return self.state:current_term(), true
 end
-function raft_index:install_snapshot(term, leader, last_log_idx, last_log_term, nodes, size)
-	self:verify_term(term)
-	-- TODO : how to receive snapshot file itself? (using sliced bytes array?)
+function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
+	-- Ignore an older term
+	if term < self.state:current_term() then
+		return
+	end
+	-- Increase the term if we see a newer one
+	if term > self.state:current_term() then
+		self.state:become_follower()
+		self.state:set_term(term)
+	end
+	-- Save the current leader
+	self.set_leader(leader)
+	-- Spill the remote snapshot to disk
+	local ok, rb = pcall(self.snapshot.copy, self.snapshot, fd, last_snapshot_index) 
+	if not ok then
+		self.snapshot:remove_tmp()
+		logger.error("raft", "Failed to copy snapshot", rb)
+		return
+	end
+	-- Restore snapshot
+	self.state:restore_from_snapshot(rb)
+	-- Update the lastApplied so we don't replay old logs
+	self.state.last_applied_idx = last_snapshot_index
+	-- Compact logs, continue even if this fails
+	self.state.wal:compaction(last_snapshot_index)
+	
+	logger.info("raft", "Installed remote snapshot")
+	return true
 end
 
 -- module functions

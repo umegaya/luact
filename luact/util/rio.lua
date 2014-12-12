@@ -4,6 +4,7 @@ local ffi = require 'ffiex.init'
 local fs = require 'pulpo.fs'
 local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
+local util = require 'pulpo.util'
 
 local C = ffi.C
 local _M = {}
@@ -17,6 +18,11 @@ typedef struct luact_buf_slice {
 typedef struct luact_remote_io {
 	int fd;	
 } luact_remote_io_t;
+typedef struct luact_remote_mem {
+	char *ptr;
+	size_t sz;
+	bool gc;
+} luact_remote_mem_t;
 ]]
 
 -- luact_buf_slice
@@ -59,14 +65,15 @@ serde[serde.kind.serpent]:customize(
 	buf_slice_index.pack, buf_slice_index.unpack
 )
 ffi.metatype('luact_buf_slice_t', buf_slice_mt)
+local readbuf_size = 1024
+local readbuf = buf_slice_index.create(readbuf_size)
+
 
 -- luact_remote_io
 local remote_io_index = {}
 local remote_io_mt = {
 	__index = remote_io_index
 }
-local readbuf_size = 1024
-local readbuf = buf_slice_index.create(readbuf_size)
 function remote_io_index:read(size, ofs)
 	if ofs then fs.seek(self.fd, ofs, fs.SEEK_SET) end
 	size = size or readbuf_size
@@ -104,14 +111,56 @@ function remote_io_index:__actor_destroy__()
 end
 ffi.metatype('luact_remote_io_t', remote_io_mt)
 
+
+-- luact_remote_io
+local remote_mem_index = util.copy_table(remote_io_index)
+local remote_mem_mt = {
+	__index = remote_mem_index
+}
+function remote_mem_index:read(size, ofs)
+	ofs = ofs or 0
+	size = size or readbuf_size
+	readbuf.sz = readbuf_size
+	readbuf:reserve(size)
+	if readbuf.sz ~= readbuf_size then
+		readbuf_size = readbuf.sz
+	end
+	size = math.min(self.sz - ofs, size)
+	ffi.copy(readbuf.p, self.ptr + ofs, size)
+	readbuf.sz = size
+	return readbuf
+end
+function remote_mem_index:write(buf, size, ofs)
+	ofs = ofs or 0
+	size = math.min(self.sz - ofs, size)
+	ffi.copy(self.ptr + ofs, buf, size)
+end
+function remote_mem_index:seek(whence, ofs)
+	exception.raise('invalid', 'operation', 'cannot seek memory rio')
+end
+function remote_mem_index:close()
+	if self.ptr ~= ffi.NULL and self.gc then
+		memory.free(self.ptr)
+	end
+end
+ffi.metatype('luact_remote_mem_t', remote_mem_mt)
+
+
 local default_flag = bit.bor(fs.O_RDONLY)
 local default_mode = fs.mode("644")
-function _M.open(path, flag, mode)
-	return _M.create(fs.open(path, flag or default_flag, mode or default_mode))
+function _M.file(path, flag, mode)
+	return _M.fd(fs.open(path, flag or default_flag, mode or default_mode))
 end
-function _M.create(fd)
+function _M.fd(fd)
 	local p = memory.alloc_typed('luact_remote_io_t')
 	p.fd = fd
+	return luact(p)
+end
+function _M.memory(p, len, gc)
+	local p = memory.alloc_typed('luact_remote_mem_t')
+	p.ptr = p
+	p.len = len
+	p.gc = gc
 	return luact(p)
 end
 

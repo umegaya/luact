@@ -47,15 +47,7 @@ local ok,r = xpcall(function ()
 						assert(not self.check[log.index], "logs should be never accepted twice")
 						self.check[idx] = true
 						-- proceed commit log index
-						st:committed(log.index)
-						local ok, r
-						if not log.kind then
-							-- apply to fsm
-							ok, r = pcall(st.apply, st, log)
-						else
-							-- apply to raft itself
-							ok, r = pcall(st.apply_system, st, log)
-						end
+						local ok, r = st:apply(log)
 						assert(ok, "apply log should not fail:"..tostring(r))
 						p.accepted[idx] = nil
 					end

@@ -58,9 +58,8 @@ local ok,r = xpcall(function ()
 		})
 	end
 	local SNAPSHOT_DIR = fs.abspath('tmp', 'luact', 'snapshot2')
+	local SNAPSHOT_DIR2 = fs.abspath('tmp', 'luact', 'snapshot3')
 	local TESTDB_DIR = fs.abspath('tmp', 'luact', 'rocksdb', 'testdb4')
-	fs.rmdir(SNAPSHOT_DIR)
-	fs.rmdir(TESTDB_DIR)
 
 	local FIRST_LOGSIZE = 20
 	local function new_actor_body()
@@ -68,17 +67,20 @@ local ok,r = xpcall(function ()
 			__index = {
 				append_entries = function (term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
 				end,
-				install_snapshot = function (term, leader, last_log_idx, last_log_term, nodes, size)
+				install_snapshot = function (term, leader, fd)
 				end,
 			}
 		})
 	end
-	local body = new_actor_body()
-	local actor = luact(body)
+	local body, body2 = new_actor_body(), new_actor_body()
+	local actor, actor2 = luact(body), luact(body2)
 	local x
 
 	-- test send entry
+	print('----------------------- normal replication test ----------------------')
 	x = (function ()
+	fs.rmdir(SNAPSHOT_DIR)
+	fs.rmdir(TESTDB_DIR)
 	local fsm = new_fsm()
 	local store = rdbstore.new(TESTDB_DIR, 'state_test')
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
@@ -91,16 +93,18 @@ local ok,r = xpcall(function ()
 	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
 		if not entries then
 			print('heartbeat:', term, leader)
-			return term, true
+			return term, true, 0
 		end
-		print('append entries', term, prev_log_idx, prev_log_term)
+		print('append entries', term, prev_log_idx, prev_log_term, #entries)
 		assert(term == 0 and prev_log_idx == 0 and prev_log_term == 0, "its first append entries, so log index and term is initial")
 		assert(uuid.equals(leader, opts.debug_leader_id), "leader id should be same as specified")
-		assert(#entries == FIRST_LOGSIZE, "correct entries should be sent")
-		for i=1,FIRST_LOGSIZE do
-			assert(entries[i].log.value == i, "correct entries should be sent")
+		if #entries > 0 then
+			assert(#entries == FIRST_LOGSIZE, "correct entries should be sent")
+			for i=1,FIRST_LOGSIZE do
+				assert(entries[i].log.value == i, "correct entries should be sent")
+			end
 		end
-		return term, true, entries[FIRST_LOGSIZE].index
+		return term, true, 0
 	end
 
 	local rep, endev = replicator.new(actor, st)
@@ -121,39 +125,85 @@ local ok,r = xpcall(function ()
 	st:fin()
 	end)()
 
-	--[[ failure
+	-- failure
+	print('----------------------- failure and install snapshot test ----------------------')
 	x = (function ()
+	fs.rmdir(SNAPSHOT_DIR)
+	fs.rmdir(SNAPSHOT_DIR2)
+	fs.rmdir(TESTDB_DIR)
 	local fsm = new_fsm()
+	local fsm2 = new_fsm()
 	local store = rdbstore.new(TESTDB_DIR, 'state_test')
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
+	local ss2 = snapshot.new(SNAPSHOT_DIR2, sr)
 	local st = state.new(fsm, w, ss, opts)
 	local p = st.proposals
+	local QUORUM = 3
+	function st:quorum()
+		return QUORUM
+	end
+	function st:append_param_for(st)
+		return nil -- append_entries fails
+	end
+	function body:accepted()
+		for idx, log in ipairs(p.accepted) do
+			st:apply(log)
+			p.accepted[idx] = nil
+		end
+	end
 	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
 		if not entries then
 			print('heartbeat:', term, leader)
 			return term, true
 		end
 		print('append entries', term, prev_log_idx, prev_log_term)
-		assert(term == 0 and prev_log_idx == 0 and prev_log_term == 0, "its first append entries, so log index and term is initial")
-		assert(uuid.equals(leader, opts.debug_leader_id), "leader id should be same as specified")
 		assert(#entries == FIRST_LOGSIZE, "correct entries should be sent")
 		for i=1,FIRST_LOGSIZE do
-			assert(entries[i].log.value == i, "correct entries should be sent")
+			assert(entries[i].log[i] == i * 2, "correct entries should be sent")
 		end
 		return term, true, entries[FIRST_LOGSIZE].index
 	end
+	function body2:install_snapshot(term, leader, last_snapshot_index, fd)
+		assert(term == 0, "term should be correct")
+		assert(uuid.equals(leader, opts.debug_leader_id), "leader should be correct")
+		local ok, rb = pcall(ss2.copy, ss2, fd, last_snapshot_index) 
+		assert(ok, "store snapshot on local storage should succeed:"..tostring(rb))
+		local idx,hd = ss2:restore(fsm2, rb)
+		assert(hd, "header should be received correctly")
+		assert(hd.index == 8 and hd.term == 0 and hd.n_replica == 0, "header should be received correctly")
+		return true
+	end
 
-	local rep = replicator.new(actor, st)
+
 	local logs = {}
 	for i=1,FIRST_LOGSIZE do
-		table.insert(logs, { value = i })
+		table.insert(logs, { i, i * 2 })
 	end
 	st:write_logs(nil, logs)
+	-- commit half of inserted logs
+	for i=1,QUORUM do
+		p:range_commit(actor, 1, math.ceil(FIRST_LOGSIZE/2))
+	end
+	clock.sleep(0.5)
+	-- start replication
+	print('start repl')
+	local rep, endev = replicator.new(actor2, st)
 	clock.sleep(0.5)
 
+	-- after meantime of sleep, fsm should updated (by snapshot)
+	for i=1,8 do
+		assert(fsm2[i] == i * 2, "snapshot data should apply correctly:"..tostring(i).."|"..tostring(fsm2[i]))
+	end
+	for i=9, FIRST_LOGSIZE do
+		assert(not fsm2[i], "snapshot data should apply correctly:"..tostring(i).."|"..tostring(fsm2[i]))
+	end
+	print('success')
+
+	rep:fin()
+	event.wait(false, endev)
+	st:fin()
 	end)()
-	]]
 
 end, function (e)
 	logger.error('err', e)

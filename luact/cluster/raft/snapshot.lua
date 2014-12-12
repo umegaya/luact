@@ -100,14 +100,24 @@ function snapshot_writer_index:fin()
 	self.rb:fin()
 	self.rbfsm:fin()
 end
-function snapshot_writer_index:snapshot_path(dir, last_applied_idx)
-	return util.rawsprintf(fs.path("%s", "%08x.snap"), 
-		#dir + 16 + #(".snap") + 1, dir, 
+function snapshot_writer_index:snapshot_path(dir, last_applied_idx, tmp)
+	return util.rawsprintf(fs.path("%s", "%08x.snap"..(tmp and ".tmp" or "")), 
+		#dir + 16 + #(".snap.tmp") + 1, dir, 
 		ffi.new('uint64_t', last_applied_idx)
 	)
 end
+function snapshot_writer_index:commit(dir, idx)
+	fs.rename(self:snapshot_path(dir, idx, true), self:snapshot_path(dir, idx))
+end
+function snapshot_writer_index:rollback(dir)
+	for file in fs.opendir(dir):iter() do
+		if file:match('%.tmp$') then
+			fs.rm(file)
+		end
+	end
+end
 function snapshot_writer_index:open(dir, last_applied_idx)
-	local path = self:snapshot_path(dir, last_applied_idx)
+	local path = self:snapshot_path(dir, last_applied_idx, true)
 	local fd = C.open(path, bit.bor(fs.O_CREAT, fs.O_EXCL, fs.O_WRONLY), fs.mode("640"))
 	if fd < 0 then
 		exception.raise('fatal', 'cannot open snapshot file', ffi.string(path), ffi.errno())
@@ -141,16 +151,37 @@ function snapshot_writer_index:write(dir, fsm, st, serde)
 	--print('wr',self.last_snapshot_idx)
 	return self.last_snapshot_idx
 end
+function snapshot_writer_index:copy(dir, rio, last_index)
+	local fd = self:open(dir, last_index)
+	local rb = self.rbfsm
+	while true do
+		local buf = rio:read()
+		if not buf then
+			break
+		end
+		-- print(buf.sz, ffi.string(buf.p, buf.sz))
+		rb:reserve(buf.sz)
+		ffi.copy(rb:curr_p(), buf.p, buf.sz)
+		rb:use(buf.sz)
+	end
+	C.write(fd, self.rb:start_p(), self.rb:available())
+	C.fsync(fd)
+	C.close(fd)
+	--print('wr',self.last_snapshot_idx)
+	return rb
+end
 function snapshot_writer_index:latest_snapshot_path(dir)
 	local d = fs.opendir(dir)
 	local latest 
 	for path in d:iter() do
+		-- print(path, path:match(_M.path_pattern))
 		if path:match(_M.path_pattern) then
 			if (not latest) or (latest < path) then
 				latest = path
 			end
 		end
 	end
+	-- print(latest)
 	return latest and fs.path(dir, latest)
 end
 function snapshot_writer_index:remove_oldest_snapshot(dir, margin)
@@ -169,30 +200,32 @@ function snapshot_writer_index:remove_oldest_snapshot(dir, margin)
 		fs.rm(fs.path(dir, oldest))
 	end
 end
-function snapshot_writer_index:restore(dir, fsm, serde)
-	local latest = self:latest_snapshot_path(dir)
-	if not latest then
-		logger.notice('will not restore: no snapshot under', dir)
-		return
-	end
-	logger.notice('restore with', latest)
-	local rb = fs.load2rbuf(latest)
+function snapshot_writer_index:restore(dir, fsm, serde, rb)
 	if not rb then
-		-- TODO : can continue with older snapshot (or should not)?
-		exception.raise('fatal', 'cannot open snapshot file', latest, ffi.errno())
+		local latest = self:latest_snapshot_path(dir)
+		if not latest then
+			logger.notice('will not restore: no snapshot under', dir)
+			return
+		end
+		logger.notice('restore with', latest)
+		rb = fs.load2rbuf(latest)
+		ffi.gc(rb, rb.fin)
+		if not rb then
+			-- TODO : can continue with older snapshot (or should not)?
+			exception.raise('fatal', 'cannot open snapshot file', latest, ffi.errno())
+		end
+	else
+		logger.notice('restore with snapshot')
 	end
 	local meta, err = serde:unpack(rb)
 	if (not meta) or (not meta.index) then
-		rb:fin()
 		-- TODO : can continue with older snapshot (or should not)?
 		exception.raise('fatal', 'invalid snapshot file', latest, err)
 	end
 	if not meta:verify_checksum(rb:curr_p(), rb:available()) then
-		rb:fin()
 		exception.raise('fatal', 'invalid snapshot checksum')
 	end
 	local ok, r = pcall(fsm.restore, fsm, serde, rb)
-	rb:fin()
 	if not ok then
 		exception.raise('fatal', 'cannot restore from snapshot', latest, r)
 	end
@@ -216,13 +249,28 @@ function snapshot_index:fin()
 	memory.free(self.writer)
 end
 function snapshot_index:write(fsm, state)
-	return self.writer:write(self.dir, fsm, state, self.serde)
+	local ok, r = pcall(self.writer.write, self.writer, self.dir, fsm, state, self.serde)
+	if ok then
+		self.writer:commit(self.dir, r)
+	else
+		self.writer:rollback(self.dir)
+	end
+	return r	
+end
+function snapshot_index:copy(fd, last_index)
+	local ok, r = pcall(self.writer.copy, self.writer, self.dir, fd, last_index)
+	if ok then
+		self.writer:commit(self.dir, last_index)
+	else
+		self.writer:rollback(self.dir)
+	end
+	return r		
 end
 function snapshot_index:trim(margin)
 	self.writer:remove_oldest_snapshot(self.dir, margin)
 end
-function snapshot_index:restore(fsm)
-	return self.writer:restore(self.dir, fsm, self.serde)
+function snapshot_index:restore(fsm, rb)
+	return self.writer:restore(self.dir, fsm, self.serde, rb)
 end
 function snapshot_index:last_index()
 	return self.writer.last_snapshot_idx
@@ -233,13 +281,14 @@ end
 function snapshot_index:path_of(idx)
 	return self.writer:snapshot_path(self.dir, idx)
 end
-function snapshot_index:latest_snapshot()
+function snapshot_index:latest_snapshot_path()
 	local path = self.writer:latest_snapshot_path(self.dir)
-	local rb = (path and fs.load2rbuf(path))
-	if rb then 
-		return rb, self.serde, rb:available() 
+	if path then
+		local index = path:match('([a-f0-9]+)%.snap')
+		if index then
+			return path, tonumber(index, 16)
+		end
 	end
-	return nil
 end
 
 -- module functions
