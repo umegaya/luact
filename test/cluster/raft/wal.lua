@@ -3,6 +3,7 @@ local luact = require 'luact.init'
 luact.start({
 	cache_dir = "/tmp/luact",
 	n_core = 1, exclusive = true,
+	arbiter = false, 
 }, function ()
 local luact = require 'luact.init'
 local fs = require 'pulpo.fs'

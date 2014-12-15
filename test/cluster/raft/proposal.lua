@@ -3,6 +3,7 @@ local luact = require 'luact.init'
 luact.start({
 	cache_dir = "/tmp/luact",
 	n_core = 1, exclusive = true,
+	arbiter = false, -- don't use default vid 
 }, function ()
 local luact = require 'luact.init'
 local ok,r = xpcall(function ()

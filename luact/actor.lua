@@ -218,7 +218,11 @@ function _M.new_link_with_opts(to, opts, ctor, ...)
 	end
 	local a = actor_index.new(id, opts)
 	table.insert(a.links, to)
+	-- print('entry actormap', actormap, body, a)
 	actormap[body] = a
+	if type(body) ~= 'table' and type(body) ~= 'cdata' then
+		exception.raise('invalid', 'wrong type of actor body', type(body))
+	end
 	bodymap[s] = body
 	if _M.debug then
 		logger.notice('add bodymap', s, body, debug.traceback())
@@ -300,6 +304,7 @@ function _M.destroy(id, reason)
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
 function _M.of(object)
+	-- print('get actor from body', object, actormap[object])
 	return actormap[object].uuid
 end
 -- only from internal use.

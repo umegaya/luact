@@ -22,7 +22,7 @@ local supervise = require 'luact.supervise'
 
 local _M = {}
 
-_M.DEFAULT_ROOT_DIR = fs.path("tmp", "luact")
+_M.DEFAULT_ROOT_DIR = fs.abspath("tmp", "luact")
 
 -- command line option definitions
 local opts_defs = {
@@ -42,8 +42,8 @@ factory = {
 	["cdata"] = function (cdata)
 		return cdata
 	end,
-	["function"] = function (fn)
-		return fn
+	["function"] = function (fn, ...)
+		return fn(...)
 	end,
 	["string"] = function (str, ...)
 		if str:find("/") or str:match("%.lua$") then
@@ -62,6 +62,7 @@ factory = {
 	["module"] = function (mod, fallback)
 		local ok, r = pcall(require, mod)
 		if not ok then
+			logger.warn('require module fails', r)
 			if fallback then
 				if os.execute('luarocks install '..fallback) ~= 0 then
 					exception.raise('runtime', 'os.execute')
@@ -103,41 +104,44 @@ function _M.stop()
 	pulpo.stop()
 end
 function _M.initialize(opts)
-	opts = opts or {}
-	local cmdl_args = optparse(_G.arg, opts_defs)
+	opts = util.merge_table(require 'luact.option', opts or {})
+	util.merge_table(opts, optparse(_G.arg, opts_defs), true)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules
-	util.merge_table(opts, cmdl_args)
-	conn.initialize(opts)
-	dht.initialize(opts)
-	actor.initialize(opts)
-	router.initialize(opts)
+	conn.initialize(opts.conn)
+	actor.initialize(opts.actor)
+	router.initialize(opts.router)
+	dht.initialize(opts.dht)
 
 	-- initialize listener of internal actor messaging 
-	local port = tonumber(opts.port or 8008)
-	local proto = opts.proto or "tcp"
-	if opts.serde then
-		proto = proto .. "+" .. opts.serde
-	end
-	listener.unprotected_listen(proto.."://0.0.0.0:"..tostring(port))
+	listener.unprotected_listen(tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port))
 	-- external port should be declared at each startup routine.
 	-- because it is likely to open multiple listener port.
 
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
-		local ca = options.consensus_algorithm or "raft"
-		-- local mediator_module = _M.require('luact.cluster.'..ca).new(options)
+		local arbiter_opts = options.arbiter or {}
+		local arbiter_module = (arbiter_opts ~= false and require('luact.cluster.'..(arbiter_opts.kind or 'raft')))
 		_M.root = {
 			new = actor.new,
+			destroy = actor.destroy,
 			register = actor.register,
+			unregister = actor.unregister, 
 			["require"] = _M.require, 
 			load = _M.load, 
-			mediator = function (self)
-				return mediator_module
+			arbiter = function (group, fsm_factory, opts, ...)
+				if not arbiter_module then
+					exception.raise('configured as not using arbiter')
+				end
+				if fsm_factory then 
+					return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
+				else
+					return arbiter_module.find(group)
+				end
 			end,
 			stat = function (self)
-				-- TODO : add default stats functions
+				-- TODO : add default stats functions and refine customize way.
 				local ret = {}
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
 			end,

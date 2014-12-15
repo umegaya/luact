@@ -64,7 +64,7 @@ end
 function raft_hardstate_index:new_term(term)
 	self.term = self.term + 1
 end
-function raft_hardstate_index:vote(v, term)
+function raft_hardstate_index:vote_for(v, term)
 	if term == self.last_vote_term and uuid.valid(self.vote) then
 		return uuid.equals(v, self.vote)
 	end
@@ -95,6 +95,7 @@ function raft_state_container_index:apply_debug_opts(opts)
 end
 function raft_state_container_index:fin()
 	-- TODO : recycle
+	self.actor_body = nil
 	self.ev_log:destroy()
 	self.ev_close:destroy()
 	self:stop_replication()
@@ -118,7 +119,7 @@ function raft_state_container_index:quorum()
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	local q = self:quorum()
-	if q < 2 then
+	if q < 2 and (not kind) then
 		exception.raise('invalid', 'quorum too short', q)
 	end
 	local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
@@ -140,7 +141,7 @@ end
 function raft_state_container_index:read_state()
 	local st = self.wal:read_state()
 	if st then
-		self.state.current = st
+		self.state.current = st[0]
 	end
 	return st ~= nil
 end
@@ -152,8 +153,8 @@ function raft_state_container_index:new_term()
 	uuid.invalidate(self.state.leader_id)
 	self.wal:write_state(self.state.current)
 end
-function raft_state_container_index:vote(v, term)
-	if self.state:vote(v, term) then
+function raft_state_container_index:vote_for(v, term)
+	if self.state.current:vote_for(v, term) then
 		self.wal:write_state(self.state.current)
 		return true
 	end
@@ -172,6 +173,7 @@ function raft_state_container_index:become_leader()
 		exception.raise('raft', 'invalid state change', 'leader', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_LEADER
+	self:set_leader(actor.of(self.actor_body))
 	-- run replicator (and write initial log)
 	self:add_replica_set(self.replica_set)
 end
@@ -181,7 +183,7 @@ function raft_state_container_index:become_candidate()
 	end
 	self.state.node_kind = NODE_CANDIDATE
 	self:new_term()
-	self:vote(actor.of(self.actor_body))
+	self:vote_for(actor.of(self.actor_body))
 	self.actor_body:start_election()
 end
 function raft_state_container_index:become_follower()
@@ -214,6 +216,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set)
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
 	end
+	local changed
 	for i = 1,#replica_set do
 		local found
 		for j = 1,#self.replica_set do
@@ -223,9 +226,10 @@ function raft_state_container_index:add_replica_set(msgid, replica_set)
 		end
 		if not found then
 			table.insert(self.replica_set, replica_set[i])
+			changed = true
 		end
 	end
-	if self:is_leader() then 
+	if changed and self:is_leader() then 
 		-- TODO : make following transactional
 		-- only leader need to setup replication
 		for i = 1,#replica_set do
@@ -250,6 +254,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
 	end
+	local changed
 	for i = 1,#replica_set do
 		local found
 		for j = 1,#self.replica_set do
@@ -259,9 +264,10 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 		end
 		if found then
 			table.remove(self.replica_set, j)
+			changed = true
 		end
 	end
-	if self:is_leader() then
+	if changed and self:is_leader() then
 		-- TODO : make following transactional
 		-- only leader need to setup replication
 		if not self:is_leader() then return end
@@ -340,6 +346,11 @@ function raft_state_container_index:apply(log)
 end
 function raft_state_container_index:restore()
 	local r = self:read_state()
+	if not self.wal:can_restore() then
+		logger.warn('persistent data is not for current fsm')
+		self.wal:create_metadata_entry()
+		return 
+	end
 	local idx,hd = self.snapshot:restore(self.fsm)
 	if hd then 
 		self:read_snapshot_header(hd)

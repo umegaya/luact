@@ -6,7 +6,7 @@ _M.DEFAULT_TIMEOUT = 5
 
 function _M.parse_hostname(hostname)
 	local proto, serde, address = hostname:match('([^%+]+)%+?([^%+]*)://(.+)')
-	-- print(url, "["..proto.."]", "["..serde.."]", "["..address.."]")
+	-- print(hostname, "["..proto.."]", "["..serde.."]", "["..address.."]")
 	if not proto then raise('invalid', 'hostname', hostname) end
 	if #serde <= 0 then serde = _M.DEFAULT_SERDE end
 	local user, credential, addr = address:match('([^@:]+):?([^@]*)@(.+)')

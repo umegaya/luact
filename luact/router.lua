@@ -168,7 +168,7 @@ function _M.initialize(opts)
 		debug_log = function (...) end
 	end
 	-- TODO : prepare multiple timeout check queue for shorter timeout duration
-	clock.timer((opts.timeout_resolution or 1) / 2, function ()
+	clock.timer(opts.timeout_resolution / 2, function ()
 		local nt = clock.get()
 		for id,tv in pairs(timeout_periods) do
 			debug_log('nt:tv=', nt, tv)

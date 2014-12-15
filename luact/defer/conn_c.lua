@@ -33,10 +33,6 @@ ffi.cdef [[
 		luact_wbuf_t wb;
 		unsigned char serde_id, dead;
 		unsigned short task_processor_id;
-		union {
-			pulpo_addrinfo_t buf;
-			struct sockaddr p;
-		} addr;
 	} luact_conn_t;
 	typedef struct luact_ext_conn {
 		pulpo_io_t *io;
@@ -75,7 +71,7 @@ local conn_tasks_mt = {
 }
 function conn_tasks_mt.new(per_processor, interval)
 	return setmetatable({
-		[1] = {}, 
+		[1] = {id = 1},
 		alive = true, map = {}, 
 		per_processor = per_processor or 256,
 		interval = interval or 3.0, 
@@ -152,6 +148,10 @@ function conn_index:start_io(opts, sr)
 	end
 	wev = tentacle(self.write, self, self.io)
 	tentacle(self.sweeper, self, rev, wev)
+	-- for example, normal http (not 2.0) is volatile.
+	if not opts.volatile_connection then
+		conn_tasks:add(self) -- start keeping alive
+	end
 end
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
@@ -176,22 +176,19 @@ function conn_index:tick()
 	-- change second argument of actor.root_of
 end
 function conn_index:new(machine_ipv4, opts)
-	local hostname = _M.hostname_of(machine_ipv4)
+	if machine_ipv4 == 0 then
+		exception.raise('invalid', 'machine_id', 0)
+	end
+	local hostname = _M.internal_hostname_by_addr(machine_ipv4)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
-	self:store_peername()
 	self:start_io(opts, self:serde())
-	-- for example, normal http (not 2.0) is volatile.
-	if not opts.volatile_connection then
-		conn_tasks:add(self) -- start keeping alive
-	end
 	return self
 end
 function conn_index:new_server(io, opts)
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
-	self:store_peername()
 	self:start_io(opts, self:serde())
 	return self
 end
@@ -223,20 +220,21 @@ function conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
 function conn_index:machine_id()
-	assert(self.addr.p.sa_family == AF_INET)
-	return ffi.cast('struct sockaddr_in*', self.addr.p).sin_addr.in_addr
+	assert(self:address_family() == AF_INET)
+	return self.io:addrinfo().addr4.sin_addr.s_addr
+end
+function conn_index:address_family()
+	return self.io:addrinfo().addrp[0].sa_family
 end
 function conn_index:cmapkey()
-	if self.addr.p.sa_family == AF_INET then
+	local af = self:address_family()
+	if af == AF_INET then
 		return self:machine_id()
-	elseif self.addr.p.sa_family == AF_INET6 then
-		return socket.inet_namebyhost(self.addr.p)
+	elseif af == AF_INET6 then
+		return socket.inet_namebyhost(self.io:addrinfo().addrp)
 	else
-		exception.raise('invalid', 'address', 'family', self.addr.p.sa_family)
+		exception.raise('invalid', 'address', 'family', af)
 	end
-end
-function conn_index:store_peername()
-	socket.inet_peerbyfd(self.io:fd(), self.addr.p, ffi.sizeof(self.addr.buf))
 end
 function conn_index:read_int(io, sr)
 	local rb = self.rb
@@ -492,16 +490,19 @@ end
  	module functions
 --]]
 -- get default hostname to access given actor uuid
-local hostname_buffer = {}
-function _M.hostname_of(id)
-	hostname_buffer[2] = socket.inet_namebyhost(uuid.addr(id))
-	return table.concat(hostname_buffer)
+local internal_hostname_buffer = {}
+function _M.internal_hostname_of(id)
+	return _M.internal_hostname_by_addr(uuid.addr(id))
+end
+function _M.internal_hostname_by_addr(numeric_ipv4)
+	internal_hostname_buffer[2] = socket.host_by_numeric_ipv4_addr(numeric_ipv4)
+	return table.concat(internal_hostname_buffer)
 end
 
 -- initialize
 function _M.initialize(opts)
-	hostname_buffer[1] = opts.proto
-	hostname_buffer[3] = (":"..tostring(opts.port))
+	internal_hostname_buffer[1] = (opts.internal_proto.."://")
+	internal_hostname_buffer[3] = (":"..tostring(opts.internal_port))
 	_M.opts = opts
 	_M.use_connection_cache = opts.use_connection_cache
 	-- open connection for my thread

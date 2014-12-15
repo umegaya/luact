@@ -88,7 +88,7 @@ function wal_index:fin()
 end
 function wal_index:can_restore()
 	local obj = self:read_metadata()
-	return util.table_equals(self.meta, obj)
+	return obj and util.table_equals(self.meta, obj)
 end
 function wal_index:compaction(upto_idx)
 	-- remove in memory log with some margin (because minority node which hasn't replicate old log exists.)
@@ -109,10 +109,13 @@ function wal_index:write_state(state)
 	self.writer:write_state(self.store, 'state', state, self.serde, self.logcache)
 end
 function wal_index:read_metadata()
-	return self.writer:read_state(self.store, 'meta', self.serde, self.logcache)
+	return self.writer:read_state(self.store, 'metadata', self.serde, self.logcache)
 end
 function wal_index:write_metadata(meta)
-	self.writer:write_state(self.store, 'meta', meta, self.serde, self.logcache)
+	self.writer:write_state(self.store, 'metadata', meta, self.serde, self.logcache)
+end
+function wal_index:create_metadata_entry()
+	self:write_metadata(self.meta)
 end
 function wal_index:at(idx)
 	return self.logcache:at(idx)

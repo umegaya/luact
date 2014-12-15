@@ -166,6 +166,9 @@ function _M.from(ptr)
 	return ffi.cast('luact_uuid_t*', ptr)
 end
 function _M.owner_of(uuid)
+	if _M.addr(uuid) == 0 then
+		print('invalid addr', debug.traceback())
+	end	
 	return _M.addr(uuid) == _M.node_address
 end
 local uuid_work = ffi.new('luact_uuid_t')
@@ -186,7 +189,7 @@ function _M.free(uuid)
 	idgen:free(uuid)
 end
 function _M.valid(uuid)
-	return _M.addr(uuid) == 0
+	return _M.addr(uuid) ~= 0
 end
 function _M.invalidate(uuid)
 	uuid.__detail__.machine_id = 0

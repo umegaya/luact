@@ -3,6 +3,7 @@ local uuid = require 'luact.uuid'
 local clock = require 'luact.clock'
 local serde = require 'luact.serde'
 local router = require 'luact.router'
+local actor = require 'luact.actor'
 
 local state = require 'luact.cluster.raft.state'
 local wal = require 'luact.cluster.raft.wal'
@@ -28,31 +29,36 @@ local tick_intval_sec = 0.05
 -- raft object methods
 local raft_index = {}
 local raft_mt = {
-	raft_index = raft_index
+	__index = raft_index
 }
 function raft_index:init()
 end
 function raft_index:fin()
-	state:fin()
+	self.state:fin()
+end
+function raft_index:leader()
+	return self.state:leader()
 end
 function raft_index:__actor_destroy__()
 	self.alive = nil
 end
-function raft_index:election_timeout()
+function raft_index:check_election_timeout()
 	-- between x msec ~ 2*x msec
-	return (self.elapsed >= util.random(_M.election_timeout, _M.election_timeout * 2 - 1))
+	return (self.elapsed >= util.random(self.election_timeout, self.election_timeout * 2 - 1))
 end
 function raft_index:tick()
 	self.elapsed = self.elapsed + 1
-	if self:is_follower() then
-		if self:election_timeout() then
+	if self.state:is_follower() then
+		-- logger.info('follower no heartbeat elapsed', self.elapsed)
+		if self:check_election_timeout() then
+			logger.info('follower election timeout', self.elapsed)
 			-- if election timeout, become candidate
 			self.state:become_candidate()
 		end
 	end
 end
 function raft_index:run()
-	self:become_follower() -- become follower first
+	self.state:become_follower() -- become follower first
 	while self.alive do
 		clock.sleep(tick_intval_sec)
 		self:tick()
@@ -68,16 +74,18 @@ function raft_index:start_election()
 		for i=1,#set,1 do
 			table.insert(votes, set[i]:async_request_vote())
 		end
-		local timeout = math.random(self.election_timeout_sec, self.election_timeout_sec * 2)
+		local timeout = self.election_timeout_sec
 		local ret = event.join(clock.alarm(timeout), unpack(votes))
-		local grant = 0
-		for i=1,#ret-1 do
+		local grant = 1 -- for vote of this node
+		local r = ret[#ret] -- last event is timeout event
+		for i=1,#ret-1 do -- -1 to ignore last result (is timeout event)
 			local r = ret[i]
 			if r[1] ~= 'timeout' then
 				grant = grant + 1
 			end
 		end
 		if grant >= quorum then
+			logger.notice('get quorum: become leader:', grant, quorum)
 			self.state:become_leader()
 			break
 		end
@@ -170,12 +178,14 @@ function raft_index:append_entries(term, leader, prev_log_idx, prev_log_term, en
 	if self.state:is_candidate() then
 		self.state:become_follower()
 	end
+	-- Save the current leader
+	self.state:set_leader(leader)
 	-- 3. If an existing entry conflicts with a new one (same index but different terms), 
 	-- delete the existing entry and all that follow it (§5.3)
 	if #entries > 0 then
 		local first, last = entries[1], entries[#entries]
 		-- Delete any conflicting entries
-		if first.index <= last_index {
+		if first.index <= last_index then
 			logger.warn('raft', 'Clearing log suffix range', first.index, last_index)
 			ok, r = self.state.wal:delete_logs(first.index, last_index)
 			if not ok then
@@ -193,12 +203,15 @@ function raft_index:append_entries(term, leader, prev_log_idx, prev_log_term, en
 	end
 
 	-- 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if leader_commit_idx > 0 && leader_commit_idx > self.state:last_commit_index() then
+	if leader_commit_idx > 0 and (leader_commit_idx > self.state:last_commit_index()) then
 		local idx = math.min(leader_commit_idx, self.state:last_index())
 		for i=self.state:last_commit_index(), idx do
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
+
+	-- reset elapsed time to prevent election timeout
+	self.elapsed = 0
 
 	-- Everything went well, return success
 	return self.state:current_term(), true, self.state:last_index()
@@ -231,7 +244,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		return self.state:current_term(), false		
 	end
 	-- 2. If votedFor is null or candidateId, 
-	if not self.state:vote(candidate_id, term) then
+	if not self.state:vote_for(candidate_id, term) then
 		logger.warn('raft', 'already vote', v, candidate_id, term)
 		return self.state:current_term(), false
 	end
@@ -250,7 +263,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 		self.state:set_term(term)
 	end
 	-- Save the current leader
-	self.set_leader(leader)
+	self.state:set_leader(leader)
 	-- Spill the remote snapshot to disk
 	local ok, rb = pcall(self.snapshot.copy, self.snapshot, fd, last_snapshot_index) 
 	if not ok then
@@ -275,15 +288,20 @@ local default_opts = {
 	initial_proposal_size = 1024,
 	log_compaction_margin = 10240, 
 	snapshot_file_preserve_num = 3, 
-	election_timeout_sec = 0.15,
+	election_timeout_sec = 1.0,
 	heartbeat_timeout_sec = 1.0,
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
 	storage = "rocksdb",
-	workdir = luact.DEFAULT_ROOT_DIR,
+	work_dir = luact.DEFAULT_ROOT_DIR,
 }
 local function configure_workdir(id, opts)
-	return fs.path(opts.work_dir, tostring(pulpo.thread_id), tostring(id))
+	if not opts.work_dir then
+		exception.raise('invalid', 'config', 'must contain "workdir"')
+	end
+	local p = fs.path(opts.work_dir, tostring(pulpo.thread_id), tostring(id))
+	logger.notice('raft workdir', id, p)
+	return p
 end
 local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]
@@ -292,32 +310,51 @@ local function configure_timeout(opts)
 	return math.floor(opts.election_timeout_sec / tick_intval_sec), 
 		math.floor(opts.heartbeat_timeout_sec / tick_intval_sec)
 end
-local function create(id, fsm, opts)
-	opts = opts or default_opts
+local function create(id, fsm_factory, opts, ...)
+	local fsm = fsm_factory(...)
 	local dir = configure_workdir(id, opts)
 	local sr = configure_serde(opts)
 	local election, heartbeat = configure_timeout(opts)
-	local store = (require ('luact.cluster.storage.'..opts.storage).new(dir, tostring(pulpo.thread_id))
+	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(pulpo.thread_id))
 	local ss = snapshot.new(dir, sr)
 	local wal = wal.new(fsm:metadata(), store, sr, opts)
 	local rft = setmetatable({
 		state = state.new(fsm, wal, ss, opts), 
-		proposal_timeout = opts.proposal_timeout_sec
+		proposal_timeout = opts.proposal_timeout_sec,
+		election_timeout_sec = opts.election_timeout_sec,
 		election_timeout = election,
 		heartbeat_timeout = heartbeat,
+		alive = true,
+		elapsed = 0, 
 	}, raft_mt)
 	rft.state.actor_body = rft
-	rft.state:restore()
-	rft:run()
 	return rft
 end
 -- create new raft state machine
 _M.default_opts = default_opts
-function _M.new(id, fsm, opts)
+_M.create_ev = event.new()
+function _M.new(id, fsm_factory, opts, ...)
 	local rft = raftmap[id]
+	opts = opts or default_opts
 	if not rft then
-		rft = luact.supervise(create, id, fsm, opts)
-		raftmap[id] = rft
+		if rft == nil then
+			raftmap[id] = false
+			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
+			raftmap[id] = rft
+			tentacle(rft.run, rft)
+			_M.create_ev:emit('create', id, rft)
+		else
+			local create_id
+			while true do
+				create_id, rft = select(3, event.join(clock.alarm(5.0), _M.create_ev))
+				if not create_id then
+					exception.raise('raft', 'object creation timeout')
+				end
+				if id == create_id then
+					break
+				end
+			end
+		end
 	end
 	return rft
 end
@@ -327,6 +364,7 @@ end
 function _M.destroy(id)
 	local rft = raftmap[id]
 	if rft then
+		raftmap[id] = nil
 		actor.destroy(rft)
 	end
 end
