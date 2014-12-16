@@ -10,7 +10,7 @@ function run_dir(d)
 		if not file then break end
 		file = (d .. '/' .. file)
 		if file:find('%.lua$') then
-			term.resetcolor(); print('test: '..file..' ==========================================')
+			term.resetcolor(); print('test: ' .. file .. ' ==========================================')
 			local ok, r = pcall(os.execute, arg[-1].." test/tools/launch.lua "..file)
 			if ok and r then
 				if r ~= 0 then

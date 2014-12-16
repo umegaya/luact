@@ -58,7 +58,7 @@ local ok,r = xpcall(function ()
 	end
 
 	-- replace replicator.new to mockup
-	function replicator.new(actor, state)
+	function replicator.new(leader_actor, actor, state)
 		local p = memory.alloc_fill_typed('luact_raft_replicator_t')
 		p:init(state)
 		return p

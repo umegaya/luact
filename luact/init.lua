@@ -132,7 +132,7 @@ function _M.initialize(opts)
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
 				if not arbiter_module then
-					exception.raise('configured as not using arbiter')
+					exception.raise('invalid', 'config', 'this node not using arbiter')
 				end
 				if fsm_factory then 
 					return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)

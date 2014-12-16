@@ -48,7 +48,7 @@ local function dest_assinged_this_thread(msg)
 end
 
 function _M.internal(conn, message)
-	logger.notice('router_internal', unpack(message))
+	-- logger.notice('router_internal', unpack(message))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if kind == KIND_RESPONSE then

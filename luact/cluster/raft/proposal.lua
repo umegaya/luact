@@ -105,7 +105,7 @@ function proposals_index:commit(index)
 		goto notice
 	end
 	st:commit()
-	-- print('commit result', index, st.quorum, st.current, st:granted())
+	-- logger.info('commit result', index, st.quorum, st.current, st:granted())
 	if not st:granted() then
 		goto notice
 	end
@@ -124,9 +124,11 @@ function proposals_index:commit(index)
 		end
 	end
 
-::notice::	
+::notice::
+	-- logger.info('last_commit_idx', tostring(prev_start_idx), tostring(last_commit_idx))
 	if last_commit_idx then
 		for idx=tonumber(prev_start_idx),tonumber(last_commit_idx) do
+			-- logger.info('idx', idx, 'accepted')
 			local log = self.wal:at(idx)
 			table.insert(self.accepted, log)
 		end
@@ -141,6 +143,7 @@ function proposals_index:range_commit(actor, sidx, eidx)
 		end
 	end
 	if accepted then
+		logger.info('notify_accepted', actor)
 		actor:notify_accepted()
 	end
 end

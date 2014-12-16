@@ -144,28 +144,28 @@ function b2s_conv_index:escape_cdata(tmp, idx, arg)
 			tmp[idx] = ffi.string(arg, refl.element_type.size)
 		end
 		-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
-		return {name = 'ptr', tp = name}
+		return {name = refl.what, tp = name}
 	end
 end
-function b2s_conv_index:escape(obj)
+function b2s_conv_index:escape(obj, no_root)
 	local changed 
+	local le = ((not no_root) and socket.little_endian() or nil)
 	if type(obj) ~= 'table' then
-		local tmp = { __le__ = socket.little_endian() }
+		local tmp = { __le__ = le }
 		if type(obj) == "cdata" then
 			changed = true
 			tmp.__cdata__ = self:escape_cdata(tmp, 1, obj)
 		end
 		return changed and tmp or obj
 	else
-		local tmp = { __cdatas__ = {}, __le__ = socket.little_endian() }
+		local tmp = { __cdatas__ = {}, __le__ = le }
 		for idx,arg in pairs(obj) do
 			if type(arg) == "cdata" then
 				changed = true
 				tmp.__cdatas__[idx] = self:escape_cdata(tmp, idx, arg)
 			elseif type(arg) == 'table' and (not (getmetatable(arg) and getmetatable(arg).__serialize)) then
 				changed = true
-				-- TODO : nested table which has cdata in it, need to pack?
-				tmp[idx] = self:escape(arg)
+				tmp[idx] = self:escape(arg, true)
 			else
 				-- such an complex structure should pass as uuid to remote. 
 				tmp[idx] = arg
@@ -183,13 +183,17 @@ function b2s_conv_index:unescape_cdata(src, tp)
 		end
 	elseif tp.name == 'float' then
 		return self:ptr2float(src)
-	elseif tp.name == 'array' or tp.name == 'ptr' then
-		if tp.name == 'ptr' and custom_unpack[tp.tp] then
+	elseif tp.name == 'array' or tp.name == 'ptr' or tp.name == 'ref' then
+		if (tp.name == 'ptr' or tp.name == 'ref') and custom_unpack[tp.tp] then
 			return custom_unpack[tp.tp](src)
-		else
+		elseif tp.name == 'ptr' or tp.name == 'array' then
 			local tmp = memory.alloc_typed(tp.tp, #(src) / ffi.sizeof(tp.tp))
 			ffi.copy(tmp, src, #src)
 			return tmp
+		else
+			local tmp = memory.alloc_typed(tp.tp)
+			ffi.copy(tmp, src, #src)
+			return tmp[0]
 		end
 	elseif tp.name then
 		if custom_unpack[tp.name] then
@@ -197,7 +201,7 @@ function b2s_conv_index:unescape_cdata(src, tp)
 		else
 			local tmp = memory.alloc_typed(tp.name)
 			ffi.copy(tmp, src, ffi.sizeof(tp.name))
-			return tmp
+			return tmp[0]
 		end
 	end
 end
@@ -239,7 +243,9 @@ end
 
 _M[kind.serpent] = serpent
 function serpent:pack_packet(buf, append, ...)
-	logger.notice('packets', ...)
+	if _M.DEBUG then
+		logger.notice('packets', ...)
+	end
 	exception.serializer = serpent.serializer
 	local str = sp.dump(conv:escape({...}))
 	local data = tostring(#str)..":"..str

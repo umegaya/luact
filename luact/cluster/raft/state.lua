@@ -5,6 +5,7 @@ local pbuf = require 'luact.pbuf'
 local proposal = require 'luact.cluster.raft.proposal'
 local replicator = require 'luact.cluster.raft.replicator'
 
+local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
@@ -61,8 +62,13 @@ function raft_hardstate_index:copy(target)
 	self.last_vote_term = target.last_vote_term
 	self.vote = target.vote
 end
-function raft_hardstate_index:new_term(term)
+function raft_hardstate_index:new_term()
+	logger.notice('raft', 'new term', self.term, self.term + 1)
 	self.term = self.term + 1
+end
+function raft_hardstate_index:set_term(term)
+	logger.notice('raft', 'set term', self.term, term)
+	self.term = term
 end
 function raft_hardstate_index:vote_for(v, term)
 	if term == self.last_vote_term and uuid.valid(self.vote) then
@@ -141,7 +147,7 @@ end
 function raft_state_container_index:read_state()
 	local st = self.wal:read_state()
 	if st then
-		self.state.current = st[0]
+		self.state.current = st
 	end
 	return st ~= nil
 end
@@ -153,6 +159,9 @@ function raft_state_container_index:new_term()
 	uuid.invalidate(self.state.leader_id)
 	self.wal:write_state(self.state.current)
 end
+function raft_state_container_index:set_term(term)
+	self.state.current:set_term(term)
+end
 function raft_state_container_index:vote_for(v, term)
 	if self.state.current:vote_for(v, term) then
 		self.wal:write_state(self.state.current)
@@ -161,7 +170,7 @@ function raft_state_container_index:vote_for(v, term)
 	return false
 end
 function raft_state_container_index:set_leader(leader_id)
-	logger.info('set leader', leader_id)
+	-- logger.info('set leader', leader_id)
 	self.state.leader_id = leader_id
 end
 -- only for debug
@@ -182,8 +191,6 @@ function raft_state_container_index:become_candidate()
 		exception.raise('raft', 'invalid state change', 'candidate', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_CANDIDATE
-	self:new_term()
-	self:vote_for(actor.of(self.actor_body))
 	self.actor_body:start_election()
 end
 function raft_state_container_index:become_follower()
@@ -232,17 +239,20 @@ function raft_state_container_index:add_replica_set(msgid, replica_set)
 	if changed and self:is_leader() then 
 		-- TODO : make following transactional
 		-- only leader need to setup replication
+		local leader_id = self:leader()
 		for i = 1,#replica_set do
 			id = replica_set[i]
-			local machine, thread = uuid.addr(id), uuid.thread_id(id)
-			local m = self.replicators[machine]
-			if not m then
-				m = {}
-				self.replicators[machine] = m
-			end
-			if not m[thread] then
-				-- id is act like actor
-				m[thread] = replicator.new(id, self)
+			if not uuid.equals(leader_id, id) then
+				local machine, thread = uuid.addr(id), uuid.thread_id(id)
+				local m = self.replicators[machine]
+				if not m then
+					m = {}
+					self.replicators[machine] = m
+				end
+				if not m[thread] then
+					-- id is act like actor
+					m[thread] = replicator.new(leader_id, id, self)
+				end
 			end
 		end
 		-- append log to replicate configuration change
@@ -270,7 +280,6 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 	if changed and self:is_leader() then
 		-- TODO : make following transactional
 		-- only leader need to setup replication
-		if not self:is_leader() then return end
 		for i = 1,#replica_set do
 			id = replica_set[i]
 			local machine, thread = uuid.addr(id), uuid.thread_id(id)
@@ -302,6 +311,9 @@ end
 function raft_state_container_index:last_commit_index()
 	return self.state.last_commit_idx
 end
+function raft_state_container_index:last_applied_index()
+	return self.state.last_applied_idx
+end
 function raft_state_container_index:last_index()
 	return self.wal:last_index()
 end
@@ -327,15 +339,14 @@ function raft_state_container_index:applied(log_idx)
 	self:snapshot_if_needed()
 end
 function raft_state_container_index:apply(log)
-	self:committed(log.index)
 	local ok, r
 	if not log.kind then
 		-- apply to fsm
 		ok, r = pcall(self.fsm.apply, self.fsm, log.log)
 	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
-		ok, r = pcall(self.add_replica_set, self, log.log)
+		ok, r = pcall(self.add_replica_set, self, nil, log.log)
 	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
-		ok, r = pcall(self.remove_replica_set, self, log.log)
+		ok, r = pcall(self.remove_replica_set, self, nil, log.log)
 	else
 		logger.warn('invalid raft system log committed', log.kind)
 	end
@@ -345,11 +356,17 @@ function raft_state_container_index:apply(log)
 	return ok, r
 end
 function raft_state_container_index:restore()
-	local r = self:read_state()
 	if not self.wal:can_restore() then
 		logger.warn('persistent data is not for current fsm')
 		self.wal:create_metadata_entry()
 		return 
+	end
+	local r = self:read_state()
+	if r then
+		logger.report('read state:', self.state.current.term)
+		if self.state.current.term > 30 then
+			exception.raise('invalid', 'term', self.state.current.term)
+		end
 	end
 	local idx,hd = self.snapshot:restore(self.fsm)
 	if hd then 
@@ -418,14 +435,16 @@ function raft_state_container_index:append_param_for(replicator)
 		prev_log_term = log.term
 	end 
 	local entries = self.wal:logs_from(prev_log_idx + 1)
+	-- logger.info('append_param_for:', prev_log_idx, #entries)
 	if not entries then return false end
+	assert(prev_log_idx and prev_log_term, "error: prev index/term should be non-nil")
 	return 
 		self:current_term(), 
 		self:leader(),
+		self:last_commit_index(),
 		prev_log_idx,
 		prev_log_term,
-		entries,
-		self:last_commit_index()
+		entries
 end
 
 

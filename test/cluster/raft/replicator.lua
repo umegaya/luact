@@ -66,7 +66,7 @@ local ok,r = xpcall(function ()
 	local function new_actor_body()
 		return setmetatable({}, {
 			__index = {
-				append_entries = function (term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
+				append_entries = function (term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
 				end,
 				install_snapshot = function (term, leader, fd)
 				end,
@@ -91,7 +91,7 @@ local ok,r = xpcall(function ()
 	function st:quorum()
 		return 3
 	end
-	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
+	function body:append_entries(term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
 		if not entries then
 			print('heartbeat:', term, leader)
 			return term, true, 0
@@ -108,7 +108,7 @@ local ok,r = xpcall(function ()
 		return term, true, 0
 	end
 
-	local rep, endev = replicator.new(actor, st)
+	local rep, endev = replicator.new(actor, actor, st)
 	local logs = {}
 	for i=1,FIRST_LOGSIZE do
 		table.insert(logs, { value = i })
@@ -153,7 +153,7 @@ local ok,r = xpcall(function ()
 			p.accepted[idx] = nil
 		end
 	end
-	function body:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
+	function body:append_entries(term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
 		if not entries then
 			print('heartbeat:', term, leader)
 			return term, true
@@ -189,7 +189,7 @@ local ok,r = xpcall(function ()
 	clock.sleep(0.5)
 	-- start replication
 	print('start repl')
-	local rep, endev = replicator.new(actor2, st)
+	local rep, endev = replicator.new(actor, actor2, st)
 	clock.sleep(0.5)
 
 	-- after meantime of sleep, fsm should updated (by snapshot)

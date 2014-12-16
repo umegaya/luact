@@ -35,10 +35,10 @@ end
 function replicator_index:fin()
 	self.alive = 0
 end
-function replicator_index:start(actor, state)
+function replicator_index:start(leader_actor, actor, state)
 	self:init(state)
 	local hbev = tentacle(self.heartbeat, self, actor, state)
-	local runev = tentacle(self.run, self, actor, state, hbev)
+	local runev = tentacle(self.run, self, leader_actor, actor, state, hbev)
 	state:kick_replicator()
 	return runev
 end
@@ -51,14 +51,15 @@ local function err_handler(e)
 end
 function replicator_index:start_replication(t)
 	t.running = true
-	local ok, r = xpcall(self.replicate, err_handler, self, t.actor, t.state)
+	local ok, r = xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
 	t.running = false
 	return r
 end
-function replicator_index:run(actor, state, hbev)
+function replicator_index:run(leader_actor, actor, state, hbev)
 	event.select({
 		self = self, 
 		actor = actor, 
+		leader_actor = leader_actor, 
 		state = state, 
 		[hbev] = function (t)
 			t.self:fin()
@@ -75,18 +76,20 @@ function replicator_index:run(actor, state, hbev)
 		end,
 	})
 end
-function replicator_index:handle_stale_term()
+function replicator_index:handle_stale_term(leader_actor, state)
 	state:become_follower()
 	self:on_leader_auth_result(false) -- no more leader
 end
 function replicator_index:update_last_access()
 	self.last_access = clock.get()
 end
-function replicator_index:update_last_appended(actor, state, entries)
+function replicator_index:update_last_appended(leader_actor, state, entries)
 	if #entries > 0 then
 		-- Mark any proposals as committed
+		-- logger.info('entries:', #entries, first and first.index, last and last.index)
 		local first, last = entries[1], entries[#entries]
-		state.proposals:range_commit(actor, first.index, last.index)
+		logger.info('range commit:', first.index, last.index)
+		state.proposals:range_commit(leader_actor, first.index, last.index)
 
 		-- Update the indexes
 		self.match_idx = last.index
@@ -96,13 +99,13 @@ function replicator_index:update_last_appended(actor, state, entries)
 	self:on_leader_auth_result(true)
 end
 function replicator_index:on_leader_auth_result(still_leader)
-	logger.notice('leader status:', still_leader)
+	-- logger.notice('leader status:', still_leader)
 	-- TODO : invoke event to know leader status verified. eg) wait for event to avoid stale reads
 end
 function replicator_index:failure_cooldown(n_failure)
 	clock.sleep(0.5 * n_failure)
 end
-function replicator_index:replicate(actor, state)
+function replicator_index:replicate(leader_actor, actor, state)
 	-- arguments
 	local current_term, leader, 
 		prev_log_idx, prev_log_term, 
@@ -116,27 +119,27 @@ function replicator_index:replicate(actor, state)
 	if self.alive == 0 then return true end
 
 	-- prepare parameters to send remote raft actor
-	current_term, leader, 
+	current_term, leader, leader_commit_idx, 
 	prev_log_idx, prev_log_term, 
-	entries, leader_commit_idx = state:append_param_for(self)
+	entries = state:append_param_for(self)
 	if not current_term then
-	print('sync')
+	logger.notice('sync')
 		goto SYNC
 	end
-	print('replicate', current_term)
+	logger.notice('replicate', current_term, 'to', actor)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
 	term, success, last_index = actor:timed_append_entries(
 												self.heartbeat_span_sec, 
-												current_term, leader, 
+												current_term, leader, leader_commit_idx, 
 												prev_log_idx, prev_log_term, 
-												entries, leader_commit_idx)
+												entries)
 -- print(term, success, last_index)
 	if self.alive == 0 then return true end
 	-- term is updated, step down leader
 	if term > current_term then
-		self:handle_stale_term(actor, state)
+		self:handle_stale_term(leader_actor, state)
 		return true
 	end
 
@@ -146,7 +149,7 @@ function replicator_index:replicate(actor, state)
 	-- Update based on success
 	if success then
 		-- Update our replication state
-		self:update_last_appended(actor, state, entries)
+		self:update_last_appended(leader_actor, state, entries)
 		-- Clear any failures, allow pipelining
 		self.failures = 0
 	else
@@ -158,7 +161,9 @@ function replicator_index:replicate(actor, state)
 
 ::CHECK_MORE::
 	-- Check if there are more logs to replicate
+	-- logger.info('check more logs to replic', self.next_idx, state.wal:last_index())
 	if self.next_idx <= state.wal:last_index() then
+		-- logger.info('more logs to replic', self.next_idx, state.wal:last_index())
 		goto START
 	else
 		return
@@ -167,7 +172,7 @@ function replicator_index:replicate(actor, state)
 	-- SYNC is used when we fail to get a log, usually because the follower
 	-- is too far behind, and we must ship a snapshot down instead
 ::SYNC::
-	local stop, err = self:sync(actor, state)
+	local stop, err = self:sync(leader_actor, actor, state)
 	if stop then
 		return true
 	elseif err then
@@ -178,7 +183,7 @@ function replicator_index:replicate(actor, state)
 	goto CHECK_MORE
 end
 -- send snap shot and sync fsm 
-function replicator_index:sync(actor, state)
+function replicator_index:sync(leader_actor, actor, state)
 	print('------------------ sync --------------------')
 	-- Get the snapshot path
 	local path, last_snapshot_index = state.snapshot:latest_snapshot_path()
@@ -202,7 +207,7 @@ function replicator_index:sync(actor, state)
 	-- Check for success
 	if success then
 		-- Mark any proposals are committed
-		state.proposals:range_commit(actor, self.match_idx+1, last_snapshot_index)
+		state.proposals:range_commit(leader_actor, self.match_idx+1, last_snapshot_index)
 
 		-- Update the indexes
 		self.match_idx = last_snapshot_index
@@ -224,7 +229,12 @@ function replicator_index:heartbeat(actor, state)
 	while self.alive ~= 0 do
 		clock.sleep(self.heartbeat_span_sec)
 
-		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader())
+		-- we send last commit index via heartbeat RPC to avoid follower's apply_log timing is late.
+		-- (because current implementation only send append entries RPC when new logs write to leader)
+		-- once commit index is increment, it is permanent, and apply_log can be proceed regardless the progress of append entries RPC, 
+		-- it is valid to send last commit index via heartbeat, and apply follower.
+		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
+		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader(), state:last_commit_index())
 		if (not ok) or (not success) then
 			logger.error(("raft: Failed to heartbeat to %x:%x"):format(uuid.addr(actor), uuid.thread_id(actor)))
 			failures = failures + 1
@@ -243,9 +253,9 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 
 
 -- module functions
-function _M.new(actor, state)
+function _M.new(leader_actor, actor, state)
 	local r = memory.alloc_fill_typed('luact_raft_replicator_t')
-	return r, r:start(actor, state)
+	return r, r:start(leader_actor, actor, state)
 end
 
 return _M

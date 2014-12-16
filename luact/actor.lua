@@ -307,7 +307,7 @@ function _M.of(object)
 	-- print('get actor from body', object, actormap[object])
 	return actormap[object].uuid
 end
--- only from internal use.
+-- should use only from internal.
 function _M._set_restart_result(id, result)
 	local s = uuid.serial(id)
 	if result then

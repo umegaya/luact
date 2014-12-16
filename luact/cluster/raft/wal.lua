@@ -39,8 +39,12 @@ end
 function wal_writer_index:new_log(kind, term, index, logbody)
 	return { kind = kind, term = term, index = index, log = logbody }
 end
+-- called from apply. set logical order and store logs
 function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 	local last_index = self.last_index
+	if term < self.last_term then
+		exception.raise('invalid', 'log term back', self.last_term, log.term)
+	end
 	for i=1,#logs,1 do
 		last_index = last_index + 1
 		local log = self:new_log(kind, term, last_index, logs[i])
@@ -48,8 +52,10 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		-- (its not necessary for persisted data, so after serde:pack)
 		if i == #logs and msgid then log.msgid = msgid end
 		logcache:put_at(last_index, log)
-		print('logat', last_index, logcache:at(last_index))
+		logger.info('writer', 'logat', last_index, logcache:at(last_index))
 	end
+	-- logger.report('write:after put logcache')
+	-- logcache:dump()
 	local first_index = self.last_index + 1
 	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
 	if not ok then
@@ -59,6 +65,35 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 	-- print('last_index:', self.last_index, "=>", last_index)
 	self.last_index = last_index
 	self.last_term = term
+	return first_index, last_index
+end
+-- called from append entries. just copy received logs.
+function wal_writer_index:copy(store, logs, serde, logcache)
+	local last_index = self.last_index
+	local last_term = self.last_term
+	for i=1,#logs,1 do
+		local log = logs[i]
+		if last_index > 0 and (last_index - log.index) ~= 1 then
+			exception.raise('invalid', 'log index leap', last_index, log.index)
+		end
+		if last_term > log.term then
+			exception.raise('invalid', 'log term back', last_term, log.term)
+		end
+		if log.msgid then log.msgid = nil end -- remove remote msgid
+		last_index = log.index
+		last_term = log.term
+		logcache:put_at(last_index, log)
+		logger.info('copy', 'logat', last_index, logcache:at(last_index))
+	end
+	local first_index = self.last_index + 1
+	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
+	if not ok then
+		logcache:rollback_index(self.last_index)
+		return nil
+	end
+	-- print('last_index:', self.last_index, "=>", last_index)
+	self.last_index = last_index
+	self.last_term = last_term
 	return first_index, last_index
 end
 function wal_writer_index:delete(store, start_idx, end_idx)
@@ -102,6 +137,9 @@ end
 function wal_index:write(kind, term, logs, msgid)
 	return self.writer:write(self.store, kind, term, logs, self.serde, self.logcache, msgid)
 end
+function wal_index:copy(logs)
+	return self.writer:copy(self.store, logs, self.serde, self.logcache)
+end
 function wal_index:read_state()
 	return self.writer:read_state(self.store, 'state', self.serde, self.logcache)
 end
@@ -121,6 +159,7 @@ function wal_index:at(idx)
 	return self.logcache:at(idx)
 end
 function wal_index:logs_from(start_idx)
+	-- self:dump()
 	return self.logcache:from(start_idx)
 end
 function wal_index:delete_logs(end_idx)
@@ -134,8 +173,7 @@ function wal_index:last_index_and_term()
 	return self.writer.last_index, self.writer.last_term
 end
 function wal_index:dump()
-	print('logcache dump -- ')
-	self.logcache:dump()
+	self.logcache:dump('logcache dump -- ')
 end
 
 -- module function

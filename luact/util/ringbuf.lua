@@ -20,9 +20,9 @@ local ringbuf_store_mt = {
 }
 -- debug dump
 function ringbuf_store_index:dump()
-	print('dump ringbuf store:', self)
+	logger.info('dump ringbuf store:', self)
 	for k,v in pairs(self) do
-		print(k, v, v.index, v.term)
+		logger.info(k, v, v.index, v.term)
 	end
 end
 -- interface for storing ringbuffer data
@@ -64,6 +64,7 @@ function ringbuf_header_index:init(n_size)
 end
 function ringbuf_header_index:verify_range(idx)
 	if self.start_idx == 0 then
+		-- logger.info('vrange:', self, idx, debug.traceback())
 		self.start_idx = idx
 		self.end_idx = idx
 	end
@@ -181,7 +182,7 @@ function ringbuf_header_index:available()
 	end
 end
 function ringbuf_header_index:dump()
-	print('header:', self.start_idx, self.end_idx, self.n_size, self:available())
+	logger.info('header:', self.start_idx, self.end_idx, self.n_size, self:available())
 end
 ffi.metatype('luact_raft_ringbuf_header_t', ringbuf_header_mt)
 
@@ -216,9 +217,11 @@ end
 function ringbuf_index:available()
 	return self.header:available()
 end
-function ringbuf_index:dump()
+function ringbuf_index:dump(title)
+	logger.info('----------------------------------------', title, debug.traceback())
 	self.header:dump()
 	self.store:dump()
+	logger.info('----------------------------------------')
 end
 
 -- module funcitons

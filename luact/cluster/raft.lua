@@ -67,6 +67,8 @@ function raft_index:run()
 end
 function raft_index:start_election()
 	while self.state:is_candidate() do
+		self.state:new_term()
+		self.state:vote_for(actor.of(self))
 		self.elapsed = 0
 		local set = self.state.replica_set
 		local votes = {}
@@ -110,6 +112,7 @@ function raft_index:add_replica_set(replica_set, timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
 	-- wait until logs are committed
+	print('add_replica_set:yield')
 	return coroutine.yield()
 end
 function raft_index:remove_replica_set(replica_set, timeout)
@@ -129,15 +132,24 @@ function raft_index:accepted()
 	for i=1,#a do
 		local log = a[i]
 		a[i] = nil
+		-- proceed commit log index
+		self.state:committed(log.index)
+		-- apply log and respond to waiter
 		self:apply_log(log)
 	end
 end
 function raft_index:apply_log(log)
-	-- proceed commit log index
+	-- apply log to fsm
 	local ok, r = self.state:apply(log)
 	if log.msgid then
 		router.respond_by_msgid(log.msgid, ok, r)
 	end
+end
+function raft_index:replica_set()
+	return self.state.replica_set
+end
+function raft_index:probe_fsm(prober)
+	probe(self.state.fsm)
 end
 --[[--
 from https://ramcloud.stanford.edu/raft.pdf
@@ -153,36 +165,47 @@ follow it (§5.3)
 4. Append any new entries not already in the log
 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 ]]
-function raft_index:append_entries(term, leader, prev_log_idx, prev_log_term, entries, leader_commit_idx)
+function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
 	local ok, r
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
-		logger.warn('raft', 'receive older term', term, self.state:current_term())
+		logger.warn('raft', 'append_entries', 'receive older term', term, self.state:current_term())
 		return self.state:current_term(), false, last_index
 	end
+	-- (part of 2.) If AppendEntries RPC received from new leader: convert to follower
 	if term > self.state:current_term() then
 		self.state:become_follower()
 		self.state:set_term(term)
 	end
-	if prev_log_idx ~= last_index then
-		local log = self.state.wal:at(prev_log_idx)
-		last_term = log.term
-	end
-	if last_term ~= prev_log_term then
-		-- 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-		logger.warn('raft', 'last term does not match', last_term, prev_log_term)
-		return self.state:current_term(), false, last_index
-	end
-	-- If AppendEntries RPC received from new leader: convert to follower
-	if self.state:is_candidate() then
-		self.state:become_follower()
-	end
 	-- Save the current leader
 	self.state:set_leader(leader)
+	-- reset elapsed time to prevent election timeout
+	self.elapsed = 0
+	-- if prev_log_idx is not set, means heartbeat. return.
+	if prev_log_idx then
+		-- verify last index and term. this node's log term at prev_log_idx should be same as which leader sent.
+		local tmp_prev_log_term
+		if prev_log_idx == last_index then
+			-- skip access wal 
+			tmp_prev_log_term = last_term
+		else
+			local log = self.state.wal:at(prev_log_idx)
+			if not log then
+				logger.warn('raft', 'fail to get prev log', prev_log_idx)
+				return self.state:current_term(), false, last_index	
+			end
+			tmp_prev_log_term = log.term
+		end
+		if tmp_prev_log_term ~= prev_log_term then
+			-- 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+			logger.warn('raft', 'last term does not match', tmp_prev_log_term, prev_log_term)
+			return self.state:current_term(), false, last_index
+		end
+	end
 	-- 3. If an existing entry conflicts with a new one (same index but different terms), 
 	-- delete the existing entry and all that follow it (§5.3)
-	if #entries > 0 then
+	if entries and #entries > 0 then
 		local first, last = entries[1], entries[#entries]
 		-- Delete any conflicting entries
 		if first.index <= last_index then
@@ -195,23 +218,22 @@ function raft_index:append_entries(term, leader, prev_log_idx, prev_log_term, en
 		end
 
 		-- 4. Append any new entries not already in the log
-		ok, r = pcall(self.state.write_logs, self.state, nil, entries)
-		if not ok then
-			logger.error('raft', 'Failed to append to logs', r)
+		if not self.state.wal:copy(entries) then
+			logger.error('raft', 'Failed to append to logs')
 			return self.state:current_term(), false, last_index
 		end
 	end
 
 	-- 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if leader_commit_idx > 0 and (leader_commit_idx > self.state:last_commit_index()) then
-		local idx = math.min(leader_commit_idx, self.state:last_index())
-		for i=self.state:last_commit_index(), idx do
+	-- logger.info('commits', leader_commit_idx, self.state:last_commit_index())
+	if leader_commit_idx and (leader_commit_idx > self.state:last_commit_index()) then
+		local idx = math.min(tonumber(leader_commit_idx), tonumber(self.state:last_index()))
+		self.state:set_last_commit_index(idx) -- no error check. force set leader value.
+		for i=tonumber(self.state:last_applied_index()) + 1, idx do
+			-- logger.info('apply_log', idx)
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
-
-	-- reset elapsed time to prevent election timeout
-	self.elapsed = 0
 
 	-- Everything went well, return success
 	return self.state:current_term(), true, self.state:last_index()
@@ -226,7 +248,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
-		logger.warn('raft', 'receive older term', term, self.state:current_term())
+		logger.warn('raft', 'request_vote', 'receive older term', term, self.state:current_term())
 		return self.state:current_term(), false
 	end
 	if term > self.state:current_term() then
@@ -255,6 +277,7 @@ end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	-- Ignore an older term
 	if term < self.state:current_term() then
+		logger.warn('raft', 'install_snapshot', 'receive older term', term, self.state:current_term())
 		return
 	end
 	-- Increase the term if we see a newer one
@@ -359,7 +382,7 @@ function _M.new(id, fsm_factory, opts, ...)
 	return rft
 end
 function _M.find(id)
-	return assert(raftmap[id], exception.new('not_found', 'raft group', id))
+	return raftmap[id]
 end
 function _M.destroy(id)
 	local rft = raftmap[id]

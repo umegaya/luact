@@ -88,11 +88,6 @@ function _M.addr(t)
 	return t.__tag__.machine_id 
 end
 _M.machine_id = _M.addr
-function _M.clone(t)
-	local buf = idgen:new()
-	buf.local_id = t.local_id
-	return buf
-end
 function _M.equals(t, cmp)
 	return t.__tag__.local_id == cmp.__tag__.local_id and t.__tag__.machine_id == cmp.__tag__.machine_id
 end
@@ -128,7 +123,6 @@ function _M.initialize(mt, startup_at, local_address)
 	idgen.seed.__detail__.thread_id = pulpo.thread_id
 	_M.uuid_work.__detail__.machine_id = _M.node_address
 	-- TODO : register machine_id/ip address pair to consul.
-
 end
 
 function _M.new()
@@ -146,28 +140,29 @@ function _M.new()
 	buf.__detail__.serial = idgen.seed.__detail__.serial
 	_M.set_timestamp(buf, msec_timestamp())
 	if _M.DEBUG then
-		logger.info('new uuid:', buf)--, debug.traceback())
+		logger.info('new uuid:', buf)-- , debug.traceback())
 	end
 	return buf
 end
-function _M.first(machine_id, thread_id)
-	local ret = _M.new()
+local first_uuid_work = ffi.new('luact_uuid_t')
+_M.set_timestamp(first_uuid_work, 0)
+first_uuid_work.__detail__.serial = 0
+function _M.first(machine_id, thread_id, alloc)
+	local r = (alloc and ffi.new('luact_uuid_t') or first_uuid_work)
 	if machine_id then
-		ret.__detail__.machine_id = machine_id
+		r.__detail__.machine_id = machine_id
 	end
 	if thread_id then
-		ret.__detail__.thread_id = thread_id
+		r.__detail__.thread_id = thread_id
 	end
-	_M.set_timestamp(ret, 0)
-	ret.__detail__.serial = 0
-	return ret
+	return r
 end
 function _M.from(ptr)
 	return ffi.cast('luact_uuid_t*', ptr)
 end
 function _M.owner_of(uuid)
 	if _M.addr(uuid) == 0 then
-		print('invalid addr', debug.traceback())
+		logger.report('invalid addr', debug.traceback())
 	end	
 	return _M.addr(uuid) == _M.node_address
 end
