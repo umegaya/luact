@@ -83,7 +83,7 @@ function _M.start_luact(n_core, arbiter, proc)
 	return true
 end
 
-function _M.start_cluster(n_core, leader_thread_id, fsm_factory, proc)
+function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 	local ptr = memory.alloc_typed('luact_thread_payload_t', 4)
 	ptr[0]:encode(fsm_factory)
 	ptr[1]:encode(proc)

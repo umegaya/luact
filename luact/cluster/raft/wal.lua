@@ -73,7 +73,7 @@ function wal_writer_index:copy(store, logs, serde, logcache)
 	local last_term = self.last_term
 	for i=1,#logs,1 do
 		local log = logs[i]
-		if last_index > 0 and (last_index - log.index) ~= 1 then
+		if last_index > 0 and (log.index - last_index) ~= 1 then
 			exception.raise('invalid', 'log index leap', last_index, log.index)
 		end
 		if last_term > log.term then
@@ -156,7 +156,7 @@ function wal_index:create_metadata_entry()
 	self:write_metadata(self.meta)
 end
 function wal_index:at(idx)
-	return self.logcache:at(idx)
+	return self.logcache:at(tonumber(idx))
 end
 function wal_index:logs_from(start_idx)
 	-- self:dump()

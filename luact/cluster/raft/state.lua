@@ -293,6 +293,15 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 		self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
 	end
 end
+function raft_state_container_index:request_routing_id()
+	if not self:is_leader() then 
+		if uuid.valid(self.state.leader_id) then
+			return self.state.leader_id
+		else
+			exception.raise('invalid', 'raft state', "no leader but don't know who is leader")
+		end
+	end
+end
 function raft_state_container_index:leader()
 	return self.state.leader_id
 end
@@ -425,7 +434,7 @@ function raft_state_container_index:append_param_for(replicator)
 	elseif (replicator.next_idx - 1) == self.snapshot.writer.last_snapshot_idx then
 		prev_log_idx, prev_log_term = self.snapshot:last_index_and_term()
 	else
-		local log = self.wal:at(replicator.next_idx)
+		local log = self.wal:at(replicator.next_idx - 1)
 		-- TODO : this actually happens because quorum of this index is already satisfied, 
 		-- log may be compacted already. compaction margin make some help, but not perfect.
 		if not log then

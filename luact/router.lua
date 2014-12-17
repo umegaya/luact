@@ -28,6 +28,7 @@ _M.NOTICE_CALL = bit.bor(KIND_CALL, NOTICE_MASK)
 _M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 
 local coromap = {}
+local debug_tracebacks = {}
 local timeout_periods = {}
 
 local KIND = 1
@@ -151,6 +152,9 @@ end
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
+	if _M.DEBUG then
+		debug_tracebacks[msgid] = debug.traceback()
+	end
 	if timeout then
 		local nt = clock.get()
 		timeout_periods[msgid] = (timeout + nt)
@@ -177,7 +181,13 @@ function _M.initialize(opts)
 				local co = coromap[id]
 				if co then
 					coromap[id] = nil
-					coroutine.resume(co, nil, exception.new('actor_timeout'))
+					if _M.DEBUG then
+						local tr = debug_tracebacks[id]
+						debug_tracebacks[id] = nil
+						coroutine.resume(co, nil, exception.new('actor_timeout', id, tr))
+					else
+						coroutine.resume(co, nil, exception.new('actor_timeout', id))
+					end
 				end
 				timeout_periods[id] = nil
 			end

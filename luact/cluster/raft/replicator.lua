@@ -6,6 +6,7 @@ local tentacle = require 'pulpo.tentacle'
 local exception = require 'pulpo.exception'
 local tentacle = require 'pulpo.tentacle'
 local event = require 'pulpo.event'
+local util = require 'pulpo.util'
 
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
@@ -114,7 +115,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local term, success, last_index
 ::START::
 	if self.failures > 0 then
-		self:failure_cooldown(self.failure)
+		self:failure_cooldown(self.failures)
 	end
 	if self.alive == 0 then return true end
 
@@ -126,7 +127,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	logger.notice('sync')
 		goto SYNC
 	end
-	logger.notice('replicate', current_term, 'to', actor)
+	logger.notice('replicate', prev_log_idx, 'to', actor)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
@@ -153,10 +154,10 @@ function replicator_index:replicate(leader_actor, actor, state)
 		-- Clear any failures, allow pipelining
 		self.failures = 0
 	else
-		s.next_idx = math.max(math.min(self.next_idx-1, last_index+1), 1)
-		self.match_idx = s.next_idx - 1
+		self.next_idx = math.max(math.min(tonumber(self.next_idx)-1, tonumber(last_index)+1), 1)
+		self.match_idx = self.next_idx - 1
 		self.failures = self.failures + 1
-		logger.warn(("raft: AppendEntries to %x rejected, sending older logs (next: %d)"):format(uuid.addr(actor), s.next_idx))
+		logger.warn(util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
 	end
 
 ::CHECK_MORE::

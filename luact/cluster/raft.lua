@@ -36,9 +36,6 @@ end
 function raft_index:fin()
 	self.state:fin()
 end
-function raft_index:leader()
-	return self.state:leader()
-end
 function raft_index:__actor_destroy__()
 	self.alive = nil
 end
@@ -56,6 +53,9 @@ function raft_index:tick()
 			self.state:become_candidate()
 		end
 	end
+end
+function raft_index:start()
+	tentacle(self.run, self)
 end
 function raft_index:run()
 	self.state:become_follower() -- become follower first
@@ -94,8 +94,7 @@ function raft_index:start_election()
 	end
 end
 function raft_index:propose(logs, timeout)
-	local l = self.state:leader()
-	-- routing request to leader
+	local l = self.state:request_routing_id()
 	if l then return l:propose(logs, timeout) end
 	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
 	-- ...then write log and kick snapshotter/replicator
@@ -105,21 +104,18 @@ function raft_index:propose(logs, timeout)
 end
 function raft_index:add_replica_set(replica_set, timeout)
 	-- routing request to leader
-	if not self.state:is_leader() then 
-		return self.state:leader():add_replica_set(replica_set, timeout) 
-	end
+	local l = self.state:request_routing_id()
+	if l then return l:add_replica_set(replica_set, timeout) end
 	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
 	-- wait until logs are committed
-	print('add_replica_set:yield')
 	return coroutine.yield()
 end
 function raft_index:remove_replica_set(replica_set, timeout)
 	-- routing request to leader
-	if not self.state:is_leader() then 
-		return self.state:leader():remove_replica_set(replica_set, timeout) 
-	end
+	local l = self.state:request_routing_id()
+	if l then return l:remove_replica_set(replica_set, timeout) end
 	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
@@ -145,11 +141,15 @@ function raft_index:apply_log(log)
 		router.respond_by_msgid(log.msgid, ok, r)
 	end
 end
+-- access internal data (mainly for debugging purpose)
+function raft_index:leader()
+	return self.state:leader()
+end
 function raft_index:replica_set()
 	return self.state.replica_set
 end
 function raft_index:probe_fsm(prober)
-	probe(self.state.fsm)
+	return prober(self.state.fsm)
 end
 --[[--
 from https://ramcloud.stanford.edu/raft.pdf
@@ -193,6 +193,9 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 			local log = self.state.wal:at(prev_log_idx)
 			if not log then
 				logger.warn('raft', 'fail to get prev log', prev_log_idx)
+				if pulpo.thread_id == 1 then
+					self.state.wal:dump()
+				end
 				return self.state:current_term(), false, last_index	
 			end
 			tmp_prev_log_term = log.term
@@ -225,12 +228,12 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 	end
 
 	-- 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	-- logger.info('commits', leader_commit_idx, self.state:last_commit_index())
+	-- logger.info('commits', leader_commit_idx, self.state:last_commit_index(), self.state:last_applied_index(), self.state:last_index())
 	if leader_commit_idx and (leader_commit_idx > self.state:last_commit_index()) then
-		local idx = math.min(tonumber(leader_commit_idx), tonumber(self.state:last_index()))
-		self.state:set_last_commit_index(idx) -- no error check. force set leader value.
-		for i=tonumber(self.state:last_applied_index()) + 1, idx do
-			-- logger.info('apply_log', idx)
+		local new_last_commit_idx = math.min(tonumber(leader_commit_idx), tonumber(self.state:last_index()))
+		self.state:set_last_commit_index(new_last_commit_idx) -- no error check. force set leader value.
+		for idx=tonumber(self.state:last_applied_index()) + 1, new_last_commit_idx do
+			-- logger.info('apply_log', i)
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
@@ -364,7 +367,7 @@ function _M.new(id, fsm_factory, opts, ...)
 			raftmap[id] = false
 			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
 			raftmap[id] = rft
-			tentacle(rft.run, rft)
+			rft:start()
 			_M.create_ev:emit('create', id, rft)
 		else
 			local create_id
