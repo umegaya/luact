@@ -157,14 +157,13 @@ local ok,r = xpcall(function ()
 	for i=1,1+#logs do
 		local s = p.progress:at(i)
 		-- print(i, s:valid(), s.quorum, s.current)
-		assert(s:valid() and s.quorum == 3 and s.current == 0, "first entries should be valid and has 4 replicas, so quorum == 3")
+		assert(s:valid() and s.quorum == 3 and s.current == 1, "first entries should be valid and has 4 replicas, so quorum == 3")
 	end
 	for i=2+#logs,last_index do
 		local s = p.progress:at(i)
-		assert(s:valid() and s.quorum == 2 and s.current == 0, "second entries should be valid and has 3 replicas, so quorum == 2")
+		assert(s:valid() and s.quorum == 2 and s.current == 1, "second entries should be valid and has 3 replicas, so quorum == 2")
 	end
 
-	p:range_commit(actor, 1, last_index - 2)
 	p:range_commit(actor, 1, last_index - 2)
 	for i=1,1+#logs do
 		local s = p.progress:at(i)
@@ -179,7 +178,7 @@ local ok,r = xpcall(function ()
 	end
 	for i=last_index-1,last_index do
 		local s = p.progress:at(i)
-		assert(s:valid() and s.quorum == 2 and s.current == 0, "last 2 entries should not satisfy quorum because not committed yet")
+		assert(s:valid() and s.quorum == 2 and s.current == 1, "last 2 entries should not satisfy quorum because not committed yet")
 		assert(not body.check[i], "entry should not be committed")
 	end
 
@@ -192,7 +191,7 @@ local ok,r = xpcall(function ()
 	end
 	for i=last_index-1,last_index do
 		local s = p.progress:at(i)
-		assert(s:valid() and s.quorum == 2 and s.current == 0, "last 2 entries should not satisfy quorum because not committed yet")
+		assert(s:valid() and s.quorum == 2 and s.current == 1, "last 2 entries should not satisfy quorum because not committed yet")
 		assert(not body.check[i], "entry should not be committed")
 	end
 	assert(util.table_equals(fsm, result_fsm), "log should be applied correctly")

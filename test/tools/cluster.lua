@@ -113,7 +113,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 				local factory = ptr[0]:decode()
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, nil, pulpo.thread_id)
 				logger.info('arb1', arb)
-				clock.sleep(3)
+				clock.sleep(2)
 				assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
 				local replica_set = {}
 				for i=1,n_core do
@@ -123,7 +123,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 				end
 				arb:add_replica_set(replica_set)
 			else
-				clock.sleep(3 + 2)
+				clock.sleep(2 + 2)
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
 				logger.info('arb2', arb)
 			end
@@ -164,6 +164,7 @@ function _M.new_fsm(thread_id)
 				end
 			end,
 			apply = function (self, data)
+			logger.warn('apply', data[1], data[2])
 				self[ data[1] ] = data[2]
 			end,
 			attach = function (self)

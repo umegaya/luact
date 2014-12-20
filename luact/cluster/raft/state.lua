@@ -2,6 +2,7 @@ local ffi = require 'ffiex.init'
 local actor = require 'luact.actor'
 local uuid = require 'luact.uuid'
 local pbuf = require 'luact.pbuf'
+local clock = require 'luact.clock'
 local proposal = require 'luact.cluster.raft.proposal'
 local replicator = require 'luact.cluster.raft.replicator'
 
@@ -78,6 +79,11 @@ function raft_hardstate_index:vote_for(v, term)
 	self.vote = v
 	return true
 end
+function raft_hardstate_index:force_vote_for(v)
+	self.last_vote_term = self.term
+	self.vote = v
+	return true
+end
 ffi.metatype('luact_raft_hardstate_t', raft_hardstate_mt)
 
 
@@ -120,7 +126,7 @@ function raft_state_container_index:quorum()
 			i = i + 1
 		end
 	end
-	if i <= 2 then return i end
+	if i <= 2 then return math.max(i, 1) end
 	return math.ceil((i + 1) / 2)
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
@@ -162,6 +168,10 @@ end
 function raft_state_container_index:set_term(term)
 	self.state.current:set_term(term)
 end
+function raft_state_container_index:vote_for_self()
+	self.state.current:force_vote_for(actor.of(self.actor_body))
+	self.wal:write_state(self.state.current)
+end
 function raft_state_container_index:vote_for(v, term)
 	if self.state.current:vote_for(v, term) then
 		self.wal:write_state(self.state.current)
@@ -171,7 +181,11 @@ function raft_state_container_index:vote_for(v, term)
 end
 function raft_state_container_index:set_leader(leader_id)
 	-- logger.info('set leader', leader_id)
-	self.state.leader_id = leader_id
+	if leader_id then
+		self.state.leader_id = leader_id
+	else
+		uuid.invalidate(self.state.leader_id)
+	end
 end
 -- only for debug
 function raft_state_container_index:debug_set_node_kind(k)
@@ -184,13 +198,14 @@ function raft_state_container_index:become_leader()
 	self.state.node_kind = NODE_LEADER
 	self:set_leader(actor.of(self.actor_body))
 	-- run replicator (and write initial log)
-	self:add_replica_set(self.replica_set)
+	self:add_replica_set(nil, self.replica_set)
 end
 function raft_state_container_index:become_candidate()
 	if self.state.node_kind ~= NODE_FOLLOWER then
 		exception.raise('raft', 'invalid state change', 'candidate', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_CANDIDATE
+	self:set_leader(nil)
 	self.actor_body:start_election()
 end
 function raft_state_container_index:become_follower()
@@ -201,12 +216,15 @@ function raft_state_container_index:become_follower()
 end
 -- nodes are list of luact_uuid_t
 function raft_state_container_index:stop_replication()
+	-- stop all main replication tentacle
+	self.ev_log:emit('stop')
 	-- even if no leader, try to stop replicaiton
 	for machine, reps in pairs(self.replicators) do
 		for k,v in pairs(reps) do
 			if not self:is_leader() then
 				logger.error('bug: no-leader node have valid replicator')
 			end
+			logger.info('stop replicator', machine, k)
 			v:fin()
 			reps[k] = nil
 		end
@@ -219,11 +237,10 @@ end
 -- TODO : arbitrary replica set change should do with sequencial flow like
 -- add_replica => (wait for completion) => remove_replica 
 -- like 6 Cluster membership changes or original raft paper.
-function raft_state_container_index:add_replica_set(msgid, replica_set)
+function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
 	end
-	local changed
 	for i = 1,#replica_set do
 		local found
 		for j = 1,#self.replica_set do
@@ -233,10 +250,9 @@ function raft_state_container_index:add_replica_set(msgid, replica_set)
 		end
 		if not found then
 			table.insert(self.replica_set, replica_set[i])
-			changed = true
 		end
 	end
-	if changed and self:is_leader() then 
+	if self:is_leader() then 
 		-- TODO : make following transactional
 		-- only leader need to setup replication
 		local leader_id = self:leader()
@@ -252,19 +268,21 @@ function raft_state_container_index:add_replica_set(msgid, replica_set)
 				if not m[thread] then
 					-- id is act like actor
 					m[thread] = replicator.new(leader_id, id, self)
+					logger.info('start replicator', id)
 				end
 			end
 		end
-		-- append log to replicate configuration change
-		self:write_syslog(SYSLOG_ADD_REPLICA_SET, msgid, replica_set)
+		if not applied then
+			-- append log to replicate configuration change
+			self:write_syslog(SYSLOG_ADD_REPLICA_SET, msgid, replica_set)
+		end
 	end
 end
 -- replica_set are list of luact_uuid_t
-function raft_state_container_index:remove_replica_set(msgid, replica_set)
+function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
 	end
-	local changed
 	for i = 1,#replica_set do
 		local found
 		for j = 1,#self.replica_set do
@@ -274,10 +292,9 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 		end
 		if found then
 			table.remove(self.replica_set, j)
-			changed = true
 		end
 	end
-	if changed and self:is_leader() then
+	if self:is_leader() then
 		-- TODO : make following transactional
 		-- only leader need to setup replication
 		for i = 1,#replica_set do
@@ -289,18 +306,27 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set)
 				m[thread] = nil
 			end
 		end
-		-- append log to replicate configuration change
-		self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
-	end
-end
-function raft_state_container_index:request_routing_id()
-	if not self:is_leader() then 
-		if uuid.valid(self.state.leader_id) then
-			return self.state.leader_id
-		else
-			exception.raise('invalid', 'raft state', "no leader but don't know who is leader")
+		if not applied then
+			-- append log to replicate configuration change
+			self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
 		end
 	end
+end
+function raft_state_container_index:request_routing_id(timeout)
+::RETRY::
+	if self:is_leader() then 
+		return nil, timeout
+	elseif uuid.valid(self.state.leader_id) then
+		return self.state.leader_id, timeout
+	end
+	if timeout > 0 then
+		local start = clock.get()
+		clock.sleep(0.5)
+		-- logger.info('wait for leader elected:', timeout, timeout - (clock.get() - start))
+		timeout = timeout - (clock.get() - start)
+		goto RETRY
+	end
+	exception.raise('runtime', 'raft state', "no leader but don't know who is leader")
 end
 function raft_state_container_index:leader()
 	return self.state.leader_id
@@ -336,7 +362,7 @@ end
 -- after replication to majority success, apply called
 function raft_state_container_index:committed(log_idx)
 	if (self:last_commit_index() > 0) and (log_idx - self:last_commit_index()) ~= 1 then
-		exception.raise('fatal', 'invalid log idx', self:last_commit_index(), log_idx)
+		logger.warn('raft', 'commit log idx leap (may be previous leader stale)', self:last_commit_index(), log_idx)
 	end
 	self:set_last_commit_index(log_idx)
 end
@@ -353,9 +379,9 @@ function raft_state_container_index:apply(log)
 		-- apply to fsm
 		ok, r = pcall(self.fsm.apply, self.fsm, log.log)
 	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
-		ok, r = pcall(self.add_replica_set, self, nil, log.log)
+		ok, r = pcall(self.add_replica_set, self, nil, log.log, true)
 	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
-		ok, r = pcall(self.remove_replica_set, self, nil, log.log)
+		ok, r = pcall(self.remove_replica_set, self, nil, log.log, true)
 	else
 		logger.warn('invalid raft system log committed', log.kind)
 	end
@@ -371,12 +397,6 @@ function raft_state_container_index:restore()
 		return 
 	end
 	local r = self:read_state()
-	if r then
-		logger.report('read state:', self.state.current.term)
-		if self.state.current.term > 30 then
-			exception.raise('invalid', 'term', self.state.current.term)
-		end
-	end
 	local idx,hd = self.snapshot:restore(self.fsm)
 	if hd then 
 		self:read_snapshot_header(hd)
@@ -444,7 +464,7 @@ function raft_state_container_index:append_param_for(replicator)
 		prev_log_term = log.term
 	end 
 	local entries = self.wal:logs_from(prev_log_idx + 1)
-	-- logger.info('append_param_for:', prev_log_idx, #entries)
+	-- logger.info('append_param_for:', prev_log_idx, replicator.next_idx)
 	if not entries then return false end
 	assert(prev_log_idx and prev_log_term, "error: prev index/term should be non-nil")
 	return 

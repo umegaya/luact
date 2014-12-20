@@ -214,6 +214,7 @@ function b2s_conv_index:unescape(obj)
 		for idx,tp in pairs(obj.__cdatas__) do
 			obj[idx] = self:unescape_cdata(obj[idx], tp)
 		end
+		obj.__cdatas__ = nil
 	end
 	for k,v in pairs(obj) do
 		if type(v) == 'table' and (v.__cdata__ or v.__cdatas__) then
@@ -267,7 +268,7 @@ function serpent:pack_packet(buf, append, ...)
 		buf:use(ffi.sizeof('luact_writer_raw_t') + sz)
 	end	
 	if _M.DEBUG then
-		print('packed:', data)
+		logger.warn('packed:', data)
 	end
 	return sz
 end
@@ -302,7 +303,12 @@ function serpent:unpack_packet(rb)
 		else
 			-- can have valid record.
 			rb:seek_from_curr(sz + 1 + dsz)
-			return conv:unescape(fn())
+			local r = {pcall(conv.unescape, conv, fn())}
+			if not r[1] then
+				-- logger.report('err unescape:', ffi.string(p + sz + 1, dsz))
+				error(r[2])
+			end
+			return unpack(r, 2)
 		end
 	end
 end
@@ -316,7 +322,7 @@ function serpent:pack(buf, obj)
 	ffi.copy(buf:curr_p(), data, sz)
 	buf:use(sz)
 	if _M.DEBUG then
-		print('packed:', data, #data)
+		logger.notice('packed:', data, #data)
 	end
 	return sz
 end

@@ -88,10 +88,12 @@ local proposals_mt = {
 function proposals_index:fin()
 	memory.free(self.progress.store)
 end
+-- have to call at least leader commits logs of start_idx ~ end_idx
 function proposals_index:add(quorum, start_idx, end_idx)
 	for idx = tonumber(start_idx), tonumber(end_idx) do
 		self.progress:init_at(idx, function (st, q)
 			st:init(q)
+			st:commit() -- leader should commit this log already.
 		end, quorum)
 	end
 end

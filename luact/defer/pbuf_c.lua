@@ -16,6 +16,7 @@ _M.read = {}
 _M.write = {}
 _M.writer = writer 
 
+local WRITER_DEACTIVATE = writer.WRITER_DEACTIVATE
 local WRITER_NONE = writer.WRITER_NONE
 local WRITER_RAW = writer.WRITER_RAW
 local WRITER_VEC = writer.WRITER_VEC
@@ -67,7 +68,7 @@ function rbuf_index:reserve(sz)
 		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
-		logger.report('reserve1 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)--, debug.traceback())
+		logger.info('reserve1 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)--, debug.traceback())
 		self.max = newsz
 		self.used = copyb
 	else
@@ -100,7 +101,7 @@ function rbuf_index:reserve_and_reduce_unsed(sz)
 		if copyb > 0 then 
 			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
-		logger.info('reserve2 ptr:', self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
+		logger.info('reserve2 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
 		self.hpos = 0
 		self.used = copyb
 		memory.free(self.buf)
@@ -131,8 +132,12 @@ end
 function rbuf_index:use(r)
 	self.used = self.used + r
 end
-function rbuf_index:seek_from_curr(r)
+function rbuf_index:seek_from_curr(r, check)
 	self.hpos = self.hpos + r
+	if check and self.hpos < self.used and self.buf[self.hpos] > 0x10 then
+		self:dump(true)
+		exception.raise('fatal', 'memory broken')
+	end
 end
 function rbuf_index:seek_from_start(r)
 	self.hpos = r
@@ -149,7 +154,7 @@ end
 function rbuf_index:start_p()
 	return self.buf
 end
-function rbuf_index:dump()
+function rbuf_index:dump(full)
 	io.write('max,used,hpos: '..tonumber(self.max)..' '..tonumber(self.used)..' '..tonumber(self.hpos)..'\n')
 	io.write('buffer:'..tostring(self.buf))
 	for i=0,tonumber(self.used)-1,1 do
@@ -157,6 +162,9 @@ function rbuf_index:dump()
 		io.write(string.format('%02x', tonumber(ffi.cast('unsigned char', self.buf[i]))))
 	end
 	io.write('\n')
+	if full then
+		print('as string', '['..ffi.string(self.buf, self.used)..']')
+	end
 end
 function rbuf_index:shrink(sz)
 	if sz >= self.used then
@@ -185,12 +193,12 @@ function wbuf_index:init()
 	self.rbuf[1]:init()
 	self.curr = self.rbuf
 	self.next = self.rbuf + 1
-	self.last_cmd = WRITER_NONE
+	self.last_cmd = WRITER_DEACTIVATE
 end
 function wbuf_index:reset()
 	self.rbuf[0]:reset()
 	self.rbuf[1]:reset()
-	self.last_cmd = WRITER_NONE
+	self.last_cmd = WRITER_DEACTIVATE
 end
 function wbuf_index:fin()
 	self.rbuf[0]:fin()
@@ -201,7 +209,7 @@ function wbuf_index:set_io(io)
 end
 function wbuf_index:send(w, ...)
 	w.write(self.next, self.last_cmd == w.cmd, ...)
-	if self.last_cmd == WRITER_NONE then
+	if self.last_cmd == WRITER_DEACTIVATE then
 		self.io:reactivate_write() -- add edge trigger again.
 		-- so even no actual environment changed, edge trigger should be triggered again.
 	end
@@ -225,15 +233,17 @@ function wbuf_index:write()
 				logger.warn('write thread terminate:', self.io:fd())
 				return
 			end
-			-- wait until next wbuf_index.do_send called...
+			-- wait until next wbuf_index.send called...
 		until self:swap()
 	end
 	local r
 	local curr = self.curr
 	local now, last = curr:curr_p(), curr:last_p()
 	while now < last do
-		-- curr:dump()
-		-- print('enddump', now, now[0], _M.writer[now[0]], debug.traceback())
+		if not _M.writer[now[0]] then
+			curr:dump(true)
+			logger.report('enddump', now, now[0], _M.writer[now[0]])--, debug.traceback())
+		end
 		local w = ffi.cast(_M.writer[now[0]], now + 1)
 		local r = w:syscall(self.io)
 		w:sent(r)
@@ -245,7 +255,7 @@ function wbuf_index:write()
 		end
 	end
 	assert(now >= curr:curr_p());	-- if no w->finish(), == is possible 
-	curr:seek_from_curr(now - curr:curr_p())
+	curr:seek_from_curr(now - curr:curr_p(), true)
 end
 function wbuf_index:swap()
 	local tmp = self.curr
@@ -255,10 +265,12 @@ function wbuf_index:swap()
 	if self.curr:available() == 0 then
 		-- it means there is no more packet to send at this timing
 		-- calling wbuf_index:do_send from any thread, resumes this yield
-		self.last_cmd = WRITER_NONE
+		self.last_cmd = WRITER_DEACTIVATE
 		self.io:deactivate_write()
 		-- yield is done after exiting swap() call, because it usually called inside mutex lock.
 		return false
+	else
+		self.last_cmd = WRITER_NONE -- make next write append == false 
 	end
 	return true
 end

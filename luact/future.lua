@@ -23,11 +23,13 @@ function future_index:unsafe_get(timeout)
 	end
 	-- type, eventobject, true or false, return values...
 	if self.ret[3] then
-		-- return values... == true, arg1, arg2, ... 
-		return unpack(self.ret, 5) -- return only return value
+		-- return values contains one more boolean on the top. why?
+		-- => 
+		-- return values... == arg1, arg2, ... 
+		return unpack(self.ret, 4) -- return only return value
 	else
-		-- return values... == false, exception
-		error(self.ret[5])
+		-- return values... == exception
+		error(self.ret[4])
 	end
 end
 function future_index:get(timeout)
@@ -43,7 +45,7 @@ local function check_completion(f)
 	f.ret = {event.wait(nil, f.ev)}
 end
 
-
+-- ev has to be return value of actor:async_****
 function _M.new(ev)
 	local f = setmetatable({ev=ev}, future_mt)
 	f.cev = tentacle(check_completion, f)

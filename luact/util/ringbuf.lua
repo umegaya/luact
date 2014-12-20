@@ -44,12 +44,25 @@ function ringbuf_store_index:copy(src_store, src_pos, dst_pos)
 	-- +1 for lua array index
 	self[dst_pos] = src_store[src_pos]
 end
-function ringbuf_store_index:from(spos, epos)
+function ringbuf_store_index:from(size, spos, epos)
+	local r
 	if spos < epos then
-		return {unpack(self, spos, epos)}
+		r = {unpack(self, spos, epos)}
+	elseif spos > epos then
+		r = {unpack(self, spos), unpack(self, 0, epos)}
 	else
-		return {unpack(self, spos), unpack(self, 0, epos)}
+		r = {self[spos]}
 	end
+	--[[
+		logger.warn('from', spos, epos, size)
+	for k,v in pairs(r) do
+		logger.warn(k, v)
+	end
+	for k,v in pairs(self) do
+		logger.warn('self', k, v)
+	end
+	]]
+	return r
 end
 
 -- log header object
@@ -79,9 +92,13 @@ function ringbuf_header_index:at(idx, store)
 end
 function ringbuf_header_index:from(sidx, store)
 	if self:verify_range(sidx) then
+		if sidx > self.end_idx then
+			return nil
+		end
 		local pos = self:index2pos(sidx)
 		local epos = self:index2pos(self.end_idx)
-		return store:from(pos, epos)
+		logger.info('from', sidx, self.end_idx)
+		return store:from(self.n_size, pos, epos)
 	end
 	return nil
 end

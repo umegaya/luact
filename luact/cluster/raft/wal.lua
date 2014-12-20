@@ -37,6 +37,9 @@ function wal_writer_index:fin()
 	end
 end
 function wal_writer_index:new_log(kind, term, index, logbody)
+	if type(kind) == 'table' then
+		exception.raise('fatal')
+	end
 	return { kind = kind, term = term, index = index, log = logbody }
 end
 -- called from apply. set logical order and store logs

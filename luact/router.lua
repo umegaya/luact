@@ -6,6 +6,7 @@ local actor = require 'luact.actor'
 local clock = require 'luact.clock'
 
 local tentacle = require 'pulpo.tentacle'
+-- tentacle.DEBUG2 = true
 local exception = require 'pulpo.exception'
 
 local _M = {}
@@ -28,7 +29,6 @@ _M.NOTICE_CALL = bit.bor(KIND_CALL, NOTICE_MASK)
 _M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 
 local coromap = {}
-local debug_tracebacks = {}
 local timeout_periods = {}
 
 local KIND = 1
@@ -95,6 +95,7 @@ function _M.internal(conn, message)
 			sock:resp(msg[MSGID], pcall(s[msg[METHOD]], unpack(msg, ARGS)))
 		end, conn, message)
 	end	
+	-- logger.notice('router exit', unpack(message))
 end
 
 function _M.external(conn, message, from_untrusted)
@@ -136,7 +137,8 @@ function _M.respond(message)
 	timeout_periods[msgid] = nil
 	co = coromap[msgid]
 	if co then
-		coroutine.resume(co, unpack(message, RESP_ARGS))
+		-- logger.info('respond', msgid, unpack(message, RESP_ARGS))
+		tentacle.resume(co, unpack(message, RESP_ARGS))
 		coromap[msgid] = nil
 	end
 end
@@ -144,16 +146,20 @@ function _M.respond_by_msgid(msgid, ...)
 	timeout_periods[msgid] = nil
 	co = coromap[msgid]
 	if co then
-		coroutine.resume(co, ...)
+		tentacle.resume(co, ...)
 		coromap[msgid] = nil
 	end
+end
+
+function _M.unregist(msgid)
+	coromap[msgid] = nil
 end
 
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
-	if _M.DEBUG then
-		debug_tracebacks[msgid] = debug.traceback()
+	if tentacle.DEBUG2 then
+		co.bt2 = debug.traceback()
 	end
 	if timeout then
 		local nt = clock.get()
@@ -181,12 +187,10 @@ function _M.initialize(opts)
 				local co = coromap[id]
 				if co then
 					coromap[id] = nil
-					if _M.DEBUG then
-						local tr = debug_tracebacks[id]
-						debug_tracebacks[id] = nil
-						coroutine.resume(co, nil, exception.new('actor_timeout', id, tr))
+					if tentacle.DEBUG2 then
+						tentacle.resume(co, nil, exception.new('actor_timeout', id, co.bt, co.bt2))
 					else
-						coroutine.resume(co, nil, exception.new('actor_timeout', id))
+						tentacle.resume(co, nil, exception.new('actor_timeout', id))
 					end
 				end
 				timeout_periods[id] = nil

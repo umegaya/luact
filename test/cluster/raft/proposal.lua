@@ -61,21 +61,17 @@ local ok,r = xpcall(function ()
 	local s
 	for i=1,8 do
 		s = p.progress:at(i)
-		assert(s.quorum == 3 and s.current == 0, "quorum should be same as specified at proposal:add() and size initialized")
+		assert(s.quorum == 3 and s.current == 1, "quorum should be same as specified at proposal:add() and size initialized")
 	end
 	for i=9,16 do
 		s = p.progress:at(i)
-		assert(s.quorum == 2 and s.current == 0, "quorum should be same as specified at proposal:add() and size initialized")
+		assert(s.quorum == 2 and s.current == 1, "quorum should be same as specified at proposal:add() and size initialized")
 	end
 	
 	p:add(3, 17, 19)
 	assert(p.progress.header.n_size == 32)
 	
 	s = p.progress:at(1)
-	p:range_commit(actor, 1, 1)
-	assert(s.current == 1, "if committed, size should increase")
-	assert((not s:granted()) and (not body.a), "if committed and still not reach to quorum, logs should not be processed")
-
 	p:range_commit(actor, 1, 1)
 	assert(s.current == 2, "if committed, size should increase")
 	assert((not s:granted()) and (not body.a), "if committed and still not reach to quorum, logs should not be processed")
@@ -86,7 +82,6 @@ local ok,r = xpcall(function ()
 	assert(body.check[1] and body.a == 1, "if committed and reach to quorum, logs should be processed")
 	
 	local log
-	p:range_commit(actor, 1, 16)
 	p:range_commit(actor, 1, 16)
 	for i=2,8 do
 		log = logs[i]

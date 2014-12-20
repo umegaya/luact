@@ -27,18 +27,20 @@ local replicator_index = {}
 local replicator_mt = {
 	__index = replicator_index
 }
+local cache = {}
 function replicator_index:init(state)
-	self.next_idx = state.wal:last_index() + 1
+	self.next_idx = state:last_index() + 1
 	self.match_idx = 0
 	self.alive = 1
-	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec / 10
+	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec
 end
 function replicator_index:fin()
 	self.alive = 0
+	table.insert(cache, self)
 end
 function replicator_index:start(leader_actor, actor, state)
 	self:init(state)
-	local hbev = tentacle(self.heartbeat, self, actor, state)
+	local hbev = tentacle(self.run_heartbeat, self, actor, state)
 	local runev = tentacle(self.run, self, leader_actor, actor, state, hbev)
 	state:kick_replicator()
 	return runev
@@ -50,7 +52,7 @@ local function err_handler(e)
 		logger.error('raft', 'replicate', tostring(e), debug.traceback())
 	end
 end
-function replicator_index:start_replication(t)
+function replicator_index:run_replication(t)
 	t.running = true
 	local ok, r = xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
 	t.running = false
@@ -62,17 +64,26 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 		actor = actor, 
 		leader_actor = leader_actor, 
 		state = state, 
-		[hbev] = function (t)
-			t.self:fin()
-			return true
-		end, 
+		hb_thread = hbev, 
 		[state.ev_close] = function (t)
 			t.self:fin()
 			return true
 		end,
 		[state.ev_log] = function (t, tp, ...)
-			if not t.running then
-				tentacle(t.self.start_replication, t.self, t)
+			if tp == 'add' then
+				if not t.running then
+					-- logger.warn('run repl thread to', t.actor)
+					t.rep_thread = tentacle(t.self.run_replication, t.self, t)
+				end
+			elseif tp == 'stop' then
+				if t.rep_thread then
+					-- logger.warn('stop repl thread to', t.actor)
+					tentacle.cancel(t.rep_thread)
+				end
+				if t.hb_thread then
+					tentacle.cancel(t.hb_thread)
+				end
+				return true
 			end
 		end,
 	})
@@ -112,12 +123,12 @@ function replicator_index:replicate(leader_actor, actor, state)
 		prev_log_idx, prev_log_term, 
 		entries, leader_commit_idx
 	-- response
+	local ev
 	local term, success, last_index
 ::START::
 	if self.failures > 0 then
 		self:failure_cooldown(self.failures)
 	end
-	if self.alive == 0 then return true end
 
 	-- prepare parameters to send remote raft actor
 	current_term, leader, leader_commit_idx, 
@@ -131,13 +142,19 @@ function replicator_index:replicate(leader_actor, actor, state)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
+	--[[
+	for idx,ent in pairs(entries) do
+		for k,v in pairs(ent) do
+			logger.info('entries', idx, k, v)
+		end
+	end
+	]]
 	term, success, last_index = actor:timed_append_entries(
-												self.heartbeat_span_sec, 
-												current_term, leader, leader_commit_idx, 
-												prev_log_idx, prev_log_term, 
-												entries)
+									self.heartbeat_span_sec, 
+									current_term, leader, leader_commit_idx, 
+									prev_log_idx, prev_log_term, 
+									entries)
 -- print(term, success, last_index)
-	if self.alive == 0 then return true end
 	-- term is updated, step down leader
 	if term > current_term then
 		self:handle_stale_term(leader_actor, state)
@@ -185,7 +202,6 @@ function replicator_index:replicate(leader_actor, actor, state)
 end
 -- send snap shot and sync fsm 
 function replicator_index:sync(leader_actor, actor, state)
-	print('------------------ sync --------------------')
 	-- Get the snapshot path
 	local path, last_snapshot_index = state.snapshot:latest_snapshot_path()
 	-- no snapshot
@@ -225,10 +241,10 @@ function replicator_index:sync(leader_actor, actor, state)
 	end
 	return false -- keep on checking replication log is exist.
 end
-function replicator_index:heartbeat(actor, state)
+function replicator_index:run_heartbeat(actor, state)
 	local failures = 0
-	while self.alive ~= 0 do
-		clock.sleep(self.heartbeat_span_sec)
+	while true do
+		clock.sleep(util.random_duration(self.heartbeat_span_sec))
 
 		-- we send last commit index via heartbeat RPC to avoid follower's apply_log timing is late.
 		-- (because current implementation only send append entries RPC when new logs write to leader)
@@ -237,7 +253,7 @@ function replicator_index:heartbeat(actor, state)
 		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
 		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader(), state:last_commit_index())
 		if (not ok) or (not success) then
-			logger.error(("raft: Failed to heartbeat to %x:%x"):format(uuid.addr(actor), uuid.thread_id(actor)))
+			logger.warn(("raft: Failed to heartbeat to %x:%x"):format(uuid.addr(actor), uuid.thread_id(actor)))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else
@@ -255,7 +271,12 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 
 -- module functions
 function _M.new(leader_actor, actor, state)
-	local r = memory.alloc_fill_typed('luact_raft_replicator_t')
+	local r
+	if #cache > 0 then
+		r = table.remove(cache)
+	else
+		r = memory.alloc_fill_typed('luact_raft_replicator_t')
+	end
 	return r, r:start(leader_actor, actor, state)
 end
 

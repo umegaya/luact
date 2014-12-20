@@ -65,6 +65,7 @@ function writer_raw_index:syscall(io)
 	return io:write(self.p + self.ofs, self.sz - self.ofs)
 end
 function writer_raw_index:sent(r)
+	-- logger.info('sent:', r, 'bytes')
 	self.ofs = self.ofs + r
 end
 function writer_raw_index:finish()

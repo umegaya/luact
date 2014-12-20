@@ -1,10 +1,27 @@
 -- add or modify ext modules
 local ffi = require 'ffiex.init'
 local pbuf = require 'luact.pbuf'
+local router = require 'luact.router'
 local fs = require 'pulpo.fs'
+local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
+local tentacle = require 'pulpo.tentacle'
 
 local C = ffi.C
+
+local orig_cancel_handler = tentacle.cancel_handler
+function tentacle.cancel_handler(obj, co)
+	if type(obj) == 'number' then
+		router.unregist(obj)
+	else
+		orig_cancel_handler(obj, co)
+	end
+end
+
+function util.random_duration(min_sec)
+	-- between x msec ~ 2*x msec
+	return min_sec + (min_sec * util.random())
+end
 
 function fs.load2rbuf(file, rb)
 	local alloc, e, r, sz

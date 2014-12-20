@@ -118,9 +118,11 @@ local ok,r = xpcall(function ()
 
 	for i=1,FIRST_LOGSIZE do
 		local s = p.progress:at(i)
-		assert(s:valid() and s.quorum == 3 and s.current == 1, "proposal should be committed")
+		-- write_logs' 1 + replicator commit's 1 == 2
+		assert(s:valid() and s.quorum == 3 and s.current == 2, "proposal should be committed")
 	end
 
+	st.ev_log:emit('stop')
 	rep:fin()
 	event.wait(false, endev)
 	st:fin()
@@ -201,6 +203,7 @@ local ok,r = xpcall(function ()
 	end
 	print('success')
 
+	st.ev_log:emit('stop')
 	rep:fin()
 	event.wait(false, endev)
 	st:fin()

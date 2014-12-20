@@ -43,7 +43,7 @@ ffi.cdef [[
 		char *hostname;
 	} luact_ext_conn_t;
 	typedef struct luact_local_conn {
-		pulpo_pipe_io_t *io;
+		pulpo_pipe_io_t *mine, *yours;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
 		unsigned char serde_id, dead;
@@ -97,6 +97,9 @@ function conn_tasks_index:add(conn)
 	table.insert(list, conn)
 end
 function conn_tasks_index:remove(conn)
+	if conn.task_processor_id <= 0 then
+		return
+	end
 	local list = self.map[conn.task_processor_id]
 	if not list then
 		return 
@@ -139,7 +142,7 @@ function conn_index:init_buffer()
 	self.rb:init()
 	self.wb:init()
 end
-function conn_index:start_io(opts, sr)
+function conn_index:start_io(opts, sr, server)
 	local rev, wev
 	if opts.internal then
 		rev = tentacle(self.read_int, self, self.io, sr)
@@ -149,29 +152,32 @@ function conn_index:start_io(opts, sr)
 	wev = tentacle(self.write, self, self.io)
 	tentacle(self.sweeper, self, rev, wev)
 	-- for example, normal http (not 2.0) is volatile.
-	if not opts.volatile_connection then
+	if not (server or opts.volatile_connection) then
 		conn_tasks:add(self) -- start keeping alive
+	else
+		self.task_processor_id = 0 -- no task
 	end
+end
+function conn_index:sweep()
+	machine_stats[self:machine_id()] = nil
+	conn_tasks:remove(self)
 end
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
-	machine_stats[self:machine_id()] = nil
-	conn_tasks:remove(self)
 	-- these 2 line assures another tentacle (read for write/write for read)
 	-- start to finish.
 	self:close()
-	self.io:close()
 	-- CAUTION: we never wait all tentacle related with this connection finished.
 	-- that depend on our conn_index:write, read_int, read_ext implementation, 
 	-- which once io:close called, above coroutine are immediately finished.
 	-- if this fact is changed, please wait for termination of all tentacles.
 	self:destroy('error')
 end
-function conn_index:tick()
+function conn_index:task()
 	-- do keep alive
 	local mid = self:machine_id()
 	local ra = actor.root_of(mid, 1)
-	_M.stats[mid] = ra:stat() -- used as heartbeat message
+	-- _M.stats[mid] = ra:stat() -- used as heartbeat message
 	-- TODO : check which thread accept this connection and use corresponding root actor.
 	-- change second argument of actor.root_of
 end
@@ -189,14 +195,17 @@ function conn_index:new_server(io, opts)
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
-	self:start_io(opts, self:serde())
+	self:start_io(opts, self:serde(), true)
 	return self
 end
 function conn_index:serde()
 	return serde[tonumber(self.serde_id)]
 end
 function conn_index:close()
+	-- _M.stats[self:machine_id()] = nil
+	conn_tasks:remove(self)
 	self.dead = 1
+	self.io:close()
 end
 local function conn_common_destroy(self, reason, map, free_list)
 	if map[self:cmapkey()] ~= self then
@@ -275,6 +284,11 @@ function conn_index:write(io)
 end
 local conn_writer = assert(pbuf.writer.serde)
 local prefixes = actor.prefixes
+local function strip_result(...)
+	local r = {...}
+	if not r[1] then error(r[2]) end
+	return unpack(r, 2)	
+end
 local function common_dispatch(self, sent, id, t, ...)
 	local r
 	t.id = nil -- release ownership of this table
@@ -290,34 +304,28 @@ local function common_dispatch(self, sent, id, t, ...)
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_sys(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.sys, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_sys, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			r = {self:sys(id, t.method, timeout, select(args_idx, ...))}
-			goto return_value
+			return strip_result(self:sys(id, t.method, timeout, select(args_idx, ...)))
 		end
 	end
 	if sent then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_send(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.send, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_send, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			r = {self:send(id, t.method, timeout, select(args_idx, ...))}
-			goto return_value
+			return strip_result(self:send(id, t.method, timeout, select(args_idx, ...)))
 		end
 	else
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_call(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.call, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_call, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			r = {self:call(id, t.method, timeout, select(args_idx, ...))}
-			goto return_value
+			return strip_result(self:call(id, t.method, timeout, select(args_idx, ...)))
 		end
 	end
-::return_value::
-	if not r[1] then error(r[2]) end
-	return unpack(r, 2)
 end
 function conn_index:dispatch(t, ...)
 	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
@@ -328,20 +336,32 @@ function conn_index:vdispatch(t, ...)
 end
 -- normal family
 function conn_index:send(serial, method, timeout, ...)
-	local msgid = router.regist(coroutine.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	self.wb:send(conn_writer, self:serde(), router.SEND, serial, msgid, method, ...)
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
 function conn_index:call(serial, method, timeout, ...)
-	local msgid = router.regist(coroutine.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	self.wb:send(conn_writer, self:serde(), router.CALL, serial, msgid, method, ...)
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
 function conn_index:sys(serial, method, timeout, ...)
-	local msgid = router.regist(coroutine.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	self.wb:send(conn_writer, self:serde(), router.SYS, serial, msgid, method, ...)
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
+
+-- async family
+function conn_index:async_send(serial, method, timeout, ...)
+	return strip_result(self:send(serial, method, timeout, ...))
+end
+function conn_index:async_call(serial, method, timeout, ...)
+	return strip_result(self:call(serial, method, timeout, ...))
+end
+function conn_index:async_sys(serial, method, timeout, ...)
+	return strip_result(self:sys(serial, method, timeout, ...))
+end
+
 -- notify faimily 
 function conn_index:notify_call(serial, method, ...)
 	self.wb:send(conn_writer, self:serde(), router.NOTICE_CALL, serial, method, ...)
@@ -444,6 +464,7 @@ function local_conn_index:start_io(opts, sr, reader, writer)
 	rev = tentacle(self.read_int, self, reader, sr)
 	wev = tentacle(self.write, self, writer)
 	tentacle(self.sweeper, self, wev, rev)
+	conn_tasks:add(self) -- start keeping alive
 end
 local function make_channel_name(id1, id2)
 	-- like 1_1, 1_2, 1_3, .... x_1, x_2, ... x_y (for all x, y <= n_threads)
@@ -454,11 +475,24 @@ function local_conn_index:new_local(thread_id, opts)
 	self.dead = 0
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	-- TODO : this uses too much fd (1 connection = 4 fd). should use unix domain socket?
-	local mine, yours = 
+	self.mine, self.yours = 
 		linda.new(make_channel_name(pulpo.thread_id, thread_id)),
 		linda.new(make_channel_name(thread_id, pulpo.thread_id))
-	self:start_io(opts, self:serde(), mine:reader(), yours:writer())
+	self:start_io(opts, self:serde(), self.mine:reader(), self.yours:writer())
 	return self
+end
+function local_conn_index:task()
+	-- get stat of other threads
+	-- local ra = actor.root_of(nil, self.thread_id)
+	-- _M.stats[mid] = ra:stat() -- used as heartbeat message
+	-- TODO : check which thread accept this connection and use corresponding root actor.
+	-- change second argument of actor.root_of
+end
+function local_conn_index:close()
+	conn_tasks:remove(self)
+	self.dead = 1
+	self.mine:close()
+	self.yours:close()
 end
 function local_conn_index:cmapkey()
 	return tonumber(self.thread_id)

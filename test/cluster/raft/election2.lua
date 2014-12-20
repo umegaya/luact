@@ -16,7 +16,7 @@ tools.start_luact(3, nil, function ()
 	
 	if pulpo.thread_id == leader_thread_id then
 		arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', tools.new_fsm, nil, pulpo.thread_id)
-		clock.sleep(3)
+		clock.sleep(2)
 		assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
 		logger.info('------------------- add another nodes as replica set ---------------------')
 		local replica_set = {}
@@ -30,7 +30,7 @@ tools.start_luact(3, nil, function ()
 		logger.info('------------------- finish add_replica_set() ---------------------')
 	else
 		logger.info('------------------- wait for being added as replica set ---------------------')
-		clock.sleep(3 + 2)
+		clock.sleep(2 + 2)
 		arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
 	end
 	local rs = arb:replica_set()

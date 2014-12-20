@@ -35,30 +35,39 @@ function raft_index:init()
 end
 function raft_index:fin()
 	self.state:fin()
-end
+end	
 function raft_index:__actor_destroy__()
 	self.alive = nil
+	if self.main_thread then
+		tentacle.cancel(self.main_thread)
+	end
+	if self.election_thread then
+		tentacle.cancel(self.election_thread)
+	end
 end
 function raft_index:check_election_timeout()
-	-- between x msec ~ 2*x msec
-	return (self.elapsed >= util.random(self.election_timeout, self.election_timeout * 2 - 1))
+	return clock.get() >= self.timeout_limit
+end
+function raft_index:reset_timeout()
+	local dur = util.random_duration(self.opts.election_timeout_sec)
+	self.timeout_limit = clock.get() + dur
 end
 function raft_index:tick()
-	self.elapsed = self.elapsed + 1
 	if self.state:is_follower() then
-		-- logger.info('follower no heartbeat elapsed', self.elapsed)
+		-- logger.info('follower election timeout check', self.timeout_limit - clock.get())
 		if self:check_election_timeout() then
-			logger.info('follower election timeout', self.elapsed)
+			logger.info('follower election timeout', self.timeout_limit, clock.get())
 			-- if election timeout, become candidate
 			self.state:become_candidate()
 		end
 	end
 end
 function raft_index:start()
-	tentacle(self.run, self)
+	self.main_thread = tentacle(self.run, self)
 end
 function raft_index:run()
 	self.state:become_follower() -- become follower first
+	self:reset_timeout()
 	while self.alive do
 		clock.sleep(tick_intval_sec)
 		self:tick()
@@ -66,61 +75,96 @@ function raft_index:run()
 	self:fin()
 end
 function raft_index:start_election()
+	self.election_thread = tentacle(self.run_election, self)
+end
+function raft_index:run_election()
+	local myid = actor.of(self)
+	self:reset_timeout()
+	logger.notice('raft', 'start election', myid)
 	while self.state:is_candidate() do
 		self.state:new_term()
-		self.state:vote_for(actor.of(self))
-		self.elapsed = 0
+		self.state:vote_for_self()
 		local set = self.state.replica_set
+		local myid_pos
 		local votes = {}
 		local quorum = math.ceil((#set + 1) / 2)
 		for i=1,#set,1 do
-			table.insert(votes, set[i]:async_request_vote())
-		end
-		local timeout = self.election_timeout_sec
-		local ret = event.join(clock.alarm(timeout), unpack(votes))
-		local grant = 1 -- for vote of this node
-		local r = ret[#ret] -- last event is timeout event
-		for i=1,#ret-1 do -- -1 to ignore last result (is timeout event)
-			local r = ret[i]
-			if r[1] ~= 'timeout' then
-				grant = grant + 1
+			if not uuid.equals(set[i], myid) then
+				table.insert(votes, set[i]:async_request_vote(
+					self.state:current_term(), 
+					actor.of(self), self.state.wal:last_index_and_term()
+				))
+				logger.info('send request vote', set[i])
+			else
+				myid_pos = i
 			end
 		end
+		local grant = 1 -- for vote of this node
+		if #votes > 0 then
+			local timeout = self.opts.election_timeout_sec
+			local ret = event.join(clock.alarm(timeout), unpack(votes))
+			if not self.state:is_candidate() then
+				-- receive append_entries or request_vote during election
+				-- it is also possible that this node starts election and get majority of the term here.
+				-- but if it takes long time, another follower node may get timeout again (at here, heartbeat RPC have not started yet), 
+				-- and start election with higher term.
+				-- then this node may receive request vote from another node (with higher term), and become follower.
+				logger.notice('raft', 'another leader seems to be elected (or on going)')
+				break
+			end
+			local id
+			for i=1,#ret-1 do -- -1 to ignore last result (is timeout event)
+				local tp, obj, ok, term, granted, id = unpack(ret[i])
+				for i=1,#votes do
+					if votes[i] == obj then
+						id = set[(i < myid_pos) and i or i + 1]
+					end
+				end
+				logger.info('vote result', id, tp, ok, term, granted)
+				-- not timeout and call itself success and vote granted
+				if tp ~= 'timeout' and ok and granted then
+					grant = grant + 1
+				end
+			end
+		end
+		-- check still candidate (to prevent error in become_leader())
 		if grant >= quorum then
-			logger.notice('get quorum: become leader:', grant, quorum)
+			logger.notice('raft', 'get quorum: become leader', grant, quorum)
 			self.state:become_leader()
 			break
+		else
+			logger.notice('raft', 'cannot get quorum: re-election', grant, quorum)
 		end
+		-- if election fails, give chance to another candidate.
+		clock.sleep(util.random_duration(self.opts.election_timeout_sec))
 	end
 end
 function raft_index:propose(logs, timeout)
-	local l = self.state:request_routing_id()
+	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:propose(logs, timeout) end
-	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:write_logs(msgid, logs)
 	-- wait until logs are committed
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
 function raft_index:add_replica_set(replica_set, timeout)
-	-- routing request to leader
-	local l = self.state:request_routing_id()
+	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:add_replica_set(replica_set, timeout) end
-	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
 	-- wait until logs are committed
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
 function raft_index:remove_replica_set(replica_set, timeout)
-	-- routing request to leader
-	local l = self.state:request_routing_id()
+	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:remove_replica_set(replica_set, timeout) end
-	local msgid = router.regist(coroutine.running(), timeout or self.proposal_timeout)
+	local msgid = router.regist(tentacle.running(), timeout)
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
 	-- wait until logs are committed
-	return coroutine.yield()
+	return tentacle.yield(msgid)
 end
 function raft_index:accepted()
 	local a = self.state.proposals.accepted
@@ -131,11 +175,13 @@ function raft_index:accepted()
 		-- proceed commit log index
 		self.state:committed(log.index)
 		-- apply log and respond to waiter
-		self:apply_log(log)
+		for idx=tonumber(self.state:last_applied_index()) + 1, tonumber(log.index) do
+			-- logger.info('apply_log', i)
+			self:apply_log(self.state.wal:at(idx))
+		end
 	end
 end
 function raft_index:apply_log(log)
-	-- apply log to fsm
 	local ok, r = self.state:apply(log)
 	if log.msgid then
 		router.respond_by_msgid(log.msgid, ok, r)
@@ -145,11 +191,18 @@ end
 function raft_index:leader()
 	return self.state:leader()
 end
+function raft_index:is_leader()
+	return self.state:is_leader()
+end
 function raft_index:replica_set()
 	return self.state.replica_set
 end
-function raft_index:probe_fsm(prober)
-	return prober(self.state.fsm)
+function raft_index:probe(prober, ...)
+	return pcall(prober, self, ...)
+end
+function raft_index:stepdown()
+	assert(self.state:is_leader(), "invalid node try to stepdown")
+	return self.state:become_follower()
 end
 --[[--
 from https://ramcloud.stanford.edu/raft.pdf
@@ -180,10 +233,8 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 	end
 	-- Save the current leader
 	self.state:set_leader(leader)
-	-- reset elapsed time to prevent election timeout
-	self.elapsed = 0
 	-- if prev_log_idx is not set, means heartbeat. return.
-	if prev_log_idx then
+	if prev_log_idx and prev_log_idx > 0 then
 		-- verify last index and term. this node's log term at prev_log_idx should be same as which leader sent.
 		local tmp_prev_log_term
 		if prev_log_idx == last_index then
@@ -193,9 +244,6 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 			local log = self.state.wal:at(prev_log_idx)
 			if not log then
 				logger.warn('raft', 'fail to get prev log', prev_log_idx)
-				if pulpo.thread_id == 1 then
-					self.state.wal:dump()
-				end
 				return self.state:current_term(), false, last_index	
 			end
 			tmp_prev_log_term = log.term
@@ -213,7 +261,8 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 		-- Delete any conflicting entries
 		if first.index <= last_index then
 			logger.warn('raft', 'Clearing log suffix range', first.index, last_index)
-			ok, r = self.state.wal:delete_logs(first.index, last_index)
+			local wal = self.state.wal
+			ok, r = pcall(wal.delete_logs, wal, first.index, last_index)
 			if not ok then
 				logger.error('raft', 'Failed to clear log suffix', r)
 				return self.state:current_term(), false, last_index
@@ -233,11 +282,12 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 		local new_last_commit_idx = math.min(tonumber(leader_commit_idx), tonumber(self.state:last_index()))
 		self.state:set_last_commit_index(new_last_commit_idx) -- no error check. force set leader value.
 		for idx=tonumber(self.state:last_applied_index()) + 1, new_last_commit_idx do
-			-- logger.info('apply_log', i)
+			-- logger.info('apply_log', idx)
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
-
+	-- reset timeout to prevent election timeout
+	self:reset_timeout()
 	-- Everything went well, return success
 	return self.state:current_term(), true, self.state:last_index()
 end
@@ -248,6 +298,7 @@ Request Vote RPC
 least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 ]]
 function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_last_log_term)
+	logger.info('request_vote from', candidate_id, term)
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
@@ -259,22 +310,21 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		self.state:set_term(term)
 	end
 	-- and candidate’s log is at least as up-to-date as receiver’s log, 
-	if cand_last_log_idx >= last_index then
-		logger.warn('raft', 'log is not up-to-date', cand_last_log_idx, last_index)
+	if cand_last_log_idx < last_index then
+		logger.warn('raft', 'request_vote', 'log is not up-to-date', cand_last_log_idx, last_index)
 		return self.state:current_term(), false		
 	end
-	local log = self.state.wal:at(last_log_idx)
-	if cand_last_log_term ~= log.term then
-		logger.warn('raft', 'same index but term not matched', cand_last_log_term, log.term)
+	if cand_last_log_term < last_term then
+		logger.warn('raft', 'request_vote', 'term is not up-to-date', cand_last_log_term, log.term)
 		return self.state:current_term(), false		
 	end
 	-- 2. If votedFor is null or candidateId, 
 	if not self.state:vote_for(candidate_id, term) then
-		logger.warn('raft', 'already vote', v, candidate_id, term)
+		logger.warn('raft', 'request_vote', 'already vote', v, candidate_id, term)
 		return self.state:current_term(), false
 	end
 	-- grant vote (§5.2, §5.4)
-	logger.notice('raft', 'vote for', candidate_id)
+	logger.info('raft', 'request_vote', 'vote for', candidate_id, term)
 	return self.state:current_term(), true
 end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
@@ -294,7 +344,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	local ok, rb = pcall(self.snapshot.copy, self.snapshot, fd, last_snapshot_index) 
 	if not ok then
 		self.snapshot:remove_tmp()
-		logger.error("raft", "Failed to copy snapshot", rb)
+		logger.error("raft", 'install_snapshot', "Failed to copy snapshot", rb)
 		return
 	end
 	-- Restore snapshot
@@ -303,8 +353,9 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	self.state.last_applied_idx = last_snapshot_index
 	-- Compact logs, continue even if this fails
 	self.state.wal:compaction(last_snapshot_index)
-	
-	logger.info("raft", "Installed remote snapshot")
+	-- reset timeout to prevent election timeout
+	self:reset_timeout()
+	logger.info("raft", 'install_snapshot', "Installed remote snapshot")
 	return true
 end
 
@@ -315,7 +366,7 @@ local default_opts = {
 	log_compaction_margin = 10240, 
 	snapshot_file_preserve_num = 3, 
 	election_timeout_sec = 1.0,
-	heartbeat_timeout_sec = 1.0,
+	heartbeat_timeout_sec = 0.5,
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
 	storage = "rocksdb",
@@ -346,12 +397,9 @@ local function create(id, fsm_factory, opts, ...)
 	local wal = wal.new(fsm:metadata(), store, sr, opts)
 	local rft = setmetatable({
 		state = state.new(fsm, wal, ss, opts), 
-		proposal_timeout = opts.proposal_timeout_sec,
-		election_timeout_sec = opts.election_timeout_sec,
-		election_timeout = election,
-		heartbeat_timeout = heartbeat,
+		opts = opts,
 		alive = true,
-		elapsed = 0, 
+		timeout_limit = 0,
 	}, raft_mt)
 	rft.state.actor_body = rft
 	return rft

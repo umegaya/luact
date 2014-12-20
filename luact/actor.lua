@@ -305,7 +305,8 @@ function _M.destroy(id, reason)
 end
 function _M.of(object)
 	-- print('get actor from body', object, actormap[object])
-	return actormap[object].uuid
+	local a = actormap[object]
+	return a and a.uuid or nil
 end
 -- should use only from internal.
 function _M._set_restart_result(id, result)
@@ -319,6 +320,13 @@ end
 local function err_handler(e)
 	return {debug.traceback(), e}
 end
+local function check_runtime_error(e)
+	if type(e) ~= 'table' then
+		return false
+	else
+		return e.is and (e:is('runtime') or e:is('actor_runtime_error'))
+	end
+end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
@@ -330,10 +338,11 @@ function _M.dispatch_send(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif check_runtime_error(r[2][2]) then
+			r[2] = r[2][2]
 		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+			safe_destroy_by_serial(s, r[2][2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
@@ -348,10 +357,11 @@ function _M.dispatch_call(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif check_runtime_error(r[2][2]) then
+			r[2] = r[2][2]
 		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+			safe_destroy_by_serial(s, r[2][2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
@@ -367,10 +377,11 @@ function _M.dispatch_sys(local_id, method, ...)
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
 			r[2] = exception.new('not_found', p, method)
+		elseif check_runtime_error(r[2][2]) then
+			r[2] = r[2][2]
 		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+			safe_destroy_by_serial(s, r[2][2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
