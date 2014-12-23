@@ -124,7 +124,6 @@ local ok,r = xpcall(function ()
 
 	st.ev_log:emit('stop')
 	rep:fin()
-	event.wait(false, endev)
 	st:fin()
 	end)()
 
@@ -205,7 +204,6 @@ local ok,r = xpcall(function ()
 
 	st.ev_log:emit('stop')
 	rep:fin()
-	event.wait(false, endev)
 	st:fin()
 	end)()
 

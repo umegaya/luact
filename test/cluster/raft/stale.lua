@@ -8,15 +8,14 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 	local thread = require 'pulpo.thread'
 	local tentacle = require 'pulpo.tentacle'
 	local memory = require 'pulpo.memory'
+	local tools = require 'test.tools.cluster'
 	--tentacle.DEBUG2 = true
 	-- local stale_sec = ((thread_id == 2) and 7.0 or 5.0)
 	logger.info('---------------------- start cluster ---------------------------')
 	if not arbiter:is_leader() then
 		clock.sleep(2.0) -- wait leader stale and heartbeat timeout passed
 	end
-	local p = thread.shared_memory('checker', function ()
-		return 'int', memory.alloc_fill_typed('int', 3)
-	end)
+	local p = tools.create_latch('checker', 3)
 	-- make 10 commited 
 	local evs = {}
 	local sidx=(thread_id - 1) * 20
@@ -31,6 +30,7 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 	local res = event.join(clock.alarm(10), unpack(evs))
 	logger.report('commit finished', arbiter:leader())
 	clock.sleep(1.0) -- if this node is not leader, reach here only means commit is finished at leader node.
+	logger.report('last check', arbiter:leader())
 	-- so wait one more second to ensure entries commit at this node too.
 	assert(res[#res][1] ~= 'timeout', 'take too long time to commit')
 	if arbiter:is_leader() then
@@ -54,22 +54,8 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 	end, thread_id)
 	assert(ok, "proposed log should be applied to fsm:"..tostring(r))
 	logger.info('success')
-	p[thread_id - 1] = 1
-	local count = 0
-	while count < 10 do
-		clock.sleep(1.0)
-		local finished = true
-		for i=0,2 do
-			if p[i] == 0 then
-				finished = false
-			end
-		end
-		if finished then
-			logger.info('all thread finished')
-			break
-		end
-		count = count + 1
-	end
-	assert(count < 10, "too long time test not finished")
+	p:wait(1)
+	logger.info('all thread finished')
 end)
 
+return true

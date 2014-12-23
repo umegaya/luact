@@ -68,7 +68,7 @@ function rbuf_index:reserve(sz)
 		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
-		logger.info('reserve1 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)--, debug.traceback())
+		logger.info('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)--, debug.traceback())
 		self.max = newsz
 		self.used = copyb
 	else
@@ -134,10 +134,6 @@ function rbuf_index:use(r)
 end
 function rbuf_index:seek_from_curr(r, check)
 	self.hpos = self.hpos + r
-	if check and self.hpos < self.used and self.buf[self.hpos] > 0x10 then
-		self:dump(true)
-		exception.raise('fatal', 'memory broken')
-	end
 end
 function rbuf_index:seek_from_start(r)
 	self.hpos = r

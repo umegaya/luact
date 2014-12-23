@@ -165,16 +165,19 @@ function ringbuf_header_index:rollback_index(idx)
 		self.end_idx = idx
 	end	
 end
-function ringbuf_header_index:delete_elements(end_idx, store)
-	if self:verify_range(end_idx) then
-		local start_idx = tonumber(self.start_idx)
+function ringbuf_header_index:delete_range(start_idx, end_idx, store)
+	if self:verify_range(end_idx) and ((not start_idx) or self:verify_range(start_idx)) then
+		start_idx = tonumber(start_idx or self.start_idx)
 		end_idx = tonumber(end_idx or self.end_idx)
 		for idx=start_idx,end_idx do
 			local pos = self:index2pos(idx)
 			store:delete(pos)
 		end
-		self.start_idx = end_idx + 1
-		-- if all elements are removed
+		if self.start_idx >= start_idx then
+			self.start_idx = end_idx + 1
+		end
+		-- ringbuf never rollback end index. (monotonic increase)
+		-- but if all logs are removed, it will be set to next index of current end index
 		if self.end_idx <= end_idx then
 			self.end_idx = end_idx + 1
 		end
@@ -222,8 +225,8 @@ end
 function ringbuf_index:init_at(idx, fn, ...)
 	self.store = self.header:init_at(idx, self.store, fn, ...)
 end
-function ringbuf_index:delete_elements(eidx)
-	self.header:delete_elements(eidx, self.store)
+function ringbuf_index:delete_range(start_idx, end_idx)
+	self.header:delete_range(start_idx, end_idx, self.store)
 end
 function ringbuf_index:rollback_index(idx)
 	self.header:rollback_index(idx)

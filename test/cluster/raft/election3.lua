@@ -40,3 +40,4 @@ tools.start_local_cluster(3, 1, tools.new_fsm, function (arbiter, thread_id)
 	clock.sleep(2)
 end)
 
+return true

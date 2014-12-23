@@ -53,7 +53,7 @@ function supervisor_index:clear_uuids()
 end
 
 local function err_handler(e)
-	return exception.new('actor_runtime_error', e)
+	return exception.new('actor_error', e)
 end
 function supervisor_index:restart_child(died_actor_id)
 	if not self.restart then

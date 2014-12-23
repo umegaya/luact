@@ -6,7 +6,7 @@ local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local clock = require 'luact.clock'
 
--- local util = require 'pulpo.util'
+local util = require 'pulpo.util'
 
 local _M = {}
 _M.EVENT_DESTROY = "destroy"
@@ -19,6 +19,7 @@ local exception = require 'pulpo.exception'
 exception.define('actor_not_found')
 exception.define('actor_no_body')
 exception.define('actor_no_method')
+exception.define('actor_error')
 exception.define('actor_runtime_error')
 exception.define('actor_timeout')
 exception.define('actor_temporary_fail')
@@ -212,7 +213,7 @@ function _M.new_link_with_opts(to, opts, ctor, ...)
 	if to then 
 		local ok, r = pcall(to.__actor_event__, to, _M.EVENT_LINK, id)
 		if not ok then
-		 	if b.__actor_destroy__ then b:__actor_destroy__(r) end
+		 	if body.__actor_destroy__ then body:__actor_destroy__(r) end
 			error(r)
 		end
 	end
@@ -241,6 +242,7 @@ function _M.monitor(watcher_actor, target_actor)
 	table.insert(t.links, w.uuid)
 end
 function _M.root_of(machine_id, thread_id)
+	assert(thread_id, "thread_id should")
 	return uuid.first(machine_id or uuid.node_address, thread_id)
 end
 function _M.register(name, ctor, ...)
@@ -290,7 +292,7 @@ local function destroy_by_serial(s, reason)
 end
 local function safe_destroy_by_serial(s, reason)
 	local ok, r = pcall(destroy_by_serial, s, reason) 
-	if not ok then logger.error('destroy fails:'..tostring(r)) end
+	if not ok then logger.error('destroy fails:'..tostring(r).." reason: "..tostring(reason)) end
 end
 local function body_of(serial)
 	return bodymap[serial]
@@ -318,14 +320,15 @@ function _M._set_restart_result(id, result)
 	end
 end
 local function err_handler(e)
-	return {debug.traceback(), e}
+	if type(e) == 'table' and e.is then
+		e:set_bt()
+	else
+		e = exception.new_with_bt('actor_error', debug.traceback(), e)
+	end
+	return e
 end
 local function check_runtime_error(e)
-	if type(e) ~= 'table' then
-		return false
-	else
-		return e.is and (e:is('runtime') or e:is('actor_runtime_error'))
-	end
+	return e:is('runtime') or e:is('actor_runtime_error')
 end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
@@ -338,10 +341,8 @@ function _M.dispatch_send(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif check_runtime_error(r[2][2]) then
-			r[2] = r[2][2]
-		else
-			safe_destroy_by_serial(s, r[2][2]) 
+		elseif not check_runtime_error(r[2]) then
+			safe_destroy_by_serial(s, r[2]) 
 		end
 	end
 	return unpack(r)
@@ -357,10 +358,8 @@ function _M.dispatch_call(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif check_runtime_error(r[2][2]) then
-			r[2] = r[2][2]
-		else
-			safe_destroy_by_serial(s, r[2][2]) 
+		elseif not check_runtime_error(r[2]) then
+			safe_destroy_by_serial(s, r[2]) 
 		end
 	end
 	return unpack(r)
@@ -377,10 +376,8 @@ function _M.dispatch_sys(local_id, method, ...)
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
 			r[2] = exception.new('not_found', p, method)
-		elseif check_runtime_error(r[2][2]) then
-			r[2] = r[2][2]
-		else
-			safe_destroy_by_serial(s, r[2][2]) 
+		elseif not check_runtime_error(r[2]) then
+			safe_destroy_by_serial(s, r[2]) 
 		end
 	end
 	return unpack(r)

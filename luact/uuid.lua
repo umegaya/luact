@@ -180,6 +180,10 @@ function _M.from_local_id(uuid_local_id)
 	uuid_work.__tag__.local_id = uuid_local_id
 	return uuid_work
 end
+function _M.thread_id_from_local_id(uuid_local_id)
+	uuid_work.__tag__.local_id = uuid_local_id
+	return _M.thread_id(uuid_work)
+end
 function _M.free(uuid)
 	idgen:free(uuid)
 end

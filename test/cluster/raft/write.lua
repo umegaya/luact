@@ -13,7 +13,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		local results = event.join(clock.alarm(5), unpack(evs))
 		assert(results[#results][1] == 'ontime', "takes too long time")
 	end
-	local r = arbiter:probe(function (rft)
+	local ok, r = arbiter:probe(function (rft)
 		local fsm = rft.state.fsm
 		for i=1,10 do
 			if fsm[i] ~= (i * 11) then
@@ -21,8 +21,9 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 			end
 		end
 	end)
-	assert(not r, "proposed log should be applied to fsm:"..tostring(r))
+	assert(ok, "proposed log should be applied to fsm:"..tostring(r))
 	logger.info('success')
 	clock.sleep(thread_id == 3 and 5 or 1)
 end)
 
+return true

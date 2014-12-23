@@ -120,13 +120,9 @@ function raft_state_container_index:fin()
 	end
 end
 function raft_state_container_index:quorum()
-	local i = 0
-	for k,v in pairs(self.replicators) do
-		for _,rep in pairs(v) do
-			i = i + 1
-		end
-	end
+	local i = #self.replica_set
 	if i <= 2 then return math.max(i, 1) end
+	-- logger.info('quorum', i, math.ceil((i + 1) / 2))
 	return math.ceil((i + 1) / 2)
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
@@ -213,6 +209,7 @@ function raft_state_container_index:become_follower()
 		self:stop_replication()
 	end
 	self.state.node_kind = NODE_FOLLOWER
+	self:set_leader(nil)
 end
 -- nodes are list of luact_uuid_t
 function raft_state_container_index:stop_replication()
@@ -222,7 +219,7 @@ function raft_state_container_index:stop_replication()
 	for machine, reps in pairs(self.replicators) do
 		for k,v in pairs(reps) do
 			if not self:is_leader() then
-				logger.error('bug: no-leader node have valid replicator')
+				logger.error('bug: no-leader node have valid replicator', machine, k)
 			end
 			logger.info('stop replicator', machine, k)
 			v:fin()
@@ -234,6 +231,8 @@ end
 function raft_state_container_index:set_replica_transition(on)
 	self.replica_transition = (on and 1 or 0)
 end
+-- TODO : immediate change of replica_set changes quorum also, and it may results split minority changes there replica set.
+-- which causes more than 1 valid leader exists. but how can we handle it?
 -- TODO : arbitrary replica set change should do with sequencial flow like
 -- add_replica => (wait for completion) => remove_replica 
 -- like 6 Cluster membership changes or original raft paper.
@@ -465,7 +464,6 @@ function raft_state_container_index:append_param_for(replicator)
 	end 
 	local entries = self.wal:logs_from(prev_log_idx + 1)
 	-- logger.info('append_param_for:', prev_log_idx, replicator.next_idx)
-	if not entries then return false end
 	assert(prev_log_idx and prev_log_term, "error: prev index/term should be non-nil")
 	return 
 		self:current_term(), 

@@ -65,7 +65,7 @@ local ok,r = xpcall(function ()
 	for idx=1,#sub do
 		assert(logs[idx+3][1] == sub[idx].log[1] and logs[idx+3][2] == sub[idx].log[2], "log contents should be matched with same index")
 	end
-	w:delete_logs(3)
+	w:delete_range(nil, 3)
 	assert(w:last_index() == #logs, "last index should not change by log deletion")
 	for idx=1,3 do
 		assert(nil == w:at(idx), "nil should return when at() call for deleted index:"..tostring(w:at(idx)).."|"..tostring(idx))

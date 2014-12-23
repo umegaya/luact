@@ -313,7 +313,9 @@ function serpent:unpack_packet(rb)
 	end
 end
 function serpent:pack(buf, obj)
-	logger.notice('packer', obj)
+	if _M.DEBUG then
+		logger.notice('packer', obj)
+	end
 	exception.serializer = serpent.serializer
 	local str = sp.dump(conv:escape(obj))
 	local data = tostring(#str)..":"..str

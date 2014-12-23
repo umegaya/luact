@@ -47,16 +47,17 @@ function replicator_index:start(leader_actor, actor, state)
 end
 local function err_handler(e)
 	if type(e) == 'table' then
-		logger.error('raft', 'replicate', e)
+		logger.report('raft', 'replicate', e)
 	else
-		logger.error('raft', 'replicate', tostring(e), debug.traceback())
+		logger.error('raft', 'replicate', tostring(e))
 	end
+	return e
 end
 function replicator_index:run_replication(t)
 	t.running = true
-	local ok, r = xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
+	xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
+	t.rep_thread = nil
 	t.running = false
-	return r
 end
 function replicator_index:run(leader_actor, actor, state, hbev)
 	event.select({
@@ -77,10 +78,11 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 				end
 			elseif tp == 'stop' then
 				if t.rep_thread then
-					-- logger.warn('stop repl thread to', t.actor)
+					logger.warn('stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
 					tentacle.cancel(t.rep_thread)
 				end
 				if t.hb_thread then
+					logger.warn('stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
 					tentacle.cancel(t.hb_thread)
 				end
 				return true
@@ -96,7 +98,7 @@ function replicator_index:update_last_access()
 	self.last_access = clock.get()
 end
 function replicator_index:update_last_appended(leader_actor, state, entries)
-	if #entries > 0 then
+	if entries and #entries > 0 then
 		-- Mark any proposals as committed
 		-- logger.info('entries:', #entries, first and first.index, last and last.index)
 		local first, last = entries[1], entries[#entries]
@@ -180,7 +182,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 ::CHECK_MORE::
 	-- Check if there are more logs to replicate
 	-- logger.info('check more logs to replic', self.next_idx, state.wal:last_index())
-	if self.next_idx <= state.wal:last_index() then
+	if (self.next_idx <= state.wal:last_index()) or (leader_commit_idx < state:last_commit_index()) then
 		-- logger.info('more logs to replic', self.next_idx, state.wal:last_index())
 		goto START
 	else
@@ -246,14 +248,10 @@ function replicator_index:run_heartbeat(actor, state)
 	while true do
 		clock.sleep(util.random_duration(self.heartbeat_span_sec))
 
-		-- we send last commit index via heartbeat RPC to avoid follower's apply_log timing is late.
-		-- (because current implementation only send append entries RPC when new logs write to leader)
-		-- once commit index is increment, it is permanent, and apply_log can be proceed regardless the progress of append entries RPC, 
-		-- it is valid to send last commit index via heartbeat, and apply follower.
 		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
-		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader(), state:last_commit_index())
+		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader())
 		if (not ok) or (not success) then
-			logger.warn(("raft: Failed to heartbeat to %x:%x"):format(uuid.addr(actor), uuid.thread_id(actor)))
+			logger.warn(("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else

@@ -107,7 +107,7 @@ function proposals_index:commit(index)
 		goto notice
 	end
 	st:commit()
-	-- logger.info('commit result', index, st.quorum, st.current, st:granted())
+	logger.info('commit result', index, st.quorum, st.current, st:granted())
 	if not st:granted() then
 		goto notice
 	end
@@ -118,7 +118,7 @@ function proposals_index:commit(index)
 	end
 	while true do
 		last_commit_idx = header.start_idx
-		self.progress:delete_elements(header.start_idx)
+		self.progress:delete_range(nil, header.start_idx)
 		-- header.start_idx must be increment (+1)
 		st = self.progress:at(header.start_idx)
 		if (not st) or (not st:granted()) then

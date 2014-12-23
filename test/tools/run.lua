@@ -34,5 +34,4 @@ end
 run_dir('test')
 run_dir('test/util')
 run_dir('test/storage')
--- run_dir('test/cluster/raft')
--- run_dir('test/cluster/raft/scenario')
+run_dir('test/cluster/raft')

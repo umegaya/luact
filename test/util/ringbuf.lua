@@ -12,15 +12,15 @@ assert(b:available() == 0, "available size should reflect actual usage")
 for i=1,size do
 	assert(b:at(i) == i * 2, "same value as put should be exists")
 end
-b:delete_elements(8)
+b:delete_range(nil, 8)
 assert(b.header.n_size == size, "delete should not change internal size")
 assert(b.header.start_idx == 9, "start index should reflect the result of delete")
 assert(b.header.end_idx == 16, "end index should reflect the result of delete")
 assert(b:available() == 8, "available size should reflect the result of delete")
-b:delete_elements(16)
+b:delete_range(nil, 16)
 assert(b.header.n_size == size, "internal size should not change if all data is deleted")
 assert(b.header.start_idx == 17, "start index should reflect the result of delete")
-assert(b.header.end_idx == 17, "end index should reflect the result of delete")
+assert(b.header.end_idx == 17, "end index should reflect the result of delete:"..tostring(b.header.end_idx))
 assert(b:available() == 16, "available size should reflect the result of delete")
 for i=1,size do
 	b:put_at(i+16, i*3)

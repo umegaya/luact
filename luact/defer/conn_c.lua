@@ -372,10 +372,17 @@ end
 function conn_index:notify_sys(serial, method, ...)
 	self.wb:send(conn_writer, self:serde(), router.NOTICE_SYS, serial, method, ...)
 end
+
 -- response family
 function conn_index:resp(msgid, ...)
 	self.wb:send(conn_writer, self:serde(), router.RESPONSE, msgid, ...)
 end
+
+-- direct send
+function conn_index:rawsend(...)
+	self.wb:send(conn_writer, self:serde(), ...)
+end
+
 ffi.metatype('luact_conn_t', conn_mt)
 
 -- create remote connections

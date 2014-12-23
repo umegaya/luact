@@ -63,7 +63,11 @@ function raft_index:tick()
 	end
 end
 function raft_index:start()
-	self.main_thread = tentacle(self.run, self)
+	self.main_thread = tentacle(self.launch, self)
+end
+function raft_index:launch()
+	pcall(self.run, self)
+	self.main_thread = nil
 end
 function raft_index:run()
 	self.state:become_follower() -- become follower first
@@ -75,7 +79,11 @@ function raft_index:run()
 	self:fin()
 end
 function raft_index:start_election()
-	self.election_thread = tentacle(self.run_election, self)
+	self.election_thread = tentacle(self.launch_election, self)
+end
+function raft_index:launch_election()
+	pcall(self.run_election, self)
+	self.election_thread = nil
 end
 function raft_index:run_election()
 	local myid = actor.of(self)
@@ -94,7 +102,6 @@ function raft_index:run_election()
 					self.state:current_term(), 
 					actor.of(self), self.state.wal:last_index_and_term()
 				))
-				logger.info('send request vote', set[i])
 			else
 				myid_pos = i
 			end
@@ -180,6 +187,7 @@ function raft_index:accepted()
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
+	self.state:kick_replicator()
 end
 function raft_index:apply_log(log)
 	local ok, r = self.state:apply(log)
@@ -262,7 +270,7 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 		if first.index <= last_index then
 			logger.warn('raft', 'Clearing log suffix range', first.index, last_index)
 			local wal = self.state.wal
-			ok, r = pcall(wal.delete_logs, wal, first.index, last_index)
+			ok, r = pcall(wal.delete_range, wal, first.index, last_index)
 			if not ok then
 				logger.error('raft', 'Failed to clear log suffix', r)
 				return self.state:current_term(), false, last_index
@@ -366,7 +374,7 @@ local default_opts = {
 	log_compaction_margin = 10240, 
 	snapshot_file_preserve_num = 3, 
 	election_timeout_sec = 1.0,
-	heartbeat_timeout_sec = 0.5,
+	heartbeat_timeout_sec = 0.1,
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
 	storage = "rocksdb",

@@ -5,6 +5,7 @@ local uuid = require 'luact.uuid'
 local actor = require 'luact.actor'
 local clock = require 'luact.clock'
 
+local pulpo = require 'pulpo.init'
 local tentacle = require 'pulpo.tentacle'
 -- tentacle.DEBUG2 = true
 local exception = require 'pulpo.exception'
@@ -48,62 +49,68 @@ local function dest_assinged_this_thread(msg)
 	return uuid.owner_thread_of(msg[UUID])
 end
 
-function _M.internal(conn, message)
+function _M.internal(connection, message)
 	-- logger.notice('router_internal', unpack(message))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if kind == KIND_RESPONSE then
 		_M.respond(message)
-	elseif dest_assinged_this_thread(message) then
-		if not notice then
-			if kind == KIND_SYS then
-				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
-				end, conn, message)
-			elseif kind == KIND_CALL then
-				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
-				end, conn, message)
-			elseif kind == KIND_SEND then
-				tentacle(function (sock, msg)
-					sock:resp(msg[MSGID], actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
-				end, conn, message)
+	else
+		local thread_id = uuid.thread_id_from_local_id(message[UUID])
+		if thread_id == pulpo.thread_id then
+			if not notice then
+				if kind == KIND_SYS then
+					tentacle(function (c, msg)
+						c:resp(msg[MSGID], actor.dispatch_sys(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
+					end, connection, message)
+				elseif kind == KIND_CALL then
+					tentacle(function (c, msg)
+						c:resp(msg[MSGID], actor.dispatch_call(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
+					end, connection, message)
+				elseif kind == KIND_SEND then
+					tentacle(function (c, msg)
+						c:resp(msg[MSGID], actor.dispatch_send(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
+					end, connection, message)
+				end
+			else
+				if kind == KIND_SYS then
+					tentacle(function (msg)
+						actor.dispatch_sys(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
+					end, message)
+				elseif kind == KIND_CALL then
+					tentacle(function (msg)
+						actor.dispatch_call(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
+					end, message)
+				elseif kind == KIND_SEND then
+					tentacle(function (msg)
+						actor.dispatch_send(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
+					end, message)
+				end
 			end
 		else
-			if kind == KIND_SYS then
-				tentacle(function (msg)
-					actor.dispatch_sys(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
-				end, message)
-			elseif kind == KIND_CALL then
-				tentacle(function (msg)
-					actor.dispatch_call(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
-				end, message)
-			elseif kind == KIND_SEND then
-				tentacle(function (msg)
-					actor.dispatch_send(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
-				end, message)
+			local dest_conn = conn.get_by_thread_id(thread_id)
+			if notice then
+				dest_conn:rawsend(unpack(message))
+			else
+				tentacle(function (c, dc, msg)
+					local resp_msgid = msg[MSGID]
+					local msgid = _M.regist(tentacle.running())
+					msg[MSGID] = msgid
+					dc:rawsend(unpack(msg))
+					c:resp(resp_msgid, tentacle.yield(msgid))
+				end, connection, dest_conn, message)				
 			end
-		end
-	elseif notice then
-		tentacle(function (msg)
-			local s = uuid.from_local_id(msg[NOTIFY_UUID])
-			pcall(s[msg[NOTIFY_METHOD]], unpack(msg, NOTIFY_ARGS))
-		end, message)
-	else
-		tentacle(function (sock, msg)
-			local s = uuid.from_local_id(msg[UUID])
-			sock:resp(msg[MSGID], pcall(s[msg[METHOD]], unpack(msg, ARGS)))
-		end, conn, message)
-	end	
+		end	
+	end
 	-- logger.notice('router exit', unpack(message))
 end
 
-function _M.external(conn, message, from_untrusted)
+function _M.external(connection, message, from_untrusted)
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if from_untrusted then
 		if message[METHOD][1] == '_' then
-			sock:resp(message[MSGID], false, "calling protected method from untrusted region")
+			connection:resp(message[MSGID], false, exception.raise('invalid', 'calling protected call', method[METHOD]))
 			return
 		end
 	end
@@ -111,13 +118,13 @@ function _M.external(conn, message, from_untrusted)
 		_M.respond(message)
 	elseif not notice then
 		if kind == KIND_CALL then
-			tentacle(function (sock, msg)
-				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS])))
-			end, conn, message)
+			tentacle(function (c, msg)
+				c:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS])))
+			end, connection, message)
 		elseif kind == KIND_SEND then
-			tentacle(function (sock, msg)
-				sock:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS])))
-			end, conn, message)	
+			tentacle(function (c, msg)
+				c:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS])))
+			end, connection, message)	
 		end
 	else
 		if kind == KIND_CALL then
@@ -126,7 +133,7 @@ function _M.external(conn, message, from_untrusted)
 			end, message)
 		elseif kind == KIND_SEND then
 			tentacle(function (msg)
-				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], dht[msg[UUID]], unpack(msg[NOTIFY_ARGS]))
+				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], dht[msg[NOTIFY_UUID]], unpack(msg[NOTIFY_ARGS]))
 			end, message)
 		end
 	end
@@ -153,12 +160,16 @@ end
 
 function _M.unregist(msgid)
 	coromap[msgid] = nil
+	timeout_periods[id] = nil
 end
 
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
 	if tentacle.DEBUG2 then
+		if not co then
+			logger.report('co null:', debug.traceback())
+		end			
 		co.bt2 = debug.traceback()
 	end
 	if timeout then
@@ -172,7 +183,7 @@ end
 function _M.initialize(opts)
 	if _M.DEBUG then
 		debug_log = function (...)
-			logger.notice(...)
+			logger.warn(...)
 		end
 	else
 		debug_log = function (...) end
@@ -181,19 +192,18 @@ function _M.initialize(opts)
 	clock.timer(opts.timeout_resolution / 2, function ()
 		local nt = clock.get()
 		for id,tv in pairs(timeout_periods) do
-			debug_log('nt:tv=', nt, tv)
 			if nt > tv then
 				debug_log('msgid=',id,'timeout')
+				timeout_periods[id] = nil
 				local co = coromap[id]
 				if co then
 					coromap[id] = nil
 					if tentacle.DEBUG2 then
-						tentacle.resume(co, nil, exception.new('actor_timeout', id, co.bt, co.bt2))
+						tentacle.resume(co, false, exception.new('actor_timeout', id, co.bt, co.bt2))
 					else
-						tentacle.resume(co, nil, exception.new('actor_timeout', id))
+						tentacle.resume(co, false, exception.new('actor_timeout', id))
 					end
 				end
-				timeout_periods[id] = nil
 			end
 		end
 	end)

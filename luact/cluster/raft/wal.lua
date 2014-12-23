@@ -55,7 +55,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		-- (its not necessary for persisted data, so after serde:pack)
 		if i == #logs and msgid then log.msgid = msgid end
 		logcache:put_at(last_index, log)
-		logger.info('writer', 'logat', last_index, logcache:at(last_index))
+		logger.info('writer', 'logat', last_index, logcache:at(last_index))--, debug.traceback())
 	end
 	-- logger.report('write:after put logcache')
 	-- logcache:dump()
@@ -99,9 +99,6 @@ function wal_writer_index:copy(store, logs, serde, logcache)
 	self.last_term = last_term
 	return first_index, last_index
 end
-function wal_writer_index:delete(store, start_idx, end_idx)
-	store:delete_logs(start_idx, end_idx)
-end
 -- following 3 are using for writing multi-kind of data (hardstate, replica_set)
 function wal_writer_index:write_state(store, kind, state, serde, logcache)
 	store:put_object(kind, serde, state)
@@ -132,7 +129,7 @@ function wal_index:compaction(upto_idx)
 	-- remove in memory log with some margin (because minority node which hasn't replicate old log exists.)
 	if upto_idx > self.opts.log_compaction_margin then
 		self.store:compaction(upto_idx - self.opts.log_compaction_margin)
-		self.logcache:delete_elements(upto_idx - self.opts.log_compaction_margin)
+		self.logcache:delete_range(nil, upto_idx - self.opts.log_compaction_margin)
 	else
 		logger.warn('raft', 'upto_idx too short', upto_idx, self.opts.log_compaction_margin)
 	end
@@ -165,9 +162,12 @@ function wal_index:logs_from(start_idx)
 	-- self:dump()
 	return self.logcache:from(start_idx)
 end
-function wal_index:delete_logs(end_idx)
-	self.store:delete_logs(nil, end_idx)
-	self.logcache:delete_elements(end_idx)
+function wal_index:delete_range(start_idx, end_idx)
+	local new_end_idx = self.store:delete_logs(start_idx, end_idx)
+	self.logcache:delete_range(start_idx, end_idx)
+	local log = self.logcache:at(new_end_idx)
+	self.writer.last_index, self.writer.last_term = log.index, log.term
+
 end
 function wal_index:last_index()
 	return self.writer.last_index

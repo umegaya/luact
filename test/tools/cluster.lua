@@ -1,7 +1,10 @@
 local luact = require 'luact.init'
+local clock = require 'luact.clock'
 local ffi = require 'ffiex.init'
 local util = require 'pulpo.util'
 local fs = require 'pulpo.fs'
+local pulpo = require 'pulpo.init'
+local thread = require 'pulpo.thread'
 local memory = require 'pulpo.memory'
 local _M = {}
 
@@ -11,6 +14,10 @@ ffi.cdef [[
 		char *ptr;
 		size_t len;
 	} luact_thread_payload_t;
+	typedef struct luact_thread_latch {
+		int size;
+		int *values;
+	} luact_thread_latch_t;
 ]]
 
 local thread_payload_index = {}
@@ -113,7 +120,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 				local factory = ptr[0]:decode()
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, nil, pulpo.thread_id)
 				logger.info('arb1', arb)
-				clock.sleep(2)
+				clock.sleep(2.5)
 				assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
 				local replica_set = {}
 				for i=1,n_core do
@@ -123,7 +130,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 				end
 				arb:add_replica_set(replica_set)
 			else
-				clock.sleep(2 + 2)
+				clock.sleep(2.5 * 2)
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
 				logger.info('arb2', arb)
 			end
@@ -146,6 +153,40 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 	end)
 	ptr:fin()
 	return true
+end
+
+function _M.start_partitioned_cluster(n_core, initial_leader_id, minority, majority, fsm_factory, proc)
+end
+
+local thread_latch_index = {}
+local thread_latch_mt = {
+	__index = thread_latch_index
+}
+function thread_latch_index:wait(value, thread_id)
+	local p = self.values
+	thread_id = thread_id or pulpo.thread_id
+	p[thread_id - 1] = value
+	while true do
+		local finished = true
+		for i=0, self.size - 1 do
+			if p[i] < value then
+				finished = false
+			end
+		end
+		if finished then
+			break
+		end
+		clock.sleep(1.0)
+	end	
+end
+ffi.metatype('luact_thread_latch_t', thread_latch_mt)
+function _M.create_latch(name, num_thread)
+	return thread.shared_memory(name, function ()
+		local p = memory.alloc_fill_typed('luact_thread_latch_t')
+		p.size = num_thread
+		p.values = memory.alloc_fill_typed('int', num_thread)
+		return 'luact_thread_latch_t', p
+	end, num_thread)
 end
 
 function _M.new_fsm(thread_id)

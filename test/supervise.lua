@@ -19,7 +19,7 @@ luact.start({
 		print('=========================== iter ================================', i)
 			local ok, r = pcall(a.inc_num, a, err_at)
 			if not ok then
-				if r:is('actor_runtime_error') then
+				if r:is('actor_error') then
 					print('inc_num: scheduled error:', r)
 					-- if not ok, a is restarted by supervisor, so est backto 1 (initial value)
 					est = 1
