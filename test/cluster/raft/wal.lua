@@ -108,6 +108,7 @@ local ok,r = xpcall(function ()
 	assert(ret, "same object which given to write_state() should returns:"..tostring(k).."|"..tostring(state[k]).."|"..tostring(st[k]))
 end, function (e)
 	logger.error('err', e, debug.traceback())
+	os.exit(-2)
 end)
 
 fs.rmdir('/tmp/luact/rocksdb/testdb2')

@@ -134,6 +134,11 @@ local ok,r = xpcall(function ()
 	local p = st.proposals
 	local body = new_actor_body(p, st)
 	local actor = luact(body)
+	st.actor_body = body
+	local n_quorum = 3
+	function st:quorum()
+		return n_quorum
+	end
 
 	st:add_replica_set(nil, replica_set)
 	for _, addr_thread_id in ipairs(addr_thread_id_pairs) do
@@ -147,9 +152,8 @@ local ok,r = xpcall(function ()
 	st:write_logs(nil, logs)
 	assert(st:last_index() == 1 + #logs, "index should proceed according to # of logs inserted")
 
+	n_quorum = 2
 	st:remove_replica_set(nil, replica_set[4])
-	local addr, thread_id = unpack(addr_thread_id_pairs[4])
-	assert(not st.replicators[addr][thread_id], "thread entry should be deleted")
 	st:write_logs(nil, logs2)
 	assert(st:last_index() == 2 + #logs + #logs2, "index should proceed according to # of logs inserted")
 	local last_index = tonumber(st:last_index())
@@ -187,8 +191,10 @@ local ok,r = xpcall(function ()
 	for i=1, last_index-2 do
 		local s = p.progress:at(i)
 		assert(not s, "second entries should satisfy quorum and be removed from progress list")
-		assert(body.check[i], "entry should not be committed")
+		assert(body.check[i], "entry should be committed")
 	end
+	local addr, thread_id = unpack(addr_thread_id_pairs[4])
+	assert(not st.replicators[addr][thread_id], "removed thread should not remain in replica set")
 	for i=last_index-1,last_index do
 		local s = p.progress:at(i)
 		assert(s:valid() and s.quorum == 2 and s.current == 1, "last 2 entries should not satisfy quorum because not committed yet")
@@ -261,6 +267,7 @@ local ok,r = xpcall(function ()
 
 end, function (e)
 	logger.error('err', e)
+	os.exit(-2)
 end)
 
 luact.stop()

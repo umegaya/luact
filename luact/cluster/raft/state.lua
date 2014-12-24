@@ -64,11 +64,11 @@ function raft_hardstate_index:copy(target)
 	self.vote = target.vote
 end
 function raft_hardstate_index:new_term()
-	logger.notice('raft', 'new term', self.term, self.term + 1)
+	logger.notice('raft', 'new_term', self.term, self.term + 1)
 	self.term = self.term + 1
 end
 function raft_hardstate_index:set_term(term)
-	logger.notice('raft', 'set term', self.term, term)
+	logger.notice('raft', 'set_term', self.term, term)
 	self.term = term
 end
 function raft_hardstate_index:vote_for(v, term)
@@ -127,12 +127,17 @@ function raft_state_container_index:quorum()
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	local q = self:quorum()
-	if q < 2 and (not kind) then
-		exception.raise('invalid', 'quorum too short', q)
+	if q >= 2 then
+		local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
+		self.proposals:add(q, start_idx, end_idx)
+		self:kick_replicator()
+	elseif kind then -- only system logs are able to commit by leader itself (eg. initial add nodes)
+		local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
+		-- add and commit 
+		self.proposals:dictatorial_add(actor.of(self.actor_body), start_idx, end_idx)
+	else
+		exception.raise('invalid', 'quorum too short', q)		
 	end
-	local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
-	self.proposals:add(q, start_idx, end_idx)
-	self:kick_replicator()
 end
 function raft_state_container_index:kick_replicator()
 	self.ev_log:emit('add')
@@ -193,8 +198,7 @@ function raft_state_container_index:become_leader()
 	end
 	self.state.node_kind = NODE_LEADER
 	self:set_leader(actor.of(self.actor_body))
-	-- run replicator (and write initial log)
-	self:add_replica_set(nil, self.replica_set)
+	self:start_replication(true)
 end
 function raft_state_container_index:become_candidate()
 	if self.state.node_kind ~= NODE_FOLLOWER then
@@ -227,106 +231,134 @@ function raft_state_container_index:stop_replication()
 		end
 	end
 end
+function raft_state_container_index:start_replication(activate, replica_set)
+	local leader_id = self:leader()
+	replica_set = replica_set or self.replica_set
+	for i = 1,#replica_set do
+		id = replica_set[i]
+		if not uuid.equals(leader_id, id) then
+			local machine, thread = uuid.addr(id), uuid.thread_id(id)
+			local m = self.replicators[machine]
+			if not m then
+				m = {}
+				self.replicators[machine] = m
+			end
+			if not m[thread] then
+				m[thread] = replicator.new(leader_id, id, self, activate)
+				-- in here, replicator only do heartbeat, never involve replication
+				-- until previous replica agrees this operation.
+				-- heartbeat is necessary because in our use case, 
+				-- typically need to prevent newly added node from causing election timeout.
+				if activate then
+					logger.info('start replicator', id)
+				else
+					logger.info('add replicator', id)
+				end
+			end
+		end
+	end
+	self:kick_replicator()
+end
 -- replica_set are list of luact_uuid_t
 function raft_state_container_index:set_replica_transition(on)
 	self.replica_transition = (on and 1 or 0)
 end
--- TODO : immediate change of replica_set changes quorum also, 
--- and it may causes split minority can change there replica set, 
--- which causes more than 1 valid leader exists. but how can we handle it?
 -- TODO : arbitrary replica set change should do with sequencial flow like
 -- add_replica => (wait for completion) => remove_replica 
 -- like "6 Cluster membership changes" of original raft paper.
+
+-- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
+-- newly added replicator only starts replication after this operation agreed by previous replica set.
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
-	if type(replica_set) ~= 'table' then
-		replica_set = {replica_set}
-	end
-	for i = 1,#replica_set do
-		local found
-		for j = 1,#self.replica_set do
-			if uuid.equals(self.replica_set[j], replica_set[i]) then
-				found = j
-			end
-		end
-		if not found then
-			table.insert(self.replica_set, replica_set[i])
-		end
-	end
-	if self:is_leader() then 
-		-- TODO : make following transactional
-		-- only leader need to setup replication
-		local leader_id = self:leader()
+	if applied then
 		for i = 1,#replica_set do
-			id = replica_set[i]
-			if not uuid.equals(leader_id, id) then
-				local machine, thread = uuid.addr(id), uuid.thread_id(id)
-				local m = self.replicators[machine]
-				if not m then
-					m = {}
-					self.replicators[machine] = m
-				end
-				if not m[thread] then
-					-- id is act like actor
-					m[thread] = replicator.new(leader_id, id, self)
-					logger.info('start replicator', id)
+			local found
+			for j = 1,#self.replica_set do
+				if uuid.equals(self.replica_set[j], replica_set[i]) then
+					found = j
 				end
 			end
+			if not found then
+				table.insert(self.replica_set, replica_set[i])
+			end
 		end
-		if not applied then
-			-- append log to replicate configuration change
-			self:write_syslog(SYSLOG_ADD_REPLICA_SET, msgid, replica_set)
-		end
-	end
-end
--- replica_set are list of luact_uuid_t
-function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
-	if type(replica_set) ~= 'table' then
-		replica_set = {replica_set}
-	end
-	local self_actor = actor.of(self.actor_body)
-	local remove_self
-	for i = 1,#replica_set do
-		local found
-		for j = 1,#self.replica_set do
-			if uuid.equals(self.replica_set[j], replica_set[i]) then
-				if uuid.equals(self_actor, self.replica_set[j]) then
-					if self:is_leader() then
-						logger.warn('get a grip!! you are *leader*!! (try to remove leader node)')
-						break
-					else
-						remove_self = true
+		if self:is_leader() then
+			-- only leader need to setup replication
+			local leader_id = self:leader()
+			for i = 1,#replica_set do
+				id = replica_set[i]
+				if not uuid.equals(leader_id, id) then
+					local machine, thread = uuid.addr(id), uuid.thread_id(id)
+					local m = self.replicators[machine]
+					if m and m[thread] then
+						-- from here, this replicator actually involve replication
+						m[thread]:commit_add()
+						logger.info('start replicator', id)
 					end
 				end
-				found = j
+			end
+			self:kick_replicator()
+		end
+	elseif self:is_leader() then 
+		if type(replica_set) ~= 'table' then
+			replica_set = {replica_set}
+		end
+		self:start_replication(false, replica_set)
+		self:write_syslog(SYSLOG_ADD_REPLICA_SET, msgid, replica_set)
+	end
+end
+-- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
+-- actual replica set only changed if previous replica set commit this proposal.
+function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
+	local self_actor = actor.of(self.actor_body)
+	if applied then
+		local remove_self
+		for i = 1,#replica_set do
+			local found
+			for j = 1,#self.replica_set do
+				if uuid.equals(self.replica_set[j], replica_set[i]) then
+					if uuid.equals(self_actor, self.replica_set[j]) then
+						remove_self = true
+					end
+					found = j
+					break
+				end
+			end
+			if found then
+				table.remove(self.replica_set, found)
+			end
+		end
+		if self:is_leader() then
+			-- only leader need to setup replication
+			for i = 1,#replica_set do
+				id = replica_set[i]
+				local machine, thread = uuid.addr(id), uuid.thread_id(id)
+				local m = self.replicators[machine]
+				if m and m[thread] then
+					m[thread]:fin()
+					m[thread] = nil
+				end
+			end
+		elseif remove_self then
+			local a = actor.of(self.actor_body)
+			logger.notice(('node %x:%d removed from raft group "%s"'):format(
+				uuid.addr(self_actor), uuid.thread_id(self_actor), self.actor_body.id
+			))
+			actor.destroy(self_actor)
+		end
+	elseif self:is_leader() then
+		if type(replica_set) ~= 'table' then
+			replica_set = {replica_set}
+		end
+		for i = 1,#replica_set do
+			if uuid.equals(replica_set[i], self_actor) then
+				logger.warn('get a grip!! you are leader and try to remove yourself!!')
+				table.remove(replica_set, i)
 				break
 			end
 		end
-		if found then
-			table.remove(self.replica_set, found)
-		end
-	end
-	if self:is_leader() then
-		-- TODO : make following transactional
-		-- only leader need to setup replication
-		for i = 1,#replica_set do
-			id = replica_set[i]
-			local machine, thread = uuid.addr(id), uuid.thread_id(id)
-			local m = self.replicators[machine]
-			if m and m[thread] then
-				m[thread]:fin()
-				m[thread] = nil
-			end
-		end
-		if not applied then
-			-- append log to replicate configuration change
-			self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
-		end
-	elseif remove_self then
-		local a = actor.of(self.actor_body)
-		logger.notice(('node %x:%d removed from raft group "%s"'):format(
-			uuid.addr(a), uuid.thread_id(a), self.actor_body.id
-		))
-		actor.destroy(a)
+		-- append log to replicate configuration change
+		self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
 	end
 end
 function raft_state_container_index:request_routing_id(timeout)

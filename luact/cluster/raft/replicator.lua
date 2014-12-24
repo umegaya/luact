@@ -18,7 +18,7 @@ local _M = {}
 ffi.cdef[[
 typedef struct luact_raft_replicator {
 	uint64_t next_idx, match_idx;
-	uint8_t alive, failures, padd[2];
+	uint8_t alive, failures, added, padd;
 	double last_access, heartbeat_span_sec;
 } luact_raft_replicator_t;
 ]]
@@ -31,6 +31,7 @@ local cache = {}
 function replicator_index:init(state)
 	self.next_idx = state:last_index() + 1
 	self.match_idx = 0
+	self.added = 0
 	self.alive = 1
 	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec
 end
@@ -38,8 +39,12 @@ function replicator_index:fin()
 	self.alive = 0
 	table.insert(cache, self)
 end
-function replicator_index:start(leader_actor, actor, state)
+function replicator_index:commit_add()
+	self.added = 1
+end
+function replicator_index:start(leader_actor, actor, state, activate)
 	self:init(state)
+	if activate then self:commit_add() end
 	local hbev = tentacle(self.run_heartbeat, self, actor, state)
 	local runev = tentacle(self.run, self, leader_actor, actor, state, hbev)
 	state:kick_replicator()
@@ -128,6 +133,10 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local ev
 	local term, success, last_index
 ::START::
+	if self.added == 0 then
+		logger.info('replicaiton to ', actor, 'has not committed yet')
+		return
+	end
 	if self.failures > 0 then
 		self:failure_cooldown(self.failures)
 	end
@@ -268,14 +277,14 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 
 
 -- module functions
-function _M.new(leader_actor, actor, state)
+function _M.new(leader_actor, actor, state, activate)
 	local r
 	if #cache > 0 then
 		r = table.remove(cache)
 	else
 		r = memory.alloc_fill_typed('luact_raft_replicator_t')
 	end
-	return r, r:start(leader_actor, actor, state)
+	return r, r:start(leader_actor, actor, state, activate)
 end
 
 return _M

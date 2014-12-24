@@ -98,6 +98,7 @@ local ok,r = xpcall(function ()
 	assert(util.table_equals(fsm, fsm2), "state should be recovered correctly")
 end, function (e)
 	logger.error('err', e)
+	os.exit(-2)
 end)
 
 -- fs.rmdir('/tmp/luact/snapshot')

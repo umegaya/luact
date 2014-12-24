@@ -108,7 +108,7 @@ local ok,r = xpcall(function ()
 		return term, true, 0
 	end
 
-	local rep, endev = replicator.new(actor, actor, st)
+	local rep, endev = replicator.new(actor, actor, st, true)
 	local logs = {}
 	for i=1,FIRST_LOGSIZE do
 		table.insert(logs, { value = i })
@@ -190,7 +190,7 @@ local ok,r = xpcall(function ()
 	clock.sleep(0.5)
 	-- start replication
 	print('start repl')
-	local rep, endev = replicator.new(actor, actor2, st)
+	local rep, endev = replicator.new(actor, actor2, st, true)
 	clock.sleep(0.5)
 
 	-- after meantime of sleep, fsm should updated (by snapshot)
@@ -209,6 +209,7 @@ local ok,r = xpcall(function ()
 
 end, function (e)
 	logger.error('err', e)
+	os.exit(-2)
 end)
 
 luact.stop()

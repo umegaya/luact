@@ -71,20 +71,25 @@ function _M.start_luact(n_core, arbiter, proc)
 		arg = ptr, 
 		arbiter = arbiter, 
 	}, function (p)
-		local luact = require 'luact.init'
-		local ffi = require 'ffiex.init'
-		local pulpo = require 'pulpo.init'
-		local util = require 'pulpo.util'
-		local fs = require 'pulpo.fs'
-		local tools = require 'test.tools.cluster'
-		local ok,r = xpcall(function ()
-			fs.rmdir('/tmp/luact/'..tostring(pulpo.thread_id))
-			local fn = ffi.cast('luact_thread_payload_t*', p):decode()
-			fn()
+		xpcall(function ()
+			local luact = require 'luact.init'
+			local ffi = require 'ffiex.init'
+			local pulpo = require 'pulpo.init'
+			local util = require 'pulpo.util'
+			local fs = require 'pulpo.fs'
+			local tools = require 'test.tools.cluster'
+			local ok,r = xpcall(function ()
+				fs.rmdir('/tmp/luact/'..tostring(pulpo.thread_id))
+				local fn = ffi.cast('luact_thread_payload_t*', p):decode()
+				fn()
+			end, function (e)
+				logger.error('err', e, debug.traceback())
+			end)
+			luact.stop()
 		end, function (e)
-			logger.error('err', e, debug.traceback())
+			logger.fatal('start luact: fails', e)
+			os.exit(-2)
 		end)
-		luact.stop()
 	end)
 	ptr:fin()
 	return true
@@ -147,7 +152,8 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local fn = ffi.cast('luact_thread_payload_t*', p)[1]:decode()
 			fn(arb, pulpo.thread_id)
 		end, function (e)
-			logger.error('err', e, debug.traceback())
+			logger.fatal('err', e, debug.traceback())
+			os.exit(-2)
 		end)
 		luact.stop()
 	end)

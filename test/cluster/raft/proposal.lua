@@ -109,6 +109,7 @@ local ok,r = xpcall(function ()
 
 end, function (e)
 	logger.error('err', e)
+	os.exit(-2)
 end)
 
 luact.stop()

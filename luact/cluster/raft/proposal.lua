@@ -93,9 +93,17 @@ function proposals_index:add(quorum, start_idx, end_idx)
 	for idx = tonumber(start_idx), tonumber(end_idx) do
 		self.progress:init_at(idx, function (st, q)
 			st:init(q)
-			st:commit() -- leader should commit this log already.
+			st:commit() -- leader node already commit these entry.
 		end, quorum)
 	end
+end
+function proposals_index:dictatorial_add(actor, start_idx, end_idx)
+	for idx = tonumber(start_idx), tonumber(end_idx) do
+		self.progress:init_at(idx, function (st, q)
+			st:init(1)
+		end, quorum)
+	end
+	self:range_commit(actor, start_idx, end_idx)
 end
 function proposals_index:commit(index)
 	local header = self.progress.header
@@ -107,7 +115,7 @@ function proposals_index:commit(index)
 		goto notice
 	end
 	st:commit()
-	-- logger.info('commit result', index, st.quorum, st.current, st:granted())
+	logger.warn('commit result', index, st.quorum, st.current, st:granted())
 	if not st:granted() then
 		goto notice
 	end

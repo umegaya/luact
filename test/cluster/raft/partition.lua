@@ -76,10 +76,10 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		-- confirm any operation end in failure
 		ok, r = arbiter:propose({{'hoge', 'fuga'}}, 1)
 		assert((not ok) and r:is('actor_timeout'), "propose should fail because of not enough quorum")
-		--ok, r = arbiter:add_replica_set({arbiter}, 1)
-		--assert(not ok and r:is('actor_timeout'), "add_replica_set should fail because of not enough quorum")
-		--ok, r = arbiter:remove_replica_set({arbiter}, 1)
-		--assert(not ok and r:is('actor_timeout'), "remove_replica_set should fail because of not enough quorum")
+		ok, r = arbiter:add_replica_set({arbiter}, 1)
+		assert(not ok and r:is('actor_timeout'), "add_replica_set should fail because of not enough quorum")
+		ok, r = arbiter:remove_replica_set({arbiter}, 1)
+		assert(not ok and r:is('actor_timeout'), "remove_replica_set should fail because of not enough quorum")
 	else
 		local cnt = 0
 		local l 
