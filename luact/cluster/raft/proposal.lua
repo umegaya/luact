@@ -107,7 +107,7 @@ function proposals_index:commit(index)
 		goto notice
 	end
 	st:commit()
-	logger.info('commit result', index, st.quorum, st.current, st:granted())
+	-- logger.info('commit result', index, st.quorum, st.current, st:granted())
 	if not st:granted() then
 		goto notice
 	end

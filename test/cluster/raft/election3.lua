@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 local tools = require 'test.tools.cluster'
 
-tools.start_local_cluster(3, 1, tools.new_fsm, function (arbiter, thread_id)
+tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 	local luact = require 'luact.init'
 	local clock = require 'luact.clock'
 	local uuid = require 'luact.uuid'

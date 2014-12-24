@@ -404,6 +404,7 @@ local function create(id, fsm_factory, opts, ...)
 	local ss = snapshot.new(dir, sr)
 	local wal = wal.new(fsm:metadata(), store, sr, opts)
 	local rft = setmetatable({
+		id = id,
 		state = state.new(fsm, wal, ss, opts), 
 		opts = opts,
 		alive = true,

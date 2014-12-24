@@ -231,11 +231,12 @@ end
 function raft_state_container_index:set_replica_transition(on)
 	self.replica_transition = (on and 1 or 0)
 end
--- TODO : immediate change of replica_set changes quorum also, and it may results split minority changes there replica set.
+-- TODO : immediate change of replica_set changes quorum also, 
+-- and it may causes split minority can change there replica set, 
 -- which causes more than 1 valid leader exists. but how can we handle it?
 -- TODO : arbitrary replica set change should do with sequencial flow like
 -- add_replica => (wait for completion) => remove_replica 
--- like 6 Cluster membership changes or original raft paper.
+-- like "6 Cluster membership changes" of original raft paper.
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
@@ -282,15 +283,26 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 	if type(replica_set) ~= 'table' then
 		replica_set = {replica_set}
 	end
+	local self_actor = actor.of(self.actor_body)
+	local remove_self
 	for i = 1,#replica_set do
 		local found
 		for j = 1,#self.replica_set do
 			if uuid.equals(self.replica_set[j], replica_set[i]) then
+				if uuid.equals(self_actor, self.replica_set[j]) then
+					if self:is_leader() then
+						logger.warn('get a grip!! you are *leader*!! (try to remove leader node)')
+						break
+					else
+						remove_self = true
+					end
+				end
 				found = j
+				break
 			end
 		end
 		if found then
-			table.remove(self.replica_set, j)
+			table.remove(self.replica_set, found)
 		end
 	end
 	if self:is_leader() then
@@ -309,6 +321,12 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 			-- append log to replicate configuration change
 			self:write_syslog(SYSLOG_REMOVE_REPLICA_SET, msgid, replica_set)
 		end
+	elseif remove_self then
+		local a = actor.of(self.actor_body)
+		logger.notice(('node %x:%d removed from raft group "%s"'):format(
+			uuid.addr(a), uuid.thread_id(a), self.actor_body.id
+		))
+		actor.destroy(a)
 	end
 end
 function raft_state_container_index:request_routing_id(timeout)
