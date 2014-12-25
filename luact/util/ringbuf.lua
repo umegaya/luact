@@ -22,7 +22,11 @@ local ringbuf_store_mt = {
 function ringbuf_store_index:dump()
 	logger.info('dump ringbuf store:', self)
 	for k,v in pairs(self) do
-		logger.info(k, v, v.index, v.term)
+		if not v then
+			logger.info(k, tostring(v))
+		else
+			logger.info(k, v, v.index, v.term)
+		end
 	end
 end
 -- interface for storing ringbuffer data
@@ -58,10 +62,11 @@ function ringbuf_store_index:from(size, spos, epos)
 	for k,v in pairs(r) do
 		logger.warn(k, v)
 	end
+	--[[
 	for k,v in pairs(self) do
 		logger.warn('self', k, v)
 	end
-	]]
+	--]]
 	return r
 end
 
@@ -76,11 +81,6 @@ function ringbuf_header_index:init(n_size)
 	self.n_size = n_size
 end
 function ringbuf_header_index:verify_range(idx)
-	if self.start_idx == 0 then
-		-- logger.info('vrange:', self, idx, debug.traceback())
-		self.start_idx = idx
-		self.end_idx = idx
-	end
 	return idx >= self.start_idx
 end
 function ringbuf_header_index:at(idx, store)
@@ -97,7 +97,7 @@ function ringbuf_header_index:from(sidx, store)
 		end
 		local pos = self:index2pos(sidx)
 		local epos = self:index2pos(self.end_idx)
-		logger.info('from', sidx, self.end_idx)
+		logger.info('from', sidx, self.end_idx, pos, epos, self.n_size)
 		return store:from(self.n_size, pos, epos)
 	end
 	return nil
@@ -136,7 +136,11 @@ function ringbuf_header_index:reserve(size, store)
 end
 function ringbuf_header_index:put_at(idx, store, log)
 	if self:verify_range(idx) then
-		local diff = idx - self.end_idx
+		if self.start_idx <= 0 then -- first write
+			self.start_idx = idx
+			self.end_idx = idx
+		end
+		local diff = (idx - tonumber(self.end_idx))
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end
@@ -149,7 +153,11 @@ function ringbuf_header_index:put_at(idx, store, log)
 end
 function ringbuf_header_index:init_at(idx, store, init, ...)
 	if self:verify_range(idx) then
-		local diff = idx - self.end_idx
+		if self.start_idx <= 0 then -- first write
+			self.start_idx = idx
+			self.end_idx = idx
+		end
+		local diff = (idx - tonumber(self.end_idx))
 		if diff > 0 then
 			store = self:reserve(diff, store)
 		end

@@ -115,7 +115,7 @@ function proposals_index:commit(index)
 		goto notice
 	end
 	st:commit()
-	logger.warn('commit result', index, st.quorum, st.current, st:granted())
+	-- logger.warn('commit result', index, st.quorum, st.current, st:granted())
 	if not st:granted() then
 		goto notice
 	end

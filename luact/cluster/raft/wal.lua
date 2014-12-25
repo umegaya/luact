@@ -62,6 +62,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 	local first_index = self.last_index + 1
 	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
 	if not ok then
+		logger.report('write wal fails', r)
 		logcache:rollback_index(self.last_index)
 		return nil
 	end
@@ -74,7 +75,7 @@ end
 function wal_writer_index:copy(store, logs, serde, logcache)
 	local last_index = self.last_index
 	local last_term = self.last_term
-	for i=1,#logs,1 do
+	for i=1,#logs do
 		local log = logs[i]
 		if last_index > 0 and (log.index - last_index) ~= 1 then
 			exception.raise('invalid', 'log index leap', last_index, log.index)
@@ -86,11 +87,12 @@ function wal_writer_index:copy(store, logs, serde, logcache)
 		last_index = log.index
 		last_term = log.term
 		logcache:put_at(last_index, log)
-		logger.info('copy', 'logat', last_index, logcache:at(last_index))
+		logger.info('copy', 'logat', last_index, tostring(logcache:at(last_index)))
 	end
 	local first_index = self.last_index + 1
 	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
 	if not ok then
+		logger.report('copy wal fails', r)
 		logcache:rollback_index(self.last_index)
 		return nil
 	end

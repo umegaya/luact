@@ -36,6 +36,16 @@ end
 function raft_index:fin()
 	self.state:fin()
 end	
+function raft_index:destroy()
+	local a = actor.of(self)
+	logger.notice(('node %x:%d (%s) removed from raft group "%s"'):format(
+		uuid.addr(a), uuid.thread_id(a), a, self.id))
+	local rft = raftmap[self.id]
+	if rft then
+		raftmap[self.id] = nil
+		actor.destroy(rft)
+	end
+end
 function raft_index:__actor_destroy__()
 	self.alive = nil
 	if self.main_thread then
@@ -44,6 +54,7 @@ function raft_index:__actor_destroy__()
 	if self.election_thread then
 		tentacle.cancel(self.election_thread)
 	end
+	self:fin()
 end
 function raft_index:check_election_timeout()
 	return clock.get() >= self.timeout_limit
@@ -145,6 +156,9 @@ function raft_index:run_election()
 		-- if election fails, give chance to another candidate.
 		clock.sleep(util.random_duration(self.opts.election_timeout_sec))
 	end
+end
+function raft_index:stop_replicator(target_actor)
+	self.state:stop_replicator(target_actor)
 end
 function raft_index:propose(logs, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
@@ -279,7 +293,7 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 
 		-- 4. Append any new entries not already in the log
 		if not self.state.wal:copy(entries) then
-			logger.error('raft', 'Failed to append to logs')
+			logger.error('raft', 'Failed to append logs')
 			return self.state:current_term(), false, last_index
 		end
 	end
@@ -443,13 +457,6 @@ function _M.new(id, fsm_factory, opts, ...)
 end
 function _M.find(id)
 	return raftmap[id]
-end
-function _M.destroy(id)
-	local rft = raftmap[id]
-	if rft then
-		raftmap[id] = nil
-		actor.destroy(rft)
-	end
 end
 
 return _M

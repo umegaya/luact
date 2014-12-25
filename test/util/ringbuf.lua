@@ -1,14 +1,17 @@
 local luact = require 'luact.init'
 local ringbuf = require 'luact.util.ringbuf'
 
+local i = 0
 local size = 16
 local b = ringbuf.new(size)
+assert(not b:at(8), "if there is no log, should not return any valid object")
+assert(b.header.start_idx == 0, "read access should not affect object value")
 assert(b.header.n_size == size, "internal size should match given initial size")
 for i=1,size do
 	b:put_at(i, i * 2)
 end
-assert(b.header.n_size == size, "put should not change intenral size")
-assert(b:available() == 0, "available size should reflect actual usage")
+assert(b.header.n_size == size, "put should not change intenral size:"..tostring(b.header.n_size))
+assert(b:available() == 0, "available size should reflect actual usage:"..b:available())
 for i=1,size do
 	assert(b:at(i) == i * 2, "same value as put should be exists")
 end

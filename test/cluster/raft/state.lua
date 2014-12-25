@@ -193,8 +193,9 @@ local ok,r = xpcall(function ()
 		assert(not s, "second entries should satisfy quorum and be removed from progress list")
 		assert(body.check[i], "entry should be committed")
 	end
-	local addr, thread_id = unpack(addr_thread_id_pairs[4])
-	assert(not st.replicators[addr][thread_id], "removed thread should not remain in replica set")
+	for i=1, #st.replica_set do
+		assert(not uuid.equals(replica_set[4], st.replica_set[i]), "remove replica should not remain in replica set")
+	end
 	for i=last_index-1,last_index do
 		local s = p.progress:at(i)
 		assert(s:valid() and s.quorum == 2 and s.current == 1, "last 2 entries should not satisfy quorum because not committed yet")

@@ -216,6 +216,16 @@ function raft_state_container_index:become_follower()
 	self:set_leader(nil)
 end
 -- nodes are list of luact_uuid_t
+function raft_state_container_index:stop_replicator(target_actor)
+	local machine, thread = uuid.addr(target_actor), uuid.thread_id(target_actor)
+	local m = self.replicators[machine]
+	if m and m[thread] then
+		local r = m[thread]
+		self.ev_log:emit('stop', r)
+		r:fin()
+		m[thread] = nil
+	end
+end
 function raft_state_container_index:stop_replication()
 	-- stop all main replication tentacle
 	self.ev_log:emit('stop')
@@ -329,22 +339,14 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 			end
 		end
 		if self:is_leader() then
-			-- only leader need to setup replication
-			for i = 1,#replica_set do
-				id = replica_set[i]
-				local machine, thread = uuid.addr(id), uuid.thread_id(id)
-				local m = self.replicators[machine]
-				if m and m[thread] then
-					m[thread]:fin()
-					m[thread] = nil
-				end
-			end
+			-- replicator removal is occured at following order
+			-- 1. replicator knows replicate target is gone (by error:is('actor_no_body'))
+			-- 2. send message to parent actor
+			-- 3. actor call state:stop_replicator
+			-- 4. stop_replicator emit stop event to target replicator
+			-- 5. target repliactor cancel all coroutines
 		elseif remove_self then
-			local a = actor.of(self.actor_body)
-			logger.notice(('node %x:%d removed from raft group "%s"'):format(
-				uuid.addr(self_actor), uuid.thread_id(self_actor), self.actor_body.id
-			))
-			actor.destroy(self_actor)
+			self.actor_body:destroy()
 		end
 	elseif self:is_leader() then
 		if type(replica_set) ~= 'table' then
@@ -507,7 +509,7 @@ function raft_state_container_index:append_param_for(replicator)
 		-- TODO : this actually happens because quorum of this index is already satisfied, 
 		-- log may be compacted already. compaction margin make some help, but not perfect.
 		if not log then
-			exception.raise('raft', 'invalid', 'next_index', replicator.next_idx)
+			return false, exception.new('raft', 'invalid', 'next_index', replicator.next_idx)
 		end
 		prev_log_idx = log.index
 		prev_log_term = log.term

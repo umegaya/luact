@@ -60,7 +60,13 @@ local function err_handler(e)
 end
 function replicator_index:run_replication(t)
 	t.running = true
-	xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
+	local ok, r = xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
+	if not ok then
+		logger.report('error is:', t.actor, r)
+	end
+	if (not ok) and r:is('actor_no_body') then
+		t.leader_actor:stop_replicator(t.actor)
+	end
 	t.rep_thread = nil
 	t.running = false
 end
@@ -82,15 +88,18 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 					t.rep_thread = tentacle(t.self.run_replication, t.self, t)
 				end
 			elseif tp == 'stop' then
-				if t.rep_thread then
-					logger.warn('stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
-					tentacle.cancel(t.rep_thread)
+				local obj = ({...})[2]
+				if (not obj) or (obj == self) then
+					if t.rep_thread then
+						logger.warn('stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
+						tentacle.cancel(t.rep_thread)
+					end
+					if t.hb_thread then
+						logger.warn('stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
+						tentacle.cancel(t.hb_thread)
+					end
+					return true
 				end
-				if t.hb_thread then
-					logger.warn('stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
-					tentacle.cancel(t.hb_thread)
-				end
-				return true
 			end
 		end,
 	})
@@ -134,7 +143,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local term, success, last_index
 ::START::
 	if self.added == 0 then
-		logger.info('replicaiton to ', actor, 'has not committed yet')
+		-- logger.info('replicaiton to ', actor, 'has not committed yet')
 		return
 	end
 	if self.failures > 0 then
@@ -146,7 +155,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	prev_log_idx, prev_log_term, 
 	entries = state:append_param_for(self)
 	if not current_term then
-	logger.notice('sync')
+		logger.notice('sync')
 		goto SYNC
 	end
 	logger.notice('replicate', prev_log_idx, 'to', actor)
@@ -154,12 +163,14 @@ function replicator_index:replicate(leader_actor, actor, state)
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
 	--[[
-	for idx,ent in pairs(entries) do
-		for k,v in pairs(ent) do
-			logger.info('entries', idx, k, v)
+	if entries then
+		for idx,ent in pairs(entries) do
+			for k,v in pairs(ent) do
+				logger.info('entries', idx, k, v)
+			end
 		end
 	end
-	]]
+	--]]
 	term, success, last_index = actor:timed_append_entries(
 									self.heartbeat_span_sec, 
 									current_term, leader, leader_commit_idx, 
