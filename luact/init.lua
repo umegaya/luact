@@ -109,8 +109,8 @@ function _M.initialize(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules
-	conn.initialize(opts.conn)
 	actor.initialize(opts.actor)
+	conn.initialize(opts.conn)
 	router.initialize(opts.router)
 	dht.initialize(opts.dht)
 
@@ -165,6 +165,11 @@ function _M.kill(...)
 	for _,act in ipairs({...}) do
 		act:__actor_event__(actor.EVENT_DESTROY)
 	end
+end
+-- for calling from dockerfile. initialize cdef cache of ffiex 
+-- so that it can be run 
+function _M.init_cdef_cache()
+	(require 'ffiex.init').init_cdef_cache()
 end
 return setmetatable(_M, {
 	__call = function (t, target, ...)

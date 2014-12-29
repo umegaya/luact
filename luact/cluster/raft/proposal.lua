@@ -55,9 +55,6 @@ end
 local function proposal_list_alloc(size)
 	return ffi.cast('luact_raft_proposal_list_t*', memory.alloc(proposal_list_size(size)))
 end
-local function proposal_list_realloc(p, size)
-	return ffi.cast('luact_raft_proposal_list_t*', memory.realloc(p, proposal_list_size(size)))
-end
 function proposal_list_index:copy(src_store, src_pos, dst_pos)
 	self.states[dst_pos] = src_store.states[src_pos]
 end
@@ -70,7 +67,7 @@ end
 function proposal_list_index:delete(i)
 	self.states[i].quorum = 0
 end
-proposal_list_index.realloc = proposal_list_realloc
+proposal_list_index.alloc = proposal_list_alloc
 function proposal_list_index:fin()
 	memory.free(self)
 end

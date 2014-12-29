@@ -32,8 +32,8 @@ end
 -- interface for storing ringbuffer data
 function ringbuf_store_index:fin()
 end
-function ringbuf_store_index:realloc()
-	return self
+function ringbuf_store_index:alloc(newsize)
+	return setmetatable({}, ringbuf_store_mt)
 end
 function ringbuf_store_index:delete(i)
 	self[i] = nil
@@ -110,7 +110,7 @@ function ringbuf_header_index:reserve(size, store)
 		while required > newsize do
 			newsize = newsize * 2
 		end
-		local newstore = store:realloc(newsize)
+		local newstore = store.alloc(newsize)
 		local mapped = {}
 		for idx=tonumber(self.start_idx),tonumber(self.end_idx) do 
 			local src, dst = self:index2pos(idx), tonumber(idx % newsize)
@@ -129,7 +129,8 @@ function ringbuf_header_index:reserve(size, store)
 			for pos=epos+1,self.n_size,1 do
 				newstore:delete(pos)
 			end
-		end				
+		end
+		store:fin()
 		return newstore
 	end
 	return store

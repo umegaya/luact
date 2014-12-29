@@ -67,7 +67,7 @@ local ok,r = xpcall(function ()
 		s = p.progress:at(i)
 		assert(s.quorum == 2 and s.current == 1, "quorum should be same as specified at proposal:add() and size initialized")
 	end
-	
+
 	p:add(3, 17, 19)
 	assert(p.progress.header.n_size == 32)
 	
@@ -77,7 +77,7 @@ local ok,r = xpcall(function ()
 	assert((not s:granted()) and (not body.a), "if committed and still not reach to quorum, logs should not be processed")
 
 	p:range_commit(actor, 1, 1)
-	clock.sleep(0.1)
+	clock.sleep(0.2)
 	assert(s.current == 3, "if committed, size should increase")
 	assert(body.check[1] and body.a == 1, "if committed and reach to quorum, logs should be processed")
 	

@@ -1,0 +1,7 @@
+FROM ubuntu:14.10
+MAINTAINER Takehiro Iyatomi <iyatomi@gmail.com>
+ENV LUAJIT_VERSION=master ROCKSDB_VERSION=rocksdb-3.9 NGHTTP2_VERSION=v0.6.7
+RUN apt-get update
+ADD ./luact/lxc /tmp/lxc
+RUN /tmp/lxc/build/deps.sh
+RUN rm -rf /tmp/lxc
