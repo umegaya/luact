@@ -6,3 +6,4 @@ fi
 cp /luact/luact/ext/ffiex/ffiex/cache/* /tmp/test/luact/luact/ext/ffiex/ffiex/cache/
 cd /tmp/test/luact
 $LJBIN test/tools/run.lua
+rm -f /tmp/test/luact/luact/ext/ffiex/ffiex/cache/*
