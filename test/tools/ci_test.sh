@@ -1,9 +1,11 @@
 #!/bin/bash
-LJBIN=$1
+LJBIN="LD_PRELOAD=libpthread.so.0 $1"
 if [ $# -lt 1 ]; then
-	LJBIN=luajit
+	LJBIN="LD_PRELOAD=libpthread.so.0 luajit"
 fi
-if [ $# -gt 2 ]; then
+if [ $# -ge 2 ]; then
+	echo "checkout $2"
 	git fetch && git checkout $2
 fi
-$LJBIN test/tools/run.lua
+echo "exec: $LJBIN test/tool/run.lua"
+bash -c "$LJBIN test/tools/run.lua"
