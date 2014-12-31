@@ -1,8 +1,8 @@
 language: lua
 
 env:
-  - LUAJIT_VERSION="master" TEST_BIN="bash test/tools/test.sh" PRELOAD="libpthread.so.0"
-  # - LUAJIT_VERSION="v2.1" TEST_BIN="bash test/tools/test.sh luajit-2.1.0-alpha" PRELOAD="libpthread.so.0"
+  - LUAJIT_VERSION="master" TEST_BIN="bash test/tools/travis_test.sh luajit $TRAVIS_COMMIT" PRELOAD="libpthread.so.0"
+  # - LUAJIT_VERSION="v2.1" TEST_BIN="bash test/tools/travis_test.sh luajit-2.1.0-alpha $TRAVIS_COMMIT" PRELOAD="libpthread.so.0"
 
 # Handle git submodules yourself
 git:
@@ -16,7 +16,8 @@ before_install:
 compiler:
   - gcc
 
-script: # "sudo LUAJIT_VERSION=$LUAJIT_VERSION bash test/tools/install.sh && LD_PRELOAD=\"$PRELOAD\" $TEST_BIN"
+script:
+  #- "sudo LUAJIT_VERSION=$LUAJIT_VERSION bash test/tools/install.sh && LD_PRELOAD=\"$PRELOAD\" $TEST_BIN"
   - ./linux quiet mem=2G rootfstype=hostfs rw eth0=slirp,,/usr/bin/slirp-fullbolt init=$(pwd)/bin/travis.sh WORKDIR=$(pwd) HOME=$HOME TEST_BIN=$TEST_BIN PRELOAD=$PRELOAD LUAJIT_VERSION=$LUAJIT_VERSION
 
 branches:
