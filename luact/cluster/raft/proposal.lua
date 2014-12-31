@@ -109,6 +109,7 @@ function proposals_index:commit(index)
 
 	st = self.progress:at(index)
 	if not st then
+		-- logger.warn('commit: no status at:', index)
 		goto notice
 	end
 	st:commit()
@@ -125,6 +126,9 @@ function proposals_index:commit(index)
 		last_commit_idx = header.start_idx
 		self.progress:delete_range(nil, header.start_idx)
 		-- header.start_idx must be increment (+1)
+		if header.start_idx >= header.end_idx then
+			break -- finish processing all proposal
+		end
 		st = self.progress:at(header.start_idx)
 		if (not st) or (not st:granted()) then
 			goto notice

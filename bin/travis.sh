@@ -62,4 +62,4 @@ mount --bind /run/resolvconf/resolv.conf /etc/resolv.conf
 docker -d &
 sleep 5
 
-docker run --rm umegaya/luact:core cd luact && $TEST_BIN
+docker run --rm umegaya/luact:core bash -c "cd luact && $TEST_BIN"

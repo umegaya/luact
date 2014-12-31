@@ -1,8 +1,8 @@
 language: lua
 
 env:
-  - LUAJIT_VERSION="master" TEST_BIN="luajit test/tools/run.lua" PRELOAD="libpthread.so.0"
-  # - LUAJIT_VERSION="v2.1" TEST_BIN="luajit-2.1.0-alpha test/tools/run.lua" PRELOAD="libpthread.so.0"
+  - LUAJIT_VERSION="master" TEST_BIN="bash test/tools/test.sh" PRELOAD="libpthread.so.0"
+  # - LUAJIT_VERSION="v2.1" TEST_BIN="bash test/tools/test.sh luajit-2.1.0-alpha" PRELOAD="libpthread.so.0"
 
 # Handle git submodules yourself
 git:
