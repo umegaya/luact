@@ -49,6 +49,8 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 			end,
 		}
 	})
+	-- start partition!
+	p:wait(1)
 	partitioned = true
 	function conn.get_by_thread_id(tid)
 		if g1 ~= is_group1(tid) then
@@ -61,7 +63,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 	end
 	logger.info('start network partition')
 	-- wait for partitioned nodes got timeout...
-	p:wait(1)
+	p:wait(2)
 	logger.info('============================= goto phase 2')
 	-- check group1 does not have any leader and group2 has still same leader.
 	local arb, l
@@ -109,7 +111,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		end)
 	end
 	logger.info('============================= before goto phase 3')
-	p:wait(2)
+	p:wait(3)
 	logger.info('============================= goto phase 3')
 	-- heal network partition
 	conn.get_by_thread_id = orig_get_by_tid
@@ -137,7 +139,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		assert(ok, "fsm apply end in failure:"..tostring(r))
 	end
 	logger.info('============================== wait all threads finished')
-	p:wait(3)
+	p:wait(4)
 	logger.info('============================== success')
 end)
 

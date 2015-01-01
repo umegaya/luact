@@ -40,9 +40,9 @@ tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 		arbiter:add_replica_set(arb)
 	end
 	p:wait(4)
-	-- wait replication to thread 4 finished
-	clock.sleep(0.1)
 	if thread_id == 4 then
+		-- wait replication to thread 4 finished
+		clock.sleep(1.0)
 		arbiter = actor.root_of(nil, 4).arbiter('test_group')
 		assert(arbiter and uuid.valid(arbiter), "thread 4's arbiter should be recovered")
 	end

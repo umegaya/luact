@@ -187,11 +187,13 @@ local ok,r = xpcall(function ()
 	end
 
 	p:range_commit(actor, 1, last_index - 2)
+	logger.info('wait until commit applied')
 	clock.sleep(0.3)
+	logger.info('commit applied')
 	for i=1, last_index-2 do
 		local s = p.progress:at(i)
 		assert(not s, "second entries should satisfy quorum and be removed from progress list")
-		assert(body.check[i], "entry should be committed")
+		assert(body.check[i], "entry should be committed:"..tostring(i))
 	end
 	for i=1, #st.replica_set do
 		assert(not uuid.equals(replica_set[4], st.replica_set[i]), "remove replica should not remain in replica set")

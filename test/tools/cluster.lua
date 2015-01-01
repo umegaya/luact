@@ -121,6 +121,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local ptr = ffi.cast('luact_thread_payload_t*', p)
 			local leader_thread_id = ptr[2]:decode()
 			local n_core = ptr[3]:decode()
+			local arb
 			if pulpo.thread_id == leader_thread_id then
 				local factory = ptr[0]:decode()
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, nil, pulpo.thread_id)
@@ -135,9 +136,12 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 				end
 				arb:add_replica_set(replica_set)
 			else
-				clock.sleep(2.5 * 2)
-				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
+				while not arb do
+					clock.sleep(0.1)
+					arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
+				end
 				logger.info('arb2', arb)
+				clock.sleep(2.5) -- wait for replica_set is replicated.
 			end
 			local rs = arb:replica_set()
 			assert(#rs == n_core, "# of replica_set should be "..n_core..":"..#rs)
