@@ -6,7 +6,7 @@ local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local clock = require 'luact.clock'
 
--- local util = require 'pulpo.util'
+local util = require 'pulpo.util'
 
 local _M = {}
 _M.EVENT_DESTROY = "destroy"
@@ -19,6 +19,7 @@ local exception = require 'pulpo.exception'
 exception.define('actor_not_found')
 exception.define('actor_no_body')
 exception.define('actor_no_method')
+exception.define('actor_error')
 exception.define('actor_runtime_error')
 exception.define('actor_timeout')
 exception.define('actor_temporary_fail')
@@ -28,6 +29,9 @@ exception.define('actor_temporary_fail')
 --[[
 	manages relation of actor
 --]]
+-- TODO : sometimes cdata is resulting different table key.
+-- eg) refer member cdata (even if it is pointer!!)
+-- use FFI implementation of map
 local actormap = {}
 local actor_index = {}
 local actor_mt = {
@@ -178,16 +182,11 @@ local vid_metatable = {
 local bodymap = {}
 
 -- module function
+local root_actor_id
 function _M.initialize(opts)
 	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
 	vid.initialize(vid_metatable)
-	_M.root = _M.new(function ()
-		return {
-			new = _M.new,
-			new_link = _M.new_link,
-			register = _M.register,
-		}
-	end)
+	root_actor_id = uuid.first()
 end
 
 --[[
@@ -196,6 +195,13 @@ end
 local default_opts = {}
 function _M.new(ctor, ...)
 	return _M.new_link_with_opts(nil, default_opts, ctor, ...)
+end
+function _M.new_root(ctor, ...)
+	local s = uuid.serial(root_actor_id)
+	if bodymap[s] then
+		return actormap[bodymap[s]]
+	end
+	return _M.new_link_with_opts(nil, { uuid = root_actor_id }, ctor, ...)
 end
 function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
@@ -207,13 +213,17 @@ function _M.new_link_with_opts(to, opts, ctor, ...)
 	if to then 
 		local ok, r = pcall(to.__actor_event__, to, _M.EVENT_LINK, id)
 		if not ok then
-		 	if b.__actor_destroy__ then b:__actor_destroy__(r) end
+		 	if body.__actor_destroy__ then body:__actor_destroy__(r) end
 			error(r)
 		end
 	end
 	local a = actor_index.new(id, opts)
 	table.insert(a.links, to)
+	-- print('entry actormap', actormap, body, a)
 	actormap[body] = a
+	if type(body) ~= 'table' and type(body) ~= 'cdata' then
+		exception.raise('invalid', 'wrong type of actor body', type(body))
+	end
 	bodymap[s] = body
 	if _M.debug then
 		logger.notice('add bodymap', s, body, debug.traceback())
@@ -230,6 +240,10 @@ function _M.monitor(watcher_actor, target_actor)
 	if not w then exception.raise('not_found', 'watcher_actor') end
 	if not t then exception.raise('not_found', 'target_actor') end
 	table.insert(t.links, w.uuid)
+end
+function _M.root_of(machine_id, thread_id)
+	assert(thread_id, "thread_id should")
+	return uuid.first(machine_id or uuid.node_address, thread_id)
 end
 function _M.register(name, ctor, ...)
 	-- TODO : choose owner thread of this actor
@@ -278,7 +292,7 @@ local function destroy_by_serial(s, reason)
 end
 local function safe_destroy_by_serial(s, reason)
 	local ok, r = pcall(destroy_by_serial, s, reason) 
-	if not ok then logger.error('destroy fails:'..tostring(r)) end
+	if not ok then logger.error('destroy fails:'..tostring(r).." reason: "..tostring(reason)) end
 end
 local function body_of(serial)
 	return bodymap[serial]
@@ -292,9 +306,11 @@ function _M.destroy(id, reason)
 	if not ok then logger.error('destroy fails:'..tostring(r)) end
 end
 function _M.of(object)
-	return actormap[object].uuid
+	-- print('get actor from body', object, actormap[object])
+	local a = actormap[object]
+	return a and a.uuid or nil
 end
--- only from internal use.
+-- should use only from internal.
 function _M._set_restart_result(id, result)
 	local s = uuid.serial(id)
 	if result then
@@ -304,7 +320,15 @@ function _M._set_restart_result(id, result)
 	end
 end
 local function err_handler(e)
-	return {debug.traceback(), e}
+	if type(e) == 'table' and e.is then
+		e:set_bt()
+	else
+		e = exception.new_with_bt('actor_error', debug.traceback(), e)
+	end
+	return e
+end
+function _M.is_fatal_error(e)
+	return not (e:is('runtime') or e:is('actor_runtime_error') or e:is('actor_timeout'))
 end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
@@ -317,10 +341,10 @@ function _M.dispatch_send(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
+			safe_destroy_by_serial(s, r[2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
@@ -335,10 +359,10 @@ function _M.dispatch_call(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
+			safe_destroy_by_serial(s, r[2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end
@@ -354,10 +378,10 @@ function _M.dispatch_sys(local_id, method, ...)
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
 			r[2] = exception.new('not_found', p, method)
-		else
-			r[2] = exception.new_with_bt('actor_runtime_error', r[2][1], tostring(uuid.from_local_id(local_id)), r[2][2])
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
+			safe_destroy_by_serial(s, r[2]) 
 		end
-		safe_destroy_by_serial(s, r[2]) 
 	end
 	return unpack(r)
 end

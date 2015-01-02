@@ -1,6 +1,8 @@
 local data = debug.getinfo(1)
 local root = {data.source:find('@(.+)/.+$')}
-package.path = root[3]..'/lib/?.lua;'..package.path
+if not package.path:match(root[3]..'/lib/%?%.lua;') then
+	package.path = root[3]..'/lib/?.lua;'..package.path
+end
 -- print(package.path)
 
 local _M = {}
@@ -12,7 +14,7 @@ _M.LUACT_BUFFER = pulpo_package.create_runlevel({
 })
 -- this group depends on LUACT_BUFFER modules.
 _M.LUACT_IO = pulpo_package.create_runlevel({
-	"luact.defer.conn_c", "luact.defer.clock_c"
+	"luact.defer.conn_c", "luact.defer.clock_c",
 })
 
 return _M

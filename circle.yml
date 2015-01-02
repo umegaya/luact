@@ -1,0 +1,7 @@
+machine:
+  services:
+    - docker
+
+test:
+  override:
+    - docker run umegaya/luact:core bash -c "cd /luact && bash ./test/tools/ci_test.sh luajit $CIRCLE_BRANCH"

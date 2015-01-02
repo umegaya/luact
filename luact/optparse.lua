@@ -7,7 +7,6 @@
 return function (args, opts_defs, DEBUG)
 	local ret = {}
 	for i=1,#args,1 do
-		print('args:', args[i])
 		local a = args[i]
 		local long, short, v, vv, found
 		long, v = a:match('^%-%-(%w+)=(.*)$')

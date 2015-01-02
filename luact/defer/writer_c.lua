@@ -65,6 +65,7 @@ function writer_raw_index:syscall(io)
 	return io:write(self.p + self.ofs, self.sz - self.ofs)
 end
 function writer_raw_index:sent(r)
+	-- logger.info('sent:', r, 'bytes')
 	self.ofs = self.ofs + r
 end
 function writer_raw_index:finish()
@@ -141,7 +142,7 @@ _M.vec = writer_vec_index
 local writer_serde_index = pulpo.util.copy_table(writer_raw_index)
 
 function writer_serde_index.write(buf, append, sr, ...)
-	sr:pack(buf, append, ...)
+	sr:pack_packet(buf, append, ...)
 end
 _M.serde = writer_serde_index
 
