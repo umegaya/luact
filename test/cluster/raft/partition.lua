@@ -128,6 +128,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		local ret = event.join(clock.alarm(5), unpack(evs))
 		assert(ret[#ret][1] ~= 'timeout', "operation should not timeout")
 		clock.sleep(1.0) -- here, assure to apply logs to this node. 
+		p:wait(4)
 		logger.info('============================== probe fsm')
 		local ok, r = arbiter:probe(function (rft)
 			local fsm = rft.state.fsm
@@ -139,7 +140,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		assert(ok, "fsm apply end in failure:"..tostring(r))
 	end
 	logger.info('============================== wait all threads finished')
-	p:wait(4)
+	p:wait(5)
 	logger.info('============================== success')
 end)
 
