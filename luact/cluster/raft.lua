@@ -68,8 +68,13 @@ function raft_index:tick()
 		-- logger.info('follower election timeout check', self.timeout_limit - clock.get())
 		if self:check_election_timeout() then
 			logger.info('follower election timeout', self.timeout_limit, clock.get())
-			-- if election timeout, become candidate
-			self.state:become_candidate()
+			if self.state:has_enough_nodes_for_election() then
+				-- if election timeout (and has enough node), become candidate
+				self.state:become_candidate()
+			else
+				logger.info('election timeout but # of nodes not enough', tostring(self.state.initial_node), #self.state.replica_set)
+				self:reset_timeout() -- wait for receiving replica set from leader
+			end
 		end
 	end
 end
@@ -391,8 +396,9 @@ local default_opts = {
 	heartbeat_timeout_sec = 0.1,
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
-	storage = "rocksdb",
+	storage = "rocksdb", 
 	work_dir = luact.DEFAULT_ROOT_DIR,
+	initial_node = false,
 }
 local function configure_workdir(id, opts)
 	if not opts.work_dir then
@@ -405,16 +411,11 @@ end
 local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]
 end
-local function configure_timeout(opts)
-	return math.floor(opts.election_timeout_sec / tick_intval_sec), 
-		math.floor(opts.heartbeat_timeout_sec / tick_intval_sec)
-end
 local function create(id, fsm_factory, opts, ...)
 	local fsm = fsm_factory(...)
 	local dir = configure_workdir(id, opts)
 	local sr = configure_serde(opts)
-	local election, heartbeat = configure_timeout(opts)
-	-- NOTE : this operation may *block* 100~200 msec (eg. rocksdb store initialization)
+	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
 	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(pulpo.thread_id))
 	local ss = snapshot.new(dir, sr)
 	local wal = wal.new(fsm:metadata(), store, sr, opts)
@@ -433,7 +434,7 @@ _M.default_opts = default_opts
 _M.create_ev = event.new()
 function _M.new(id, fsm_factory, opts, ...)
 	local rft = raftmap[id]
-	opts = opts or default_opts
+	opts = util.merge_table(_M.default_opts, opts or {})
 	if not rft then
 		if rft == nil then
 			raftmap[id] = false

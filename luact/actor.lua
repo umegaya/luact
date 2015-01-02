@@ -327,8 +327,8 @@ local function err_handler(e)
 	end
 	return e
 end
-local function check_runtime_error(e)
-	return e:is('runtime') or e:is('actor_runtime_error')
+function _M.is_fatal_error(e)
+	return not (e:is('runtime') or e:is('actor_runtime_error') or e:is('actor_timeout'))
 end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
@@ -341,7 +341,8 @@ function _M.dispatch_send(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif not check_runtime_error(r[2]) then
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
 			safe_destroy_by_serial(s, r[2]) 
 		end
 	end
@@ -358,7 +359,8 @@ function _M.dispatch_call(local_id, method, ...)
 	if not r[1] then 
 		if not b[method] then 
 			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif not check_runtime_error(r[2]) then
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
 			safe_destroy_by_serial(s, r[2]) 
 		end
 	end
@@ -376,7 +378,8 @@ function _M.dispatch_sys(local_id, method, ...)
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
 			r[2] = exception.new('not_found', p, method)
-		elseif not check_runtime_error(r[2]) then
+		elseif _M.is_fatal_error(r[2]) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
 			safe_destroy_by_serial(s, r[2]) 
 		end
 	end

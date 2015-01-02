@@ -280,12 +280,18 @@ end
 -- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
 -- newly added replicator only starts replication after this operation agreed by previous replica set.
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
+	local self_actor = actor.of(self.actor_body)
 	if applied then
+		local add_self
 		for i = 1,#replica_set do
 			local found
 			for j = 1,#self.replica_set do
 				if uuid.equals(self.replica_set[j], replica_set[i]) then
+					if uuid.equals(self_actor, self.replica_set[j]) then
+						add_self = true
+					end
 					found = j
+					break
 				end
 			end
 			if not found then
@@ -308,6 +314,10 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 				end
 			end
 			self:kick_replicator()
+		end
+		-- allow this node to be leader even if single node.
+		if add_self and (not self.opts.initial_node) then
+			self.opts.initial_node = true
 		end
 	elseif self:is_leader() then 
 		if type(replica_set) ~= 'table' then
@@ -409,6 +419,12 @@ function raft_state_container_index:snapshot_if_needed()
 		logger.info('snapshot', self.state.last_applied_idx)
 		self:write_snapshot()
 	end
+end
+function raft_state_container_index:has_enough_nodes_for_election()
+	if self.opts.initial_node then
+		return true
+	end
+	return #self.replica_set > 1
 end
 -- after replication to majority success, apply called
 function raft_state_container_index:committed(log_idx)

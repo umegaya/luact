@@ -10,13 +10,12 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 	local memory = require 'pulpo.memory'
 	local tools = require 'test.tools.cluster'
 	--tentacle.DEBUG2 = true
-	-- local stale_sec = ((thread_id == 2) and 7.0 or 5.0)
 	logger.info('---------------------- start cluster ---------------------------')
 	if not arbiter:is_leader() then
-		clock.sleep(2.0) -- wait leader stale and heartbeat timeout passed
+		clock.sleep(2.0) -- wait leader stale and heartbeat timeout
 	end
 	local p = tools.create_latch('checker', 3)
-	-- make 10 commited 
+	-- make 10 propose for each thread
 	local evs = {}
 	local sidx=(thread_id - 1) * 20
 	for i=sidx+1,sidx+10 do
@@ -38,20 +37,31 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 		util.sleep(5.0) -- stale. next leader should decided.
 		logger.report('leader: end stale, check result')
 	end
-	local ok, r = arbiter:probe(function (rft, tid)
+	local commit_results = {}
+	for i=1,#res do
+		table.insert(commit_results, {unpack(res[i], 3)})
+	end
+	local ok, r = arbiter:probe(function (rft, tid, res)
 		local fsm = rft.state.fsm
 		local sidx=(tid - 1) * 20
 		local start_idx_in_tid, end_idx_in_tid
 		for i = sidx+1, sidx+20 do
 			if i <= (sidx+10) then
-				assert(fsm[i], "commit should be done:"..tostring(i).."|"..tostring(tid))
-				local commit_tid, val = unpack(fsm[i])
-				assert(val == i * (10 + commit_tid), "commit should be done")
+				local result, err = unpack(res[i - sidx])
+				if result then
+					assert(fsm[i], "commit should be done:"..tostring(i).."|"..tostring(tid))
+					local commit_tid, val = unpack(fsm[i])
+					assert(val == i * (10 + commit_tid), "commit should be done")
+				else
+					-- propose may be discarded if propose is sent to the leader 
+					-- before its stale propagate to other node by heartbeat timeout
+					assert(err:is('actor_timeout'), 'only timeout error is permisible:'..tostring(err))
+				end
 			else
 				assert(not fsm[i], "commit should not be done")
 			end
 		end
-	end, thread_id)
+	end, thread_id, commit_results)
 	assert(ok, "proposed log should be applied to fsm:"..tostring(r))
 	logger.info('success')
 	p:wait(1)

@@ -121,30 +121,36 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local ptr = ffi.cast('luact_thread_payload_t*', p)
 			local leader_thread_id = ptr[2]:decode()
 			local n_core = ptr[3]:decode()
-			local arb
+			local arb, rs
 			if pulpo.thread_id == leader_thread_id then
 				local factory = ptr[0]:decode()
-				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, nil, pulpo.thread_id)
+				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, { initial_node = true }, pulpo.thread_id)
 				logger.info('arb1', arb)
 				clock.sleep(2.5) -- wait for this thread become raft leader (max election timeout (2.0) + margin (0.5))
 				assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
-				local replica_set = {}
+				rs = {}
 				for i=1,n_core do
 					local replica = actor.root_of(nil, i).arbiter('test_group', factory, nil, i)
 					assert(replica, "arbiter should be created")
-					table.insert(replica_set, replica)
+					table.insert(rs, replica)
 				end
-				arb:add_replica_set(replica_set)
+				arb:add_replica_set(rs)
 			else
 				while not arb do
 					clock.sleep(0.1)
 					arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
 				end
 				logger.info('arb2', arb)
-				clock.sleep(2.5) -- wait for replica_set is replicated.
+				 -- wait for replica_set is replicated.
+				rs = arb:replica_set()
+				while #rs < n_core do
+					clock.sleep(0.1)
+					rs = arb:replica_set()
+				end
 			end
-			local rs = arb:replica_set()
-			assert(#rs == n_core, "# of replica_set should be "..n_core..":"..#rs)
+			arb:probe(function (rft)
+				assert(rft.state:has_enough_nodes_for_election(), "all nodes should be election-ready")
+			end)
 			local found
 			for i=1,n_core do
 				if uuid.equals(rs[i], arb) then
