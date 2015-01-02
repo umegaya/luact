@@ -7,5 +7,5 @@ if [ $# -ge 2 ]; then
 	echo "checkout $2"
 	git fetch && git checkout origin/$2 && git submodule update --recursive
 fi
-echo "exec: $LJBIN test/tool/run.lua"
+echo "exec: $LJBIN test/tools/run.lua"
 bash -c "$LJBIN test/tools/run.lua"
