@@ -342,7 +342,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		return self.state:current_term(), false		
 	end
 	if cand_last_log_term < last_term then
-		logger.warn('raft', 'request_vote', 'term is not up-to-date', cand_last_log_term, log.term)
+		logger.warn('raft', 'request_vote', 'term is not up-to-date', cand_last_log_term, last_term)
 		return self.state:current_term(), false		
 	end
 	-- 2. If votedFor is null or candidateId, 
