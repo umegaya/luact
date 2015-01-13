@@ -20,6 +20,9 @@ return {
 		}, 
 		]]
 	},
+	gossiper = {
+		kind = "gossip",
+	},
 	conn = {
 		internal_proto = "tcp+serpent",
 		internal_port = "8008", 

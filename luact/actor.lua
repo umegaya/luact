@@ -323,7 +323,7 @@ local function err_handler(e)
 	if type(e) == 'table' and e.is then
 		e:set_bt()
 	else
-		e = exception.new_with_bt('actor_error', debug.traceback(), e)
+		e = exception.new_with_bt('actor_runtime_error', debug.traceback(), e)
 	end
 	return e
 end

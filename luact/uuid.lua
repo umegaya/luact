@@ -109,7 +109,8 @@ function _M.initialize(mt, startup_at, local_address)
 		if local_address then
 			v[0] = tonumber(local_address, 16)
 		else
-			local addr = socket.getifaddr(nil, ffi.defs.AF_INET)
+			local ret = socket.getifaddr(nil, ffi.defs.AF_INET)
+			local addr = ret:address()
 			local af = addr.sa_family
 			-- print(addr, addr.sa_family, ffi.defs.AF_INET, ffi.defs.AF_INET6)
 			assert(af == ffi.defs.AF_INET, exception.new("invalid", "address", "family", af))

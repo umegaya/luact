@@ -149,6 +149,7 @@ function luact_rocksdb_index:fin()
 		self.db:fin()
 	end
 end
+-- please assure that this function called in mutex-ed environment.
 function luact_rocksdb_index:close_column_family(cf, destroy)
 	for i=0,tonumber(self.cfused)-1 do
 		if (self.handles[i].cf == cf) then
@@ -156,12 +157,13 @@ function luact_rocksdb_index:close_column_family(cf, destroy)
 				-- mark when database closed, this column family destroyed
 				callapi(LIB.rocksdb_drop_column_family, self.db, cf)
 			end
-			self.handles[i].refc = self.handles[i].refc - 1
+			self.handles[i].refc = math.max(0, self.handles[i].refc - 1)
 			return true
 		end
 	end
-	return found
+	return false
 end
+-- please assure that following 3 function called in mutex-ed environment.
 function luact_rocksdb_index:destroy_column_family(cf)
 	return self:close_column_family(cf, true)
 end

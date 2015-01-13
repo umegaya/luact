@@ -117,12 +117,12 @@ function _M.initialize(opts)
 	-- initialize listener of internal actor messaging 
 	listener.unprotected_listen(tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port))
 	-- external port should be declared at each startup routine.
-	-- because it is likely to open multiple listener port.
-
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
 		local arbiter_opts = options.arbiter or {}
+		local gossiper_opts = options.gosipper or {}
 		local arbiter_module = (arbiter_opts ~= false and require('luact.cluster.'..(arbiter_opts.kind or 'raft')))
+		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
 		_M.root = {
 			new = actor.new,
 			destroy = actor.destroy,
@@ -139,6 +139,9 @@ function _M.initialize(opts)
 				else
 					return arbiter_module.find(group)
 				end
+			end,
+			gossiper = function (self)
+				return self.gosipper_module
 			end,
 			stat = function (self)
 				-- TODO : add default stats functions and refine customize way.
@@ -166,6 +169,7 @@ function _M.kill(...)
 		act:__actor_event__(actor.EVENT_DESTROY)
 	end
 end
+_M.of = actor.of
 -- for calling from dockerfile. initialize cdef cache of ffiex 
 -- so that it can be run 
 function _M.init_cdef_cache()

@@ -185,6 +185,7 @@ end
 function _M.new(meta, store, serde, opts)
 	local wal = setmetatable({
 		writer = memory.alloc_fill_typed('luact_raft_wal_writer_t'),
+		-- store does not fin by normal finalization for faster restart when superviser restart raft actor
 		store = store,
 		-- TODO : using cdata array if serde is such kind.
 		logcache = ringbuf.new(opts.log_compaction_margin),

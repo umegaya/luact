@@ -422,6 +422,8 @@ local function create(id, fsm_factory, opts, ...)
 	local rft = setmetatable({
 		id = id,
 		state = state.new(fsm, wal, ss, opts), 
+		-- TODO : finalize store when this raft group no more assigned to this node.
+		store = store,
 		opts = opts,
 		alive = true,
 		timeout_limit = 0,

@@ -233,14 +233,14 @@ function conn_index:machine_id()
 	return self.io:addrinfo().addr4.sin_addr.s_addr
 end
 function conn_index:address_family()
-	return self.io:addrinfo().addrp[0].sa_family
+	return self.io:address().p[0].sa_family
 end
 function conn_index:cmapkey()
 	local af = self:address_family()
 	if af == AF_INET then
 		return self:machine_id()
 	elseif af == AF_INET6 then
-		return socket.inet_namebyhost(self.io:addrinfo().addrp)
+		return socket.inet_namebyhost(self.io:address().p)
 	else
 		exception.raise('invalid', 'address', 'family', af)
 	end

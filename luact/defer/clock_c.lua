@@ -27,7 +27,7 @@ function _M.get()
 end
 
 function _M.timer(interval, proc, ...)
-	pulpo.tentacle(function (intv, fn, ...)
+	return pulpo.tentacle(function (intv, fn, ...)
 		while true do
 			fn(...)
 			_M.sleep(intv)
