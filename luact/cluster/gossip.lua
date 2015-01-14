@@ -75,7 +75,6 @@ function gossip_index:run(mship)
 			return
 		end
 	end
-	logger.info('start periodic task')
 	-- start periodic (sub) task
 	table.insert(mship.threads, clock.timer(opts.probe_interval, self.probe, self, mship))
 	table.insert(mship.threads, clock.timer(opts.exchange_interval, self.exchange, self, mship))

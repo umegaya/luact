@@ -6,7 +6,6 @@ tools.start_luact(1, nil, function ()
 	local pulpo = require 'pulpo.init'
 	local uuid = require 'luact.uuid'
 	local nodelist = require 'luact.cluster.gossip.nodelist'
-	print('======================= teststart')
 	local n = nodelist.new(8008)
 	n:add_self()
 	assert(#n == 1, "1 node should be added")
@@ -39,7 +38,7 @@ tools.start_luact(1, nil, function ()
 		assert(t <= 5 and t >= 1)
 		if t ~= 1 then
 			t = t - 1
-			assert(tostring(nd.addr) == ('%d.%d.%d.%d:8008'):format(t,t,t,t))
+			assert(tostring(nd.addr) == ('%d.%d.%d.%d:8008'):format(t,t,t,t), "for dummy node, correct value should be assigned")
 		end
 	end
 end)

@@ -46,8 +46,8 @@ typedef struct luact_gossip_proto_user {
 local LUACT_GOSSIP_PROTO_CHANGE = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_CHANGE")
 local LUACT_GOSSIP_PROTO_USER = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_USER")
 _M.types = {
-	[LUACT_GOSSIP_PROTO_CHANGE] = ffi.typeof('luact_gossip_proto_sys_t'),
-	[LUACT_GOSSIP_PROTO_USER] = ffi.typeof('luact_gossip_proto_user_t'),
+	[tonumber(LUACT_GOSSIP_PROTO_CHANGE)] = ffi.typeof('luact_gossip_proto_sys_t*'),
+	[tonumber(LUACT_GOSSIP_PROTO_USER)] = ffi.typeof('luact_gossip_proto_user_t*'),
 }
 
 
@@ -172,7 +172,7 @@ function _M.new_user(buf, len)
 	local p = alloc_user_packet()
 	p.type = LUACT_GOSSIP_PROTO_USER
 	p.len = len
-	p.buf = buf
+	p.buf_p = buf
 	return p
 end
 function _M.destroy(p)
@@ -183,7 +183,7 @@ function _M.destroy(p)
 	end
 end
 function _M.from_ptr(p)
-	return ffi.cast(_M[p[0]], p)
+	return ffi.cast(_M.types[ffi.cast('uint8_t *', p)[0]], p)
 end
 function _M.new_nodelist(size)
 	return proto_nodelist_mt.alloc(size)
