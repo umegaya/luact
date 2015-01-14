@@ -131,7 +131,8 @@ function _M.initialize(opts)
 			["require"] = _M.require, 
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
-				return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
+				return fsm_factory and arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
+					or arbiter_module.find(group)
 			end,
 			gossiper = function (port, opts)
 				return gossiper_module.new(port or options.conn.internal_port, opts or gossiper_opts.config)

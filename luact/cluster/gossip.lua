@@ -148,7 +148,7 @@ function gossip_index:join(mship)
 		local ok, r = pcall(self.exchange_with, self, node, mship)
 		if ok then
 			n_join = n_join + 1
-		else
+		elseif not (r:is('actor_not_found') or r:is('actor_tmp_fail')) then
 			logger.error('exchange data with', node.addr, 'fails', r)
 		end
 	end
