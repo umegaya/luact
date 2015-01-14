@@ -107,7 +107,7 @@ function _M.initialize(mt, startup_at, local_address)
 	local node_address = pulpo.shared_memory('luact_machine_id', function ()
 		local v = memory.alloc_typed('uint32_t')
 		if local_address then
-			v[0] = tonumber(local_address, 16)
+			v[0] = socket.htonl(tonumber(local_address, 16))
 		else
 			local ret = socket.getifaddr(nil, ffi.defs.AF_INET)
 			local addr = ret:address()

@@ -121,29 +121,22 @@ function _M.initialize(opts)
 	_M.root_actor = actor.new_root(function (options)
 		local arbiter_opts = options.arbiter or {}
 		local gossiper_opts = options.gosipper or {}
-		local arbiter_module = (arbiter_opts ~= false and require('luact.cluster.'..(arbiter_opts.kind or 'raft')))
+		local arbiter_module = require('luact.cluster.'..(arbiter_opts.kind or 'raft'))
 		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
 		_M.root = {
 			new = actor.new,
 			destroy = actor.destroy,
 			register = actor.register,
-			unregister = actor.unregister, 
+			unregister = actor.unregister,
 			["require"] = _M.require, 
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
-				if not arbiter_module then
-					exception.raise('invalid', 'config', 'this node not using arbiter')
-				end
-				if fsm_factory then 
-					return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
-				else
-					return arbiter_module.find(group)
-				end
+				return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
 			end,
-			gossiper = function (self)
-				return self.gosipper_module
+			gossiper = function (port, opts)
+				return gossiper_module.new(port or options.conn.internal_port, opts or gossiper_opts.config)
 			end,
-			stat = function (self)
+			stat = function ()
 				-- TODO : add default stats functions and refine customize way.
 				local ret = {}
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})

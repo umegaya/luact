@@ -230,7 +230,7 @@ function conn_index:destroy(reason)
 end
 function conn_index:machine_id()
 	assert(self:address_family() == AF_INET)
-	return self.io:addrinfo().addr4.sin_addr.s_addr
+	return self.io:address():as_machine_id()
 end
 function conn_index:address_family()
 	return self.io:address().p[0].sa_family

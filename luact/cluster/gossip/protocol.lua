@@ -29,6 +29,11 @@ typedef struct luact_gossip_proto_sys {
 	uint16_t protover;
 } luact_gossip_proto_sys_t;
 
+typedef struct luact_gossip_proto_nodelist {
+	uint32_t size, used;
+	luact_gossip_proto_sys_t nodes[0];
+} luact_gossip_proto_nodelist_t;
+
 typedef struct luact_gossip_proto_user {
 	uint8_t type, padd;
 	uint16_t len;
@@ -36,7 +41,7 @@ typedef struct luact_gossip_proto_user {
 		char *buf_p; //when send (hack!)
 		char buf[1]; //when recv
 	};
-} luact_gossip_proto_user_defined_t;
+} luact_gossip_proto_user_t;
 ]]
 local LUACT_GOSSIP_PROTO_CHANGE = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_CHANGE")
 local LUACT_GOSSIP_PROTO_USER = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_USER")
@@ -74,7 +79,7 @@ end
 function proto_sys_index:handle(mship)
 	mship:handle_node_change(self)
 end
-ffi.metatype('luact_gossip_proto_sys', proto_join_mt)
+ffi.metatype('luact_gossip_proto_sys_t', proto_sys_mt)
 
 
 -- proto user
@@ -99,6 +104,47 @@ end
 ffi.metatype('luact_gossip_proto_user_t', proto_user_mt)
 
 
+-- node list
+local proto_nodelist_index = {}
+local proto_nodelist_mt
+proto_nodelist_mt = {
+	__index = proto_nodelist_index,
+	size = function (sz)
+		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz * ffi.sizeof('luact_gossip_proto_sys_t')
+	end,
+	alloc = function (size)
+		local p = ffi.cast('luact_gossip_proto_nodelist_t*', memory.alloc(proto_nodelist_mt.size(size)))
+		p.size = size
+		return p
+	end,
+}
+function proto_nodelist_index:reserve(size)
+	if size > self.size then
+		newsize = self.size
+		while newsize < size do
+			newsize = newsize * 2
+		end
+		tmp = ffi.cast('luact_gossip_proto_nodelist_t*', memory.realloc(self, proto_nodelist_mt.size(size)))
+		if tmp ~= ffi.NULL then
+			tmp.size = newsize
+			return tmp
+		end
+	end
+	return self
+end
+function proto_nodelist_index.pack(arg)
+	return ffi.string(arg, proto_nodelist_mt.size(arg.used))
+end
+function proto_nodelist_index.unpack(arg)
+	return ffi.cast('luact_gossip_proto_nodelist_t*', arg)
+end
+serde[serde.kind.serpent]:customize(
+	'struct luact_gossip_proto_nodelist', 
+	proto_nodelist_index.pack, proto_nodelist_index.unpack
+)
+ffi.metatype('luact_gossip_proto_nodelist_t', proto_nodelist_mt)
+
+
 -- module functions
 local sys_cache = {}
 local function alloc_sys_packet()
@@ -115,18 +161,6 @@ local function alloc_user_packet()
 	else
 		return memory.alloc_typed('luact_gossip_proto_user_t')
 	end
-end
-function _M.new_join(node)
-	local p = alloc_sys_packet()
-	p.type = LUACT_GOSSIP_PROTO_JOIN
-	p:set_node(node)
-	return p
-end
-function _M.new_leave(node)
-	local p = alloc_sys_packet()
-	p.type = LUACT_GOSSIP_PROTO_LEAVE
-	p:set_node(node)
-	return p
 end
 function _M.new_change(node)
 	local p = alloc_sys_packet()
@@ -150,6 +184,9 @@ function _M.destroy(p)
 end
 function _M.from_ptr(p)
 	return ffi.cast(_M[p[0]], p)
+end
+function _M.new_nodelist(size)
+	return proto_nodelist_mt.alloc(size)
 end
 
 return _M

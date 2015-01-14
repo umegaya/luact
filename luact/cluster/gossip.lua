@@ -11,18 +11,21 @@ local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
 local event = require 'pulpo.event'
+local tentacle = require 'pulpo.tentacle'
 
 local nodelist = require 'luact.cluster.gossip.nodelist'
 local queue = require 'luact.cluster.gossip.queue'
 local protocol = require 'luact.cluster.gossip.protocol'
 
 local _M = {}
+local gossip_map = {}
 
 
 -- cdefs
 ffi.cdef [[
 typedef struct luact_gossip {
 	pulpo_io_t *udp;
+	luact_gossip_send_queue_t queue;
 	bool enable;
 } luact_gossip_t;
 ]]
@@ -33,13 +36,15 @@ local gossip_index = {}
 local gossip_mt = {
 	__index = gossip_index 
 }
-function gossip_index:init(port)
+function gossip_index:init(port, queue_size, mtu)
 	self.udp = pulpo.evloop.io.udp.listen('0.0.0.0:'..port)
 	self.enable = false
+	self.queue:init(queue_size, mtu)
 end
 function gossip_index:fin(mship)
 	self:leave(mship)
 	self.udp:close()
+	self.queue:fin()
 	memory.free(self)
 end
 function gossip_index:start_reader(mship)
@@ -58,16 +63,19 @@ function gossip_index:start(mship)
 	return tentacle(self.run, self, mship)
 end
 function gossip_index:run(mship)
-	local ev, opts, cooldown, n = mship.event, mship.opts, 1.0
-	repeat
-		n = self:join(mship)
+	local ev, opts, cooldown = mship.event, mship.opts, 1.0
+	while true do
+		if self:join(mship) > 0 then
+			break
+		end
 		clock.sleep(cooldown)
 		cooldown = cooldown * 2
-		if cooldown > startup_timeout then
+		if cooldown > opts.startup_timeout then
 			ev:emit('error', exception.new('timeout', 'gossip start up', startup_timeout))
 			return
 		end
-	until n > 0
+	end
+	logger.info('start periodic task')
 	-- start periodic (sub) task
 	table.insert(mship.threads, clock.timer(opts.probe_interval, self.probe, self, mship))
 	table.insert(mship.threads, clock.timer(opts.exchange_interval, self.exchange, self, mship))
@@ -82,6 +90,9 @@ function gossip_index:run(mship)
 		self:gossip(mship)
 		mship:check_suspicious_nodes()
 	end
+end
+function gossip_index:broadcast(buf)
+	self.queue:push(buf)
 end
 function gossip_index:receive(mship, addr, payload, plen)
 	-- TODO : for WAN gossip, we need to care about endian
@@ -122,7 +133,7 @@ function gossip_index:probe(mship)
 		if 'end' ~= event.wait(function (tp, obj, ok)
 			if tp == 'end' and ok then
 				return true
-			else tp == 'read' then
+			elseif tp == 'read' then
 				return true
 			end
 		end, clock.alarm(mship.opts.probe_timeout), unpack(events)) then
@@ -139,16 +150,16 @@ function gossip_index:join(mship)
 		if ok then
 			n_join = n_join + 1
 		else
-			logger.error('exchange data with', a, 'fails', r)
+			logger.error('exchange data with', node.addr, 'fails', r)
 		end
 	end
 	return n_join
 end
 function gossip_index:leave(mship, timeout)
 	local me = mship.nodes:self()
-	logger.info('gossip', 'node', 'join', me:address())
+	logger.info('gossip', 'node', 'leave', me:address())
 	if me:set_state(nodelist.dead) then
-		mship:sys_broadcast(protocol.new_state_change(me))
+		self:broadcast(protocol.new_state_change(me))
 		local left = timeout or mship.opts.shutdown_timeout
 		while left > 0 do
 			local start = clock.get()
@@ -169,20 +180,21 @@ function gossip_index:exchange(mship)
 	self:exchange_with(n, mship)
 end
 function gossip_index:exchange_with(node, mship)
-	local ok, peer_node, actor
+	local ok, peer_nodes, actor
 	local retry = 0
 ::RESTART::
 	actor = node.actor
-	ok, peer_node, len = pcall(actor.push_and_pull, actor, mship.nodes)
+	ok, peer_nodes = pcall(actor.push_and_pull, actor, mship.nodes:pack())
 	if not ok then
-		if retry < 3 and r:is('actor_temp_fail') then
+		if retry < 3 and peer_nodes:is('actor_temp_fail') then
 			retry = retry + 1
 			clock.sleep(retry * 0.5)
 			goto RESTART
 		end
+		error(peer_nodes)
 	end
-	for i=1,len do
-		local nd = peer_node[i - 1]
+	for i=0,tonumber(peer_nodes.used)-1 do
+		local nd = peer_nodes.nodes[i]
 		mship:add_node(nd)
 	end
 end
@@ -198,18 +210,24 @@ function membership_index:__actor_destroy__()
 	_M.destroy(self)
 end
 function membership_index:start()
+	-- add self
+	self.nodes:add_self()
 	-- add initial node
 	for _, node in ipairs(self.opts) do
+		logger.info('gossip', 'add initial node', node)
 		self.nodes:add_by_hostname(node)
 	end
 	table.insert(self.threads, self.gossip:start(self))
 end
 function membership_index:push_and_pull(nodes)
-	local new, node
-	for _,nd in ipairs(nodes) do
-		self:add_node(nd)
+	-- nodes : luact_gossip_proto_nodelist_t
+	if nodes.used > 0 then
+		for i=0,tonumber(nodes.used)-1 do
+			local nd = nodes.nodes[i]
+			self:add_node(nd)
+		end
 	end
-	return self.nodes, #self.nodes -- has custom serializer
+	return self.nodes:pack()
 end
 function membership_index:ping()
 	return true
@@ -217,13 +235,8 @@ end
 function membership_index:indirect_ping(redirect_to)
 	return redirect_to:ping()
 end
--- using system broadcast message
-function membership_index:sys_broadcast(buf, len)
-	self.queue:push(buf)
-end
--- user defined broadcast message
 function membership_index:broadcast(buf, len)
-	self.queue:push(protocol.new_user_defined(buf, len))
+	self.gossip:broadcast(protocol.new_user_defined(buf, len))
 end
 function membership_index:leave(timeout)
 	self.leave_start = true
@@ -263,7 +276,7 @@ function membership_index:alive(nodedata, bootstrap)
 	-- store this node in our node map.
 	if not n then
 		-- Add to map (and swap with random element)
-		n = self.nodes:add(node, self)
+		n = self.nodes:add_by_nodedata(nodedata, self)
 		newly_added = true
 	-- ignore if the version number is older, and this is not about us
 	elseif nodedata.version <= n.version and (not is_my_node) then
@@ -295,7 +308,7 @@ function membership_index:alive(nodedata, bootstrap)
 			return
 		end
 		n.version = nodedata.version + 1
-		self:sys_broadcast(protocol.new_state_change(n))
+		self.gossip:broadcast(protocol.new_state_change(n))
 		logger.warn('gossip', 'memberlist', 'Refuting an alive message')
 		return
 	else
@@ -309,7 +322,7 @@ function membership_index:alive(nodedata, bootstrap)
 	elseif changed then
 		self:emit('change', n)
 	end
-	self:sys_broadcast(protocol.new_state_change(n))
+	self.gossip:broadcast(protocol.new_state_change(n))
 end
 function membership_index:suspect(nodedata)
 	local n = self.nodes:find_by_nodedata(nodedata)
@@ -324,7 +337,7 @@ function membership_index:suspect(nodedata)
 	-- If this is us we need to refute, otherwise re-broadcast
 	if is_my_node then
 		n.version = nodedata.version + 1
-		self:sys_broadcast(protocol.new_state_change(n))
+		self.gossip:broadcast(protocol.new_state_change(n))
 		logger.warn('gossip', 'memberlist', ("Refuting a suspect message (from: %s)"):format(n))
 		return
 	end
@@ -333,7 +346,7 @@ function membership_index:suspect(nodedata)
 	if n:set_state(nodelist.suspect) then
 		self:emit('change', n)
 	end
-	self:sys_broadcast(protocol.new_state_change(n))
+	self.gossip:broadcast(protocol.new_state_change(n))
 	-- add to suspecion check.
 	table.insert(self.suspicous_nodes, n)
 end
@@ -350,7 +363,7 @@ function membership_index:dead(node)
 	-- If this is us we need to refute, otherwise re-broadcast
 	if is_my_node then
 		n.version = nodedata.version + 1
-		self:sys_broadcast(protocol.new_state_change(n))
+		self.gossip:broadcast(protocol.new_state_change(n))
 		logger.warn('gossip', 'memberlist', ("Refuting a dead message (from: %s)"):format(n))
 		return
 	end
@@ -359,7 +372,7 @@ function membership_index:dead(node)
 	if n:set_state(nodelist.dead) then
 		self:emit('leave', n)
 	end
-	self:sys_broadcast(protocol.new_state_change(n))
+	self.gossip:broadcast(protocol.new_state_change(n))
 	self.nodes:remove(n)
 end
 function membership_index:check_suspicious_nodes()
@@ -386,7 +399,7 @@ end
 
 -- create gossip service mshipen on *port*
 local default = {
-	startup_timeout = 60,
+	startup_timeout = 10,
 	shutdown_timeout = 10,
 	
 	gossip_interval = 0.2,
@@ -405,35 +418,58 @@ local default = {
 	mtu = 1024,
 
 	initial_send_queue_size = 4096,
+	initial_nodelist_buffer = 256,
 }
 local function create(port, opts, rv)
 	local m = {
-		nodes = nodelist.new(port), 
+		nodes = nodelist.new(port, protocol.new_nodelist(opts.initial_nodelist_buffer)), 
 		suspicous_nodes = {}, -- check timeout
 		threads = {}, 
-		queue = queue.new(opts.initial_send_queue_size, opts.mtu),
-		opts = util.merge_table(default, opts or {}),
+		opts = opts,
 		delegate = opts.delegate,
 		event = event.new(),
 	}
 	local g = memory.alloc_typed('luact_gossip_t')
-	g:init(port)
+	g:init(port, opts.initial_send_queue_size, opts.mtu)
 	m.gossip = g
 	rv.event = m.event
 	return setmetatable(m, membership_mt)
 end
+_M.create_ev = event.new()
 function _M.new(port, opts)
 	local rv = {}
-	local a = luact.supervise(create, port, opts, rv)
-	return a, rv.event
+	local ent = gossip_map[port]
+	local port_num
+	if not ent then
+		if ent == nil then
+			gossip_map[port] = false
+			opts = util.merge_table(default, opts or {})
+			local a = luact.supervise(create, opts.supervise_options, port, opts, rv)
+			ent = {a, rv.event}
+			gossip_map[port] = ent
+			a:start() -- this refers this gossip object, so after entry to map, call start().
+			_M.create_ev:emit('create', port, gossip_map[port])
+		else
+			while true do 
+				port_num, ent = select(3, event.join(clock.alarm(5.0), _M.create_ev))
+				if not port then
+					exception.raise('gossip', 'object creation timeout')
+				end
+				if port_num == port then
+					break
+				end
+			end
+		end
+	end
+	return ent[1]
 end
 function _M.destroy(m)
 	for _, t in ipairs(m.threads) do
 		tentacle.cancel(t)
 	end
 	nodelist.destroy(m.nodes)
-	queue.destroy(m.queue)
 	m.gossip:fin()
+	gossip_map[m.nodes.port] = nil
 end
 
 return _M

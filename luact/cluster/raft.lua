@@ -436,10 +436,10 @@ _M.default_opts = default_opts
 _M.create_ev = event.new()
 function _M.new(id, fsm_factory, opts, ...)
 	local rft = raftmap[id]
-	opts = util.merge_table(_M.default_opts, opts or {})
 	if not rft then
 		if rft == nil then
 			raftmap[id] = false
+			opts = util.merge_table(_M.default_opts, opts or {})
 			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
 			raftmap[id] = rft
 			rft:start()

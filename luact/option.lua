@@ -22,6 +22,8 @@ return {
 	},
 	gossiper = {
 		kind = "gossip",
+		-- config = {
+		-- },
 	},
 	conn = {
 		internal_proto = "tcp+serpent",

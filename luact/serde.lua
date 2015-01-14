@@ -175,6 +175,12 @@ function b2s_conv_index:escape(obj, no_root)
 	end
 end
 function b2s_conv_index:unescape_cdata(src, tp)
+	if _M.DEBUG then
+		print('unescape_cdata---------------------------------')
+		for k,v in pairs(tp) do
+			print('unescape_cdata', k, v)
+		end
+	end
 	if tp.name == 'int' then
 		if tp.unsigned then
 			return self:ptr2unsigned(src)
