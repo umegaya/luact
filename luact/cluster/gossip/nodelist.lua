@@ -158,7 +158,7 @@ function nodelist_index:add_self()
 end
 function nodelist_index:add_by_hostname(hostname, thread_id)
 	local n = self:create_node(socket.numeric_ipv4_addr_by_host(hostname), thread_id)
-	return self:add(n)	
+	return self:add(n)
 end
 function nodelist_index:self()
 	return self.me

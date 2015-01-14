@@ -64,11 +64,12 @@ function proto_sys_index:set_node(n)
 	self.protover = n.protover
 end
 function proto_sys_index:length()
-	return ffi.sizeof('luact_gossip_proto_sys')
+	return ffi.sizeof('luact_gossip_proto_sys_t')
 end
 function proto_sys_index:copy_to(iovlist)
 	iovlist = iovlist:reserve(1)
 	iovlist:push(self, self:length())
+	return iovlist
 end
 function proto_sys_index:try_invalidate(packet)
 	if packet.type ~= self.type then
@@ -88,12 +89,14 @@ local proto_user_mt = {
 	__index = proto_user_index
 }
 function proto_user_index:length()
+	-- print(self, ffi.string(self.buf_p))
 	return ffi.sizeof('luact_gossip_proto_user_t') - ffi.sizeof('char*') + self.len
 end
-function proto_sys_index:copy_to(iovlist)
+function proto_user_index:copy_to(iovlist)
 	iovlist = iovlist:reserve(2)
-	iovlist:push(self, self:length() - self.len)
+	iovlist:push(self, ffi.sizeof('luact_gossip_proto_user_t'))
 	iovlist:push(self.buf_p, self.len)
+	return iovlist
 end
 function proto_user_index:try_invalidate(packet)
 	return false

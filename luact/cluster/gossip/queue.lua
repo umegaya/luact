@@ -39,6 +39,17 @@ typedef struct luact_gossip_send_queue {
 ]]
 
 
+-- transfer element
+local transfer_element_index = {}
+local transfer_element_mt = {
+	__index = transfer_element_index
+}
+function transfer_element_index:dump(tag)
+	print(tag, self, self.packet)
+end
+ffi.metatype('luact_gossip_transter_element_t', transfer_element_mt)
+
+
 -- iov buffer
 local iov_buffer_index = {}
 local iov_buffer_mt = {
@@ -61,26 +72,29 @@ end
 function iov_buffer_index:fin()
 	memory.free(self)
 end
-function iov_buffer_index:reserve(size)
-	local required = (self.used + size)
+function iov_buffer_index:reserve_common(required, type)
 	if required <= self.size then
 		return self
 	end
 	local newsize = self.size
-	while newsize >= required do
+	while newsize < required do
 		newsize = newsize * 2
 	end
-	local newp = memory.realloc(self, newsize)
+	local newp = memory.realloc_typed(type, self, newsize)
 	if newp == ffi.NULL then
 		exception.raise('fatal', 'fail to malloc', newsize)
 	end
-	self = ffi.cast('luact_gossip_iov_buffer_t*', newp)
+	-- print('reserve', self, newp, self.size, newsize, required)
 	self.size = newsize
 	return self
+end
+function iov_buffer_index:reserve(size)
+	return self:reserve_common(self.used + size, 'luact_gossip_iov_buffer_t')
 end
 function iov_buffer_index:push(p, l)
 	self.list[self.used].iov_base = p
 	self.list[self.used].iov_len = l
+	-- print(self.used, self.list[self.used].iov_len)
 	self.used = self.used + 1
 end
 ffi.metatype('luact_gossip_iov_buffer_t', iov_buffer_mt)
@@ -102,32 +116,41 @@ local element_buffer_mt = {
 		return p
 	end,
 }
-function iov_buffer_index:fin()
+function element_buffer_index:fin()
 	for i=0, self.used-1 do
 		protocol.destroy(self.list[i].packet)
 	end
 	memory.free(self)
 end
+function element_buffer_index:reserve(size)
+	return self:reserve_common(self.used + size, 'luact_gossip_element_buffer_t')
+end
 function element_buffer_index:push(retransmit, buf)
 	for i=self.used-1,0,-1 do
-		if self.list[i]:try_invalidate(buf) then
+		if protocol.from_ptr(self.list[i].packet):try_invalidate(buf) then
 			self:remove(i)
 		end
 	end
 	self.list[self.used].retransmit = retransmit
-	self.list[self.used].packet = buf
+	self.list[self.used].packet = ffi.cast('char *', buf)
 	self.used = self.used + 1
 end
 function element_buffer_index:remove(idx)
-	local removed = self.list[idx]
+	protocol.destroy(self.list[idx].packet)
 	memory.move(self.list + idx, self.list + idx + 1, self.used - idx - 1)
-	protocol.destroy(removed.packet)
+	self.used = self.used - 1
 end
+local swap_work = memory.alloc_typed('luact_gossip_transter_element_t')
 function element_buffer_index:sort()
 	-- order by retransmit accending
 	if self.used > 1 then
 		util.qsort(self.list, 0, self.used - 1, function (a, b) 
 			return a.retransmit < b.retransmit
+		end, function (x, i, j)
+			-- for cdata, x[i], x[j] = x[j], x[i] is not worked as normal lua code
+			ffi.copy(swap_work, x + i, ffi.sizeof('luact_gossip_transter_element_t'))
+			ffi.copy(x + i, x + j, ffi.sizeof('luact_gossip_transter_element_t'))
+			ffi.copy(x + j, swap_work, ffi.sizeof('luact_gossip_transter_element_t'))
 		end)
 	end
 end
@@ -148,17 +171,20 @@ function send_queue_index:fin()
 	self.elembuf:fin()
 end
 function send_queue_index:push(mship, buf)
-	self.elembuf:reserve(1)
+	self.elembuf = self.elembuf:reserve(1)
 	self.elembuf:push(mship:retransmit(), buf)
+end
+function send_queue_index:used()
+	return self.elembuf.used
 end
 function send_queue_index:pop(mtu)
 	local byte_used = 0
 	self.iovbuf.used = 0
 	for i=self.elembuf.used-1,0,-1 do
 		local e = self.elembuf.list[i]
-		local len = e:length()
+		local len = protocol.from_ptr(e.packet):length()
 		if (byte_used + len) < mtu then
-			protocol.from_ptr(e.p):copy_to(self.iovbuf)
+			self.iovbuf = protocol.from_ptr(e.packet):copy_to(self.iovbuf)
 			byte_used = byte_used + len
 			e.retransmit = e.retransmit - 1
 			if e.retransmit <= 0 then
