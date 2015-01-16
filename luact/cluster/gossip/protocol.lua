@@ -25,8 +25,10 @@ typedef struct luact_gossip_proto_sys {
 	uint8_t type, state;
 	uint16_t thread_id;
 	uint32_t machine_id;
-	uint32_t version;
+	uint32_t clock;
 	uint16_t protover;
+	uint8_t user_state_len, padd;
+	char user_state[0];
 } luact_gossip_proto_sys_t;
 
 typedef struct luact_gossip_proto_nodelist {
@@ -37,8 +39,9 @@ typedef struct luact_gossip_proto_nodelist {
 typedef struct luact_gossip_proto_user {
 	uint8_t type, padd;
 	uint16_t len;
+	pulpo_lamport_clock_t clock;
 	union {
-		char *buf_p; //when send (hack!)
+		char *buf_p; //when send
 		char buf[1]; //when recv
 	};
 } luact_gossip_proto_user_t;
@@ -56,19 +59,28 @@ local proto_sys_index = {}
 local proto_sys_mt = {
 	__index = proto_sys_index
 }
-function proto_sys_index:set_node(n)
+function proto_sys_index:set_node(n, with_user_state)
 	self.machine_id = n.machine_id
 	self.thread_id = n.thread_id
 	self.state = n.state
-	self.version = n.version
+	self.clock = n.clock
 	self.protover = n.protover
+	if with_user_state and (n.user_state_len > 0) then
+		self.user_state_len = n.user_state_len
+		ffi.copy(self.user_state, n.user_state, n.user_state_len)
+	else
+		self.user_state_len = 0
+	end
 end
 function proto_sys_index:length()
-	return ffi.sizeof('luact_gossip_proto_sys_t')
+	return ffi.sizeof('luact_gossip_proto_sys_t') + self.user_state_len
 end
 function proto_sys_index:copy_to(iovlist)
 	iovlist = iovlist:reserve(1)
-	iovlist:push(self, self:length())
+	iovlist:push(self, ffi.sizeof('luact_gossip_proto_sys_t'))
+	if self.user_state_len > 0 then
+		iovlist:push(self.state_p, self.user_state_len)
+	end
 	return iovlist
 end
 function proto_sys_index:try_invalidate(packet)
@@ -79,6 +91,14 @@ function proto_sys_index:try_invalidate(packet)
 end
 function proto_sys_index:handle(mship)
 	mship:handle_node_change(self)
+end
+function proto_sys_index:is_this_node()
+	return self.machine_id == uuid.node_address and self.thread_id == pulpo.thread_id
+end
+function proto_sys_index:finished(mship)
+	if self:is_this_node() and (self.state == nodelist.dead) then
+		mship:set_leave_sent()
+	end
 end
 ffi.metatype('luact_gossip_proto_sys_t', proto_sys_mt)
 
@@ -94,7 +114,7 @@ function proto_user_index:length()
 end
 function proto_user_index:copy_to(iovlist)
 	iovlist = iovlist:reserve(2)
-	iovlist:push(self, ffi.sizeof('luact_gossip_proto_user_t'))
+	iovlist:push(self, ffi.sizeof('luact_gossip_proto_user_t') - ffi.sizeof('char*'))
 	iovlist:push(self.buf_p, self.len)
 	return iovlist
 end
@@ -102,7 +122,9 @@ function proto_user_index:try_invalidate(packet)
 	return false
 end
 function proto_user_index:handle(mship)
-	mship:emit('user', self.buf, self.len)
+	mship:handle_user_message(self)
+end
+function proto_user_index:finished(mship)
 end
 ffi.metatype('luact_gossip_proto_user_t', proto_user_mt)
 
@@ -113,7 +135,7 @@ local proto_nodelist_mt
 proto_nodelist_mt = {
 	__index = proto_nodelist_index,
 	size = function (sz)
-		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz * ffi.sizeof('luact_gossip_proto_sys_t')
+		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz * (ffi.sizeof('luact_gossip_proto_sys_t') + nodelist.MAX_USER_STATE_SIZE)
 	end,
 	alloc = function (size)
 		local p = ffi.cast('luact_gossip_proto_nodelist_t*', memory.alloc(proto_nodelist_mt.size(size)))
@@ -136,6 +158,7 @@ function proto_nodelist_index:reserve(size)
 	return self
 end
 function proto_nodelist_index.pack(arg)
+	--logger.info('nodelistpack:', arg.used, proto_nodelist_mt.size(arg.used))
 	return ffi.string(arg, proto_nodelist_mt.size(arg.used))
 end
 function proto_nodelist_index.unpack(arg)
@@ -165,24 +188,27 @@ local function alloc_user_packet()
 		return memory.alloc_typed('luact_gossip_proto_user_t')
 	end
 end
-function _M.new_change(node)
+function _M.new_change(node, with_user_state)
 	local p = alloc_sys_packet()
 	p.type = LUACT_GOSSIP_PROTO_CHANGE
-	p:set_node(node)
+	p:set_node(node, with_user_state)
 	return p	
 end
-function _M.new_user(buf, len)
+function _M.new_user(buf, len, clock)
 	local p = alloc_user_packet()
 	p.type = LUACT_GOSSIP_PROTO_USER
 	p.len = len
 	p.buf_p = buf
+	p.clock = clock
 	return p
 end
 function _M.destroy(p)
-	if ffi.cast('uint8_t *', p)[0] == LUACT_GOSSIP_PROTO_USER then
-		table.insert(user_cache, p)
+	p = _M.from_ptr(p)
+	if p.type == LUACT_GOSSIP_PROTO_USER then
+		memory.free(p.buf_p)
+		table.insert(user_cache, ffi.cast('luact_gossip_proto_user_t*', p))
 	else
-		table.insert(sys_cache, p)
+		table.insert(sys_cache, ffi.cast('luact_gossip_proto_sys_t*', p))
 	end
 end
 function _M.from_ptr(p)

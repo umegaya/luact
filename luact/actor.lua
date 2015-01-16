@@ -7,6 +7,7 @@ local conn = require 'luact.conn'
 local clock = require 'luact.clock'
 
 local util = require 'pulpo.util'
+local pulpo = require 'pulpo.init'
 
 local _M = {}
 _M.EVENT_DESTROY = "destroy"
@@ -186,7 +187,7 @@ local root_actor_id
 function _M.initialize(opts)
 	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
 	vid.initialize(vid_metatable)
-	root_actor_id = uuid.first()
+	root_actor_id = uuid.first(uuid.node_address, pulpo.thread_id, true)
 end
 
 --[[
@@ -201,7 +202,8 @@ function _M.new_root(ctor, ...)
 	if bodymap[s] then
 		return actormap[bodymap[s]]
 	end
-	return _M.new_link_with_opts(nil, { uuid = root_actor_id }, ctor, ...)
+	local opts = { uuid = root_actor_id }
+	return _M.new_link_with_opts(nil, opts, ctor, ...)
 end
 function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
@@ -287,7 +289,7 @@ local function destroy_by_serial(s, reason)
 		if b.__actor_destroy__ then
 			b:__actor_destroy__(reason)
 		end
-		logger.warn('actor destroyed by', reason or "system")
+		logger.warn('actor destroyed by', reason or "system", debug.traceback())
 	end
 end
 local function safe_destroy_by_serial(s, reason)

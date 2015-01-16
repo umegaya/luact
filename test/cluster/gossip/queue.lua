@@ -14,7 +14,11 @@ tools.start_luact(1, nil, function ()
 	local mship = {
 		retransmit = function (self)
 			return n_retransmit
-		end
+		end,
+		handle_user_message = function ()
+		end,
+		handle_node_change = function ()
+		end,
 	}
 
 	local l = nodelist.new(8888)
@@ -28,8 +32,8 @@ tools.start_luact(1, nil, function ()
 	assert(q:used() == 1, "push for same node should not be entried twice because of try_invalidate")
 	local pop_count = 0
 	while true do
-		local vec, len = q:pop(1024)
-		if len <= 0 then
+		local vec, len = q:pop(mship, 1024)
+		if not len then
 			assert(pop_count == 5, "because the element in queue has retransmit == 5, so should be popped 5 fimes")
 			break
 		end
@@ -47,7 +51,7 @@ tools.start_luact(1, nil, function ()
 	for i=1,1000 do
 		bufs[i] = 'queue element '..i
 		local buf_p = memory.strdup(bufs[i])
-		local u = protocol.new_user(buf_p, #bufs[i])
+		local u = protocol.new_user(buf_p, #bufs[i], 0)
 		total = total + u:length()
 		q:push(mship, u)
 	end
@@ -58,8 +62,8 @@ tools.start_luact(1, nil, function ()
 	local first = true
 	local appeared = {}
 	while true do
-		local vec, len = q:pop(1024)
-		if len <= 0 then
+		local vec, len = q:pop(mship, 1024)
+		if not len then
 			break
 		end
 		for i=0,len-1,2 do
@@ -71,7 +75,7 @@ tools.start_luact(1, nil, function ()
 			if first then
 				assert(not appeared[cnt], "same packet should not appear twice")
 				appeared[cnt] = true
-				-- print('['..ffi.string(vec[i + 1].iov_base)..']', '['..bufs[cnt]..']')
+				-- print(vec[i+1].iov_base, '['..ffi.string(vec[i + 1].iov_base)..']', '['..bufs[cnt]..']')
 				assert(ffi.string(vec[i + 1].iov_base) == bufs[cnt], "packet data should be correct")
 				-- print('iovlen', vec[i + 1].iov_len, bufs[cnt], #bufs[cnt], i + 1)
 				assert(vec[i + 1].iov_len == #bufs[cnt], "packet data should be correct")

@@ -27,7 +27,7 @@ return {
 	},
 	conn = {
 		internal_proto = "tcp+serpent",
-		internal_port = "8008", 
+		internal_port = 8008, 
 		use_connection_cache = false,
 	}, 
 	actor = {

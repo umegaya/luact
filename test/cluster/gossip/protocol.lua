@@ -14,7 +14,7 @@ tools.start_luact(1, nil, function ()
 	
 	local buf = 'user broadcat'
 	local buf_p = memory.strdup(buf)
-	local u = ffi.cast('void *', protocol.new_user(buf_p, #buf))
+	local u = ffi.cast('void *', protocol.new_user(buf_p, #buf, 0))
 	u = protocol.from_ptr(u)
 	assert(ffi.typeof(u) == ffi.typeof('struct luact_gossip_proto_user *'), 'protocol module should recognize type of byte array correctly')
 	assert(ffi.string(u.buf_p) == buf, 'packet data should set correctly')

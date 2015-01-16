@@ -429,6 +429,7 @@ local function create(id, fsm_factory, opts, ...)
 		timeout_limit = 0,
 	}, raft_mt)
 	rft.state.actor_body = rft
+	rft:start()
 	return rft
 end
 -- create new raft state machine
@@ -442,14 +443,13 @@ function _M.new(id, fsm_factory, opts, ...)
 			opts = util.merge_table(_M.default_opts, opts or {})
 			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
 			raftmap[id] = rft
-			rft:start()
 			_M.create_ev:emit('create', id, rft)
 		else
 			local create_id
 			while true do
-				create_id, rft = select(3, event.join(clock.alarm(5.0), _M.create_ev))
+				create_id, rft = select(3, event.wait(nil, clock.alarm(5.0), _M.create_ev))
 				if not create_id then
-					exception.raise('raft', 'object creation timeout')
+					exception.raise('actor_timeout', 'raft', 'object creation timeout', id)
 				end
 				if id == create_id then
 					break

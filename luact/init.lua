@@ -89,6 +89,10 @@ local function init_worker_and_global_ref(opts)
 	_G.luact = require 'luact.init'
 	_G.luact.initialize(opts)
 end
+local function get_opts(opts)
+	opts = util.merge_table(require 'luact.option', opts or {})
+	return util.merge_table(opts, optparse(_G.arg, opts_defs), true)
+end
 
 
 -- module function 
@@ -104,8 +108,7 @@ function _M.stop()
 	pulpo.stop()
 end
 function _M.initialize(opts)
-	opts = util.merge_table(require 'luact.option', opts or {})
-	util.merge_table(opts, optparse(_G.arg, opts_defs), true)
+	opts = get_opts(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules
@@ -123,6 +126,11 @@ function _M.initialize(opts)
 		local gossiper_opts = options.gosipper or {}
 		local arbiter_module = require('luact.cluster.'..(arbiter_opts.kind or 'raft'))
 		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
+		gossiper_opts.config = gossiper_opts.config or {}
+		if pulpo.thread_id ~= 1 then
+			table.insert(gossiper_opts.config, actor.root_of(nil, 1, true))
+			gossiper_opts.config.local_mode = true
+		end
 		_M.root = {
 			new = actor.new,
 			destroy = actor.destroy,
@@ -135,7 +143,9 @@ function _M.initialize(opts)
 					or arbiter_module.find(group)
 			end,
 			gossiper = function (port, opts)
-				return gossiper_module.new(port or options.conn.internal_port, opts or gossiper_opts.config)
+				local g = gossiper_module.new(port or options.conn.internal_port, opts or gossiper_opts.config)
+				-- logger.info('g = ', g)
+				return g
 			end,
 			stat = function ()
 				-- TODO : add default stats functions and refine customize way.

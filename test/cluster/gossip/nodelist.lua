@@ -38,7 +38,7 @@ tools.start_luact(1, nil, function ()
 		assert(t <= 5 and t >= 1)
 		if t ~= 1 then
 			t = t - 1
-			assert(tostring(nd.addr) == ('%d.%d.%d.%d:8008'):format(t,t,t,t), "for dummy node, correct value should be assigned")
+			assert(tostring(nd.addr) == ('%d.%d.%d.%d:%d'):format(t,t,t,t,t+1+8008), "for dummy node, correct value should be assigned")
 		end
 	end
 end)

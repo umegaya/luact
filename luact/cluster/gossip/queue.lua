@@ -137,7 +137,8 @@ function element_buffer_index:push(retransmit, buf)
 end
 function element_buffer_index:remove(idx)
 	protocol.destroy(self.list[idx].packet)
-	memory.move(self.list + idx, self.list + idx + 1, self.used - idx - 1)
+	memory.move(self.list + idx, self.list + idx + 1, 
+		(self.used - idx - 1) * ffi.sizeof('luact_gossip_transter_element_t'))
 	self.used = self.used - 1
 end
 local swap_work = memory.alloc_typed('luact_gossip_transter_element_t')
@@ -177,27 +178,30 @@ end
 function send_queue_index:used()
 	return self.elembuf.used
 end
-function send_queue_index:pop(mtu)
+function send_queue_index:pop(mship, mtu)
 	local byte_used = 0
 	self.iovbuf.used = 0
 	for i=self.elembuf.used-1,0,-1 do
 		local e = self.elembuf.list[i]
-		local len = protocol.from_ptr(e.packet):length()
-		if (byte_used + len) < mtu then
-			self.iovbuf = protocol.from_ptr(e.packet):copy_to(self.iovbuf)
-			byte_used = byte_used + len
-			e.retransmit = e.retransmit - 1
-			if e.retransmit <= 0 then
-				self.elembuf:remove(i)
-			end
+		local pkt = protocol.from_ptr(e.packet)
+		if e.retransmit <= 0 then
+			pkt:finished(mship)
+			self.elembuf:remove(i)
 		else
-			break
+			local len = pkt:length()
+			if (byte_used + len) < mtu then
+				self.iovbuf = protocol.from_ptr(e.packet):copy_to(self.iovbuf)
+				byte_used = byte_used + len
+				e.retransmit = e.retransmit - 1
+			else
+				break
+			end
 		end
 	end
 	if self.iovbuf.used > 0 then
 		self.elembuf:sort()
+		return self.iovbuf.list, self.iovbuf.used
 	end
-	return self.iovbuf.list, self.iovbuf.used
 end
 ffi.metatype('luact_gossip_send_queue_t', send_queue_mt)
 
@@ -210,6 +214,7 @@ function _M.new(size, mtu)
 end
 function _M.destroy(p)
 	p:fin()
+	memory.free(p)
 end
 
 return _M
