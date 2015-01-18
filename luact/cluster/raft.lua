@@ -412,7 +412,7 @@ local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]
 end
 local function create(id, fsm_factory, opts, ...)
-	local fsm = fsm_factory(...)
+	local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
 	local dir = configure_workdir(id, opts)
 	local sr = configure_serde(opts)
 	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
@@ -422,11 +422,14 @@ local function create(id, fsm_factory, opts, ...)
 	local rft = setmetatable({
 		id = id,
 		state = state.new(fsm, wal, ss, opts), 
+		-- TODO : finalize store when this raft group no more assigned to this node.
+		store = store,
 		opts = opts,
 		alive = true,
 		timeout_limit = 0,
 	}, raft_mt)
 	rft.state.actor_body = rft
+	rft:start()
 	return rft
 end
 -- create new raft state machine
@@ -434,20 +437,19 @@ _M.default_opts = default_opts
 _M.create_ev = event.new()
 function _M.new(id, fsm_factory, opts, ...)
 	local rft = raftmap[id]
-	opts = util.merge_table(_M.default_opts, opts or {})
 	if not rft then
 		if rft == nil then
 			raftmap[id] = false
+			opts = util.merge_table(_M.default_opts, opts or {})
 			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
 			raftmap[id] = rft
-			rft:start()
 			_M.create_ev:emit('create', id, rft)
 		else
 			local create_id
 			while true do
-				create_id, rft = select(3, event.join(clock.alarm(5.0), _M.create_ev))
+				create_id, rft = select(3, event.wait(nil, clock.alarm(5.0), _M.create_ev))
 				if not create_id then
-					exception.raise('raft', 'object creation timeout')
+					exception.raise('actor_timeout', 'raft', 'object creation timeout', id)
 				end
 				if id == create_id then
 					break

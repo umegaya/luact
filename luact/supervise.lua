@@ -10,6 +10,7 @@ _M.opts = {
 	maxt = 5.0, maxr = 5, -- torelate 5 failure in 5.0 seconds
 	count = 1,
 	always = false, 
+	restart_pause = 0.1,
 }
 local opts_mt = { __index = _M.opts }
 
@@ -81,6 +82,7 @@ function supervisor_index:restart_child(died_actor_id)
 	if _M.DEBUG then logger.warn('restart_child result:', ok, r, self, #self.restarting) end
 	if not ok then
 		-- retry restart.
+		clock.sleep(self.opts.restart_pause)
 		actor.of(self):notify_restart_child(died_actor_id, reason)
 	else -- indicate restart success
 		actor._set_restart_result(died_actor_id, true)

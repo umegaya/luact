@@ -48,6 +48,7 @@ function rbuf_index:init()
 end
 function rbuf_index:reset()
 	self.used, self.hpos = 0, 0
+	self:reduce_malloc_size()
 end
 function rbuf_index:fin()
 	if self.buf ~= util.NULL then
@@ -163,6 +164,7 @@ function rbuf_index:dump(full)
 	end
 end
 function rbuf_index:shrink(sz)
+	-- TODO : in this timing, shrink malloc'ed size also, if it is too large.
 	if sz >= self.used then
 		self.used = 0
 	else
@@ -173,6 +175,17 @@ end
 function rbuf_index:shrink_by_hpos()
 	self:shrink(self.hpos)
 	self.hpos = 0
+	self:reduce_malloc_size()
+end
+_M.LARGE_ALLOCATION_THRESHOLD = 64 * 1024
+function rbuf_index:reduce_malloc_size()
+	if self.max >= _M.LARGE_ALLOCATION_THRESHOLD then
+		logger.notice('shrink rbuf', self.max)
+		local buf = memory.realloc(self.buf, math.max(self.used, INITIAL_BUFFER_SIZE))
+		if not buf then return end
+		self.buf = buf
+		self.max = INITIAL_BUFFER_SIZE
+	end
 end
 ffi.metatype('luact_rbuf_t', rbuf_mt)
 
@@ -263,7 +276,7 @@ function wbuf_index:swap()
 		-- calling wbuf_index:do_send from any thread, resumes this yield
 		self.last_cmd = WRITER_DEACTIVATE
 		self.io:deactivate_write()
-		-- yield is done after exiting swap() call, because it usually called inside mutex lock.
+		-- yield is done after exiting swap() call
 		return false
 	else
 		self.last_cmd = WRITER_NONE -- make next write append == false 

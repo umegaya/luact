@@ -89,6 +89,10 @@ local function init_worker_and_global_ref(opts)
 	_G.luact = require 'luact.init'
 	_G.luact.initialize(opts)
 end
+local function get_opts(opts)
+	opts = util.merge_table(require 'luact.option', opts or {})
+	return util.merge_table(opts, optparse(_G.arg, opts_defs), true)
+end
 
 
 -- module function 
@@ -104,8 +108,7 @@ function _M.stop()
 	pulpo.stop()
 end
 function _M.initialize(opts)
-	opts = util.merge_table(require 'luact.option', opts or {})
-	util.merge_table(opts, optparse(_G.arg, opts_defs), true)
+	opts = get_opts(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules
@@ -117,30 +120,33 @@ function _M.initialize(opts)
 	-- initialize listener of internal actor messaging 
 	listener.unprotected_listen(tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port))
 	-- external port should be declared at each startup routine.
-	-- because it is likely to open multiple listener port.
-
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
 		local arbiter_opts = options.arbiter or {}
-		local arbiter_module = (arbiter_opts ~= false and require('luact.cluster.'..(arbiter_opts.kind or 'raft')))
+		local gossiper_opts = options.gosipper or {}
+		local arbiter_module = require('luact.cluster.'..(arbiter_opts.kind or 'raft'))
+		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
+		gossiper_opts.config = gossiper_opts.config or {}
+		arbiter_opts.config = arbiter_opts.config or {}
+		if pulpo.thread_id ~= 1 then
+			table.insert(gossiper_opts.config, actor.root_of(nil, 1, true))
+			gossiper_opts.config.local_mode = true
+		end
 		_M.root = {
 			new = actor.new,
 			destroy = actor.destroy,
 			register = actor.register,
-			unregister = actor.unregister, 
+			unregister = actor.unregister,
 			["require"] = _M.require, 
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
-				if not arbiter_module then
-					exception.raise('invalid', 'config', 'this node not using arbiter')
-				end
-				if fsm_factory then 
-					return arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
-				else
-					return arbiter_module.find(group)
-				end
+				return fsm_factory and arbiter_module.new(group, fsm_factory, util.merge_table(arbiter_opts.config, opts or {}), ...)
+					or arbiter_module.find(group)
 			end,
-			stat = function (self)
+			gossiper = function (port, opts)
+				return gossiper_module.new(port or options.conn.internal_port, util.merge_table(gossiper_opts.config, opts or {}))
+			end,
+			stat = function ()
 				-- TODO : add default stats functions and refine customize way.
 				local ret = {}
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
@@ -166,6 +172,7 @@ function _M.kill(...)
 		act:__actor_event__(actor.EVENT_DESTROY)
 	end
 end
+_M.of = actor.of
 -- for calling from dockerfile. initialize cdef cache of ffiex 
 -- so that it can be run 
 function _M.init_cdef_cache()

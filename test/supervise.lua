@@ -42,6 +42,7 @@ luact.start({
 					break
 				end
 			else
+				print(r, est)
 				assert(r == est)
 				break
 			end

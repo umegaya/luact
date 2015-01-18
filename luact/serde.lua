@@ -133,18 +133,23 @@ function b2s_conv_index:escape_cdata(tmp, idx, arg)
 		end
 		return {name = name}
 	elseif refl.what == 'array' then
-		tmp[idx] = ffi.string(arg, refl.size)
+		tmp[idx] = ffi.string(arg, refl.size == 'none' and ffi.sizeof(arg) or refl.size)
 		return {name = 'array', tp = refl.element_type.name}
 	elseif refl.what == 'ptr' or refl.what == 'ref' then
 		local et = refl.element_type
-		local name = et.what.." "..et.name
-		if custom_pack[name] then
-			tmp[idx] = custom_pack[name](arg)
+		if et.name then -- struct/union
+			local name = et.what.." "..et.name
+			if custom_pack[name] then
+				tmp[idx] = custom_pack[name](arg)
+			else
+				tmp[idx] = ffi.string(arg, et.size)
+			end
+			-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
+			return {name = refl.what, tp = name}
 		else
-			tmp[idx] = ffi.string(arg, refl.element_type.size)
+			-- primitive type : CAUTION, ptr/ref is always treat as length 1
+			tmp[idx] = ffi.string(arg, et.size)
 		end
-		-- print('refl.name = ', refl.name, 'size = ', refl.element_type.size)
-		return {name = refl.what, tp = name}
 	end
 end
 function b2s_conv_index:escape(obj, no_root)
@@ -175,6 +180,12 @@ function b2s_conv_index:escape(obj, no_root)
 	end
 end
 function b2s_conv_index:unescape_cdata(src, tp)
+	if _M.DEBUG then
+		print('unescape_cdata---------------------------------')
+		for k,v in pairs(tp) do
+			print('unescape_cdata', k, v)
+		end
+	end
 	if tp.name == 'int' then
 		if tp.unsigned then
 			return self:ptr2unsigned(src)

@@ -230,17 +230,17 @@ function conn_index:destroy(reason)
 end
 function conn_index:machine_id()
 	assert(self:address_family() == AF_INET)
-	return self.io:addrinfo().addr4.sin_addr.s_addr
+	return self.io:address():as_machine_id()
 end
 function conn_index:address_family()
-	return self.io:addrinfo().addrp[0].sa_family
+	return self.io:address().p[0].sa_family
 end
 function conn_index:cmapkey()
 	local af = self:address_family()
 	if af == AF_INET then
 		return self:machine_id()
 	elseif af == AF_INET6 then
-		return socket.inet_namebyhost(self.io:addrinfo().addrp)
+		return socket.inet_namebyhost(self.io:address().p)
 	else
 		exception.raise('invalid', 'address', 'family', af)
 	end
@@ -290,6 +290,9 @@ local function strip_result(...)
 	return unpack(r, 2)	
 end
 local function common_dispatch(self, sent, id, t, ...)
+	if t.method == 'restart_child' then
+		logger.warn('restart_child', debug.traceback())
+	end
 	local r
 	t.id = nil -- release ownership of this table
 	if self.dead ~= 0 then exception.raise('invalid', 'dead connection', tostring(self)) end
@@ -481,7 +484,7 @@ function local_conn_index:new_local(thread_id, opts)
 	self.thread_id = thread_id
 	self.dead = 0
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
-	-- TODO : this uses too much fd (1 connection = 4 fd). should use unix domain socket?
+	-- TODO : this uses too much fd (1 inter thread connection = 4 fd). should use unix domain socket?
 	self.mine, self.yours = 
 		linda.new(make_channel_name(pulpo.thread_id, thread_id)),
 		linda.new(make_channel_name(thread_id, pulpo.thread_id))

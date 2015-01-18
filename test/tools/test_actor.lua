@@ -1,4 +1,5 @@
 local clock = require 'luact.clock'
+local exception = require 'pulpo.exception'
 return {
 	num = 1,
 	fuga = function (t, add)
@@ -6,7 +7,7 @@ return {
 	end,
 	inc_num = function (t, err_at)
 		if t.num == err_at then
-			error('random error simulation')
+			exception.raise('actor_error', 'random error simulation:'..t.num)
 		end
 		t.num = t.num + 1
 		return t.num
