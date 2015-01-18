@@ -83,16 +83,18 @@ function node_index:filter()
 	return self:is_alive() and (not self:is_this_node())
 end
 function node_index:set_state(st, nodedata)
+	local changed 
 	if nodedata and (nodedata.user_state_len > 0) then
 		self.user_state_len = nodedata.user_state_len
 		ffi.copy(self.user_state, nodedata.user_state, nodedata.user_state_len)
+		changed = true
 	end
 	if self.state ~= st then
 		self.state = st
 		self.last_change = clock.get()
 		return true
 	end
-	return false
+	return changed
 end
 function node_index:is_suspicious() 
 	return self.state == _M.suspect
@@ -118,6 +120,9 @@ end
 function node_index:has_same_nodedata(nodedata)
 	return self.machine_id == nodedata.machine_id and self.thread_id == nodedata.thread_id	
 end
+function node_index:length(with_user_state) 
+	return ffi.sizeof('luact_gossip_node_t') + (with_user_state and self.user_state_len or 0)
+end
 function node_index:update_user_state(user_state, user_state_len)
 	self.user_state_len = user_state_len
 	ffi.copy(self.user_state, user_state, user_state_len)
@@ -140,7 +145,6 @@ function nodelist_index:add(n)
 	if node then
 		return node
 	else
-		logger.warn('node is actualled added', n)
 		self.lookup[key] = n
 		table.insert(self, n)
 		-- Get a random offset and swap with last. This is important to ensure
@@ -195,13 +199,11 @@ end
 function nodelist_index:find_by_nodedata(nodedata)
 	return self.lookup[node_mt.make_key(nodedata.machine_id, nodedata.thread_id)]
 end	
+function nodelist_index:find_by_actor(a)
+	return self.lookup[node_mt.make_key(uuid.machine_id(a), uuid.thread_id(a))]
+end	
 function nodelist_index:pack(with_user_state)
-	-- TODO : faster way to pack this.
-	self.packet_buffer = self.packet_buffer:reserve(#self)
-	self.packet_buffer.used = #self
-	for i=1,#self do
-		self.packet_buffer.nodes[i - 1]:set_node(self[i], with_user_state)
-	end
+	self.packet_buffer = self.packet_buffer:copy(self, with_user_state)
 	return self.packet_buffer
 end
 

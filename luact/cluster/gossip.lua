@@ -133,7 +133,7 @@ function gossip_index:probe(mship)
 	local retry = 0
 	local n = mship.nodes:k_random(1)
 ::RESTART::
-	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.probe_timeout)
+	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.opts.probe_timeout)
 	if not (ok and r) then
 		if retry < 3 and r:is('actor_temporary_fail') then
 			retry = retry + 1
@@ -143,17 +143,19 @@ function gossip_index:probe(mship)
 		-- try indirect ping with using `indirect_checks` nodes
 		local ping_nodes = mship.nodes:k_random(mship.opts.indirect_checks)
 		local events = {}
-		for _, node in ping_nodes do
-			table.insert(events, node:gossipper():indirect_ping(n:gossiper()))
+		for _, node in ipairs(ping_nodes) do
+			table.insert(events, node:gossiper():async_timed_indirect_ping(mship.opts.probe_timeout, n:gossiper()))
 		end
-		if 'end' ~= event.wait(function (tp, obj, ok)
+		local r = event.wait(function (data)
+			local tp, _, ok = unpack(data)
 			if tp == 'end' and ok then
 				return true
 			elseif tp == 'read' then
 				return true
 			end
-		end, clock.alarm(mship.opts.probe_timeout), unpack(events)) then
-			mship:suspect(n)
+		end, clock.alarm(mship.opts.probe_timeout), unpack(events))
+		if 'end' ~= r then
+			mship:mark_suspect(n)
 		end -- even if success, this node does not regard this node as 'alive' (same as hashicorp/memberlist)
 	else
 		mship:alive(n)
@@ -166,6 +168,8 @@ function gossip_index:join(mship)
 			local ok, r = pcall(self.exchange_with, self, node:gossiper(), mship, true)
 			if ok then
 				n_join = n_join + 1
+			elseif not r.is then
+				logger.error('invalid response', tostring(r))
 			elseif not (r:is('actor_not_found') or r:is('actor_temporary_fail')) then
 				logger.error('exchange data with', node.addr, 'fails', r)
 			end
@@ -200,11 +204,11 @@ function gossip_index:exchange(mship)
 	local n = mship.nodes:k_random(1)
 	self:exchange_with(n:gossiper(), mship)
 end
-function gossip_index:exchange_with(actor, mship, join)
+function gossip_index:exchange_with(target_actor, mship, join)
 	local ok, peer_nodes
 	local retry = 0
 ::RESTART::
-	ok, peer_nodes = pcall(actor.push_and_pull, actor, mship.nodes:pack(join), join)
+	ok, peer_nodes = pcall(target_actor.push_and_pull, target_actor, mship.nodes:pack(join), join)
 	if not ok then
 		if retry < 3 and peer_nodes:is('actor_temporary_fail') then
 			retry = retry + 1
@@ -213,11 +217,14 @@ function gossip_index:exchange_with(actor, mship, join)
 		end
 		error(peer_nodes)
 	end
-	logger.info('gossip', 'exchange_with', actor, peer_nodes.used)
-	for i=0,tonumber(peer_nodes.used)-1 do
-		local nd = peer_nodes.nodes[i]
-		-- logger.info('gossip', 'add_node', nd.thread_id)
-		mship:add_node(nd)
+	logger.info('gossip', 'exchange_with', target_actor, peer_nodes.size)
+	local actor_node = mship.nodes:find_by_actor(target_actor)
+	for _,nd in peer_nodes:iter() do
+		if join then
+			if actor_node:has_same_nodedata(nd) then
+				actor_node:set_state(nodelist.alive, nd)
+			end
+		end
 	end
 end
 ffi.metatype('luact_gossip_t', gossip_mt)
@@ -270,8 +277,7 @@ end
 function membership_index:push_and_pull(nodes, join)
 	-- nodes : luact_gossip_proto_nodelist_t
 	if nodes.used > 0 then
-		for i=0,tonumber(nodes.used)-1 do
-			local nd = nodes.nodes[i]
+		for _,nd in nodes:iter() do
 			self:add_node(nd)
 		end
 	end
@@ -362,7 +368,6 @@ function membership_index:alive(nodedata, bootstrap)
 	-- in-queue to be processed but blocked by the locks above. If we let it processed, 
 	-- it'll cause us to re-join the cluster. This ensures that we don't do that.
 	if self.leave_start and is_my_node then
-		logger.info('this node already leaved')
 		return
 	end
 	-- Check if we've never seen this node before, and if not, then
@@ -412,13 +417,13 @@ function membership_index:alive(nodedata, bootstrap)
 		n.clock = nodedata.clock
 		changed = n:set_state(nodelist.alive, nodedata)
 	end
-	logger.info('gossip', 'node', 'alive', n, newly_added)
+	logger.info('gossip', 'node', 'alive', n)
 	if resurrect or newly_added then
 		self:emit('join', n)
 	elseif changed then
 		self:emit('change', n)
 	end
-	self:sys_broadcast(protocol.new_change(n))
+	self:sys_broadcast(protocol.new_change(n, true))
 end
 function membership_index:suspect(nodedata)
 	local n = self.nodes:find_by_nodedata(nodedata)
@@ -440,6 +445,9 @@ function membership_index:suspect(nodedata)
 	end
 	-- Update the state
 	n.clock = nodedata.clock
+	self:mark_suspect(n, nodedata)
+end
+function membership_index:mark_suspect(n, nodedata) 
 	if n:set_state(nodelist.suspect, nodedata) then
 		self:emit('change', n)
 	end
@@ -486,6 +494,7 @@ function membership_index:check_suspicious_nodes()
 	end
 end
 function membership_index:emit(t, ...)
+	logger.notice('gossip:emit', t, ...)
 	if self.delegate then
 		self.delegate:memberlist_event(t, ...)
 	end
@@ -525,13 +534,14 @@ local default = {
 	local_mode = false, 	-- only communicate with node which is on same host and thread_id 1
 }
 local function create(port, opts)
+	local d = opts.delegate
 	local m = setmetatable({
 		nodes = nodelist.new(port, protocol.new_nodelist(opts.initial_nodelist_buffer)), 
 		suspicous_nodes = {}, -- check timeout
 		threads = {}, 
 		opts = opts,
 		msg_checker = lamport.new(opts.user_message_bucket_size),
-		delegate = opts.delegate,
+		delegate = (type(d) == 'function' and d(unpack(opts.delegate_args or {})) or d),
 		event = event.new(),
 	}, membership_mt)
 	local g = memory.alloc_typed('luact_gossip_t')

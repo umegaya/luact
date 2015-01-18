@@ -127,6 +127,7 @@ function _M.initialize(opts)
 		local arbiter_module = require('luact.cluster.'..(arbiter_opts.kind or 'raft'))
 		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
 		gossiper_opts.config = gossiper_opts.config or {}
+		arbiter_opts.config = arbiter_opts.config or {}
 		if pulpo.thread_id ~= 1 then
 			table.insert(gossiper_opts.config, actor.root_of(nil, 1, true))
 			gossiper_opts.config.local_mode = true
@@ -139,13 +140,11 @@ function _M.initialize(opts)
 			["require"] = _M.require, 
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
-				return fsm_factory and arbiter_module.new(group, fsm_factory, opts or arbiter_opts.config, ...)
+				return fsm_factory and arbiter_module.new(group, fsm_factory, util.merge_table(arbiter_opts.config, opts or {}), ...)
 					or arbiter_module.find(group)
 			end,
 			gossiper = function (port, opts)
-				local g = gossiper_module.new(port or options.conn.internal_port, opts or gossiper_opts.config)
-				-- logger.info('g = ', g)
-				return g
+				return gossiper_module.new(port or options.conn.internal_port, util.merge_table(gossiper_opts.config, opts or {}))
 			end,
 			stat = function ()
 				-- TODO : add default stats functions and refine customize way.

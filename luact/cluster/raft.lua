@@ -412,7 +412,7 @@ local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]
 end
 local function create(id, fsm_factory, opts, ...)
-	local fsm = fsm_factory(...)
+	local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
 	local dir = configure_workdir(id, opts)
 	local sr = configure_serde(opts)
 	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment

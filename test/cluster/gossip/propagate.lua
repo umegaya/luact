@@ -32,7 +32,6 @@ tools.start_luact(4, nil, function ()
 			end
 		end
 	end, ev)
-	logger.info('======== event handler setup finished')
 	assert(gossiper:wait_bootstrap(5), "initialization should not be timeout")
 	clock.sleep(1.0) -- wait for state sync
 	p:wait(1)

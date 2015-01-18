@@ -28,12 +28,12 @@ typedef struct luact_gossip_proto_sys {
 	uint32_t clock;
 	uint16_t protover;
 	uint8_t user_state_len, padd;
-	char user_state[0];
+	char user_state[0]; //when recv
 } luact_gossip_proto_sys_t;
 
 typedef struct luact_gossip_proto_nodelist {
 	uint32_t size, used;
-	luact_gossip_proto_sys_t nodes[0];
+	char buffer[0];
 } luact_gossip_proto_nodelist_t;
 
 typedef struct luact_gossip_proto_user {
@@ -66,6 +66,7 @@ function proto_sys_index:set_node(n, with_user_state)
 	self.clock = n.clock
 	self.protover = n.protover
 	if with_user_state and (n.user_state_len > 0) then
+		-- logger.report('user_statelen:', n, n.user_state_len, ffi.cast('int *', n.user_state)[0])
 		self.user_state_len = n.user_state_len
 		ffi.copy(self.user_state, n.user_state, n.user_state_len)
 	else
@@ -79,7 +80,8 @@ function proto_sys_index:copy_to(iovlist)
 	iovlist = iovlist:reserve(1)
 	iovlist:push(self, ffi.sizeof('luact_gossip_proto_sys_t'))
 	if self.user_state_len > 0 then
-		iovlist:push(self.state_p, self.user_state_len)
+		-- logger.report('user_statelen2:', self.user_state_len, ffi.cast('int *', self.user_state)[0])
+		iovlist:push(self.user_state, self.user_state_len)
 	end
 	return iovlist
 end
@@ -99,6 +101,9 @@ function proto_sys_index:finished(mship)
 	if self:is_this_node() and (self.state == nodelist.dead) then
 		mship:set_leave_sent()
 	end
+end
+function proto_sys_index:dump_user_state(tag)
+	logger.info('user_state', tostring(tag), self.user_state_len, ffi.cast('int *', self.user_state)[0], self.thread_id)
 end
 ffi.metatype('luact_gossip_proto_sys_t', proto_sys_mt)
 
@@ -135,7 +140,7 @@ local proto_nodelist_mt
 proto_nodelist_mt = {
 	__index = proto_nodelist_index,
 	size = function (sz)
-		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz * (ffi.sizeof('luact_gossip_proto_sys_t') + nodelist.MAX_USER_STATE_SIZE)
+		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz
 	end,
 	alloc = function (size)
 		local p = ffi.cast('luact_gossip_proto_nodelist_t*', memory.alloc(proto_nodelist_mt.size(size)))
@@ -144,25 +149,60 @@ proto_nodelist_mt = {
 	end,
 }
 function proto_nodelist_index:reserve(size)
-	if size > self.size then
+	local required = (self.used + size)
+	if required > self.size then
 		newsize = self.size
-		while newsize < size do
+		while newsize < required do
 			newsize = newsize * 2
 		end
-		tmp = ffi.cast('luact_gossip_proto_nodelist_t*', memory.realloc(self, proto_nodelist_mt.size(size)))
+		tmp = ffi.cast('luact_gossip_proto_nodelist_t*', memory.realloc(self, proto_nodelist_mt.size(newsize)))
 		if tmp ~= ffi.NULL then
 			tmp.size = newsize
+			logger.warn('reserve:', self, "~~>", tmp)
 			return tmp
 		end
 	end
 	return self
 end
-function proto_nodelist_index.pack(arg)
-	--logger.info('nodelistpack:', arg.used, proto_nodelist_mt.size(arg.used))
-	return ffi.string(arg, proto_nodelist_mt.size(arg.used))
+function proto_nodelist_index:iter() 
+	return function (l, ofs)
+		if ofs >= l.used then
+			return nil 
+		else
+			local ent = ffi.cast('luact_gossip_proto_sys_t *', l.buffer + ofs)
+			ofs = ofs + ent:length()
+			return ofs, ent
+		end
+	end, self, 0
 end
+function proto_nodelist_index:copy(list, with_user_state)
+	self.used = 0
+	for i=1,#list do
+		local l = list[i]:length(with_user_state)
+		self = self:reserve(l)
+		local ofs = ffi.sizeof('luact_gossip_proto_nodelist_t') + self.used
+		local buf = ffi.cast('luact_gossip_proto_sys_t*', ffi.cast('char *', self) + ofs)
+		buf:set_node(list[i], with_user_state)
+		-- buf:dump_user_state('copy')
+		self.used = self.used + buf:length()
+	end
+	return self
+end
+function proto_nodelist_index:dump(tag)
+	for _, ent in self:iter() do
+		ent:dump_user_state(tag)
+	end
+end
+function proto_nodelist_index.pack(arg)
+	return ffi.string(arg.buffer, arg.used)
+end
+local nodelist_unpack_buffer
 function proto_nodelist_index.unpack(arg)
-	return ffi.cast('luact_gossip_proto_nodelist_t*', arg)
+	nodelist_unpack_buffer = nodelist_unpack_buffer:reserve(#arg)
+	ffi.copy(nodelist_unpack_buffer.buffer, arg, #arg)
+	nodelist_unpack_buffer.used = #arg
+	-- nodelist_unpack_buffer:dump('unpack')
+	return nodelist_unpack_buffer
 end
 serde[serde.kind.serpent]:customize(
 	'struct luact_gossip_proto_nodelist', 
@@ -177,7 +217,9 @@ local function alloc_sys_packet()
 	if #sys_cache > 0 then
 		return table.remove(sys_cache)
 	else
-		return memory.alloc_typed('luact_gossip_proto_sys_t')
+		return ffi.cast('luact_gossip_proto_sys_t*', memory.alloc(
+			ffi.sizeof('luact_gossip_proto_sys_t') + nodelist.MAX_USER_STATE_SIZE
+		))
 	end
 end
 local user_cache = {}
@@ -212,10 +254,14 @@ function _M.destroy(p)
 	end
 end
 function _M.from_ptr(p)
+	if ffi.cast('uint8_t *', p)[0] > 2 then
+		logger.error('type id', ffi.cast('uint8_t *', p)[0])
+	end
 	return ffi.cast(_M.types[ffi.cast('uint8_t *', p)[0]], p)
 end
 function _M.new_nodelist(size)
 	return proto_nodelist_mt.alloc(size)
 end
+nodelist_unpack_buffer = _M.new_nodelist(4096)
 
 return _M
