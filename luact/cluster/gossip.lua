@@ -220,6 +220,7 @@ function gossip_index:exchange_with(target_actor, mship, join)
 	logger.info('gossip', 'exchange_with', target_actor, peer_nodes.size)
 	local actor_node = mship.nodes:find_by_actor(target_actor)
 	for _,nd in peer_nodes:iter() do
+		mship:add_node(nd)
 		if join then
 			if actor_node:has_same_nodedata(nd) then
 				actor_node:set_state(nodelist.alive, nd)
@@ -246,13 +247,14 @@ end
 function membership_index:start()
 	-- add self
 	self.nodes:add_self(self:user_state())
+	assert(#self.nodes > 0, "invalid node data")
 	-- add initial node
 	for _, node in ipairs(self.opts) do
 		if type(node) == 'string' then
-			logger.notice('gossip', 'add initial node', 'hostname', node)
+			logger.notice('gossip', 'add initial node', 'hostname', node, #self.nodes)
 			self.nodes:add_by_hostname(node)
 		elseif type(node) == 'cdata' then
-			logger.notice('gossip', 'add initial node', 'actor', node)
+			logger.notice('gossip', 'add initial node', 'actor', node, #self.nodes)
 			self.nodes:add_by_root_actor(node)
 		else
 			exception.raise('invalid', 'node config', type(node))
@@ -295,8 +297,9 @@ end
 function membership_index:indirect_ping(redirect_to)
 	return redirect_to:ping()
 end
-function membership_index:broadcast(buf)
-	self.gossip:broadcast(self, protocol.new_user(memory.strdup(buf), #buf, self.msg_checker:issue_clock()))
+function membership_index:broadcast(buf, clock)
+	self.gossip:broadcast(self, protocol.new_user(memory.strdup(buf), #buf, 
+		clock or self.msg_checker:issue_clock()))
 end
 function membership_index:sys_broadcast(packet)
 	self.gossip:broadcast(self, packet)
@@ -356,7 +359,7 @@ function membership_index:handle_user_message(message)
 	local msg = ffi.string(message.buf, message.len)
 	if self.msg_checker:fresh(message.clock, msg) then
 		self:emit('user', message.buf, message.len)
-		self:broadcast(msg)
+		self:broadcast(msg, message.clock)
 	end
 end
 function membership_index:alive(nodedata, bootstrap)
@@ -419,7 +422,7 @@ function membership_index:alive(nodedata, bootstrap)
 	end
 	logger.info('gossip', 'node', 'alive', n)
 	if resurrect or newly_added then
-		self:emit('join', n)
+		self:emit('join', n, #self.nodes)
 	elseif changed then
 		self:emit('change', n)
 	end
@@ -527,7 +530,7 @@ local default = {
 	mtu = 1024,
 
 	initial_send_queue_size = 4096,
-	initial_nodelist_buffer = 256,
+	initial_nodelist_size = 256,
 
 	user_message_bucket_size = 512, 
 
@@ -536,7 +539,7 @@ local default = {
 local function create(port, opts)
 	local d = opts.delegate
 	local m = setmetatable({
-		nodes = nodelist.new(port, protocol.new_nodelist(opts.initial_nodelist_buffer)), 
+		nodes = nodelist.new(port, protocol.new_nodelist(opts.initial_nodelist_size)), 
 		suspicous_nodes = {}, -- check timeout
 		threads = {}, 
 		opts = opts,
