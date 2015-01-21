@@ -165,6 +165,16 @@ end
 function raft_index:stop_replicator(target_actor)
 	self.state:stop_replicator(target_actor)
 end
+function raft_index:read(state_key, consistent, timeout)
+	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
+	if l then return l:read(state_key, consistent, timeout) end
+	if consistent then
+		-- TODO : implement 'consistent' read
+		exception.raise('invalid', 'option', 'consistent read not supported')
+	else
+		return self.state.fsm:get(key)
+	end
+end
 function raft_index:propose(logs, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:propose(logs, timeout) end
@@ -174,6 +184,7 @@ function raft_index:propose(logs, timeout)
 	-- wait until logs are committed
 	return tentacle.yield(msgid)
 end
+raft_index.write = raft_index.propose
 function raft_index:add_replica_set(replica_set, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:add_replica_set(replica_set, timeout) end
