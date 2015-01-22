@@ -116,7 +116,7 @@ function _M.initialize(mt, startup_at, local_address)
 			assert(af == ffi.defs.AF_INET, exception.new("invalid", "address", "family", af))
 			v[0] = socket.numeric_ipv4_addr_from_sockaddr(addr)
 		end
-		logger.notice('node_address:', ('%x'):format(v[0]))
+		-- logger.notice('node_address:', ('%x'):format(v[0]))
 		return 'uint32_t', v
 	end)
 	_M.node_address = node_address[0]

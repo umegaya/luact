@@ -51,6 +51,22 @@ function _M:pack_packet(buf, append, ...)
 	end
 	return sz
 end
+function _M:pack(buf, obj)
+	if _M.DEBUG then
+		logger.notice('packer', obj)
+	end
+	exception.serializer = _M.serializer
+	local str = sp.dump(conv:escape(obj))
+	local data = tostring(#str)..":"..str
+	local sz, pv = #data, nil
+	buf:reserve(sz)
+	ffi.copy(buf:curr_p(), data, sz)
+	buf:use(sz)
+	if _M.DEBUG then
+		logger.notice('packed:', data, #data)
+	end
+	return sz
+end
 function _M:unpack_packet(rb)
 	local sz, len, p = 0, rb:available(), rb:curr_p()
 	if _M.DEBUG then
@@ -91,21 +107,8 @@ function _M:unpack_packet(rb)
 		end
 	end
 end
-function _M:pack(buf, obj)
-	if _M.DEBUG then
-		logger.notice('packer', obj)
-	end
-	exception.serializer = _M.serializer
-	local str = sp.dump(conv:escape(obj))
-	local data = tostring(#str)..":"..str
-	local sz, pv = #data, nil
-	buf:reserve(sz)
-	ffi.copy(buf:curr_p(), data, sz)
-	buf:use(sz)
-	if _M.DEBUG then
-		logger.notice('packed:', data, #data)
-	end
-	return sz
+function _M:stream_unpacker(rb)
+	return rb
 end
 _M.unpack = _M.unpack_packet
 function _M:customize(ctype, pack, unpack)

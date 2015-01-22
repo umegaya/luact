@@ -65,8 +65,8 @@ function b2s_conv_index:signed2ptr(v, rfl)
 	end
 	return self.p
 end
-function b2s_conv_index:ptr2signed(ptr)
-	local size = #ptr
+function b2s_conv_index:ptr2signed(ptr, size)
+	local size = size or #ptr
 	ffi.copy(self.p, ptr, size)
 	if size == 1 then
 		return self.c
@@ -86,8 +86,8 @@ function b2s_conv_index:float2ptr(v, rfl)
 	end
 	return self.p
 end
-function b2s_conv_index:ptr2float(ptr)
-	local size = #ptr
+function b2s_conv_index:ptr2float(ptr, size)
+	local size = size or #ptr
 	ffi.copy(self.p, ptr, size)
 	if size == 4 then
 		return self.f

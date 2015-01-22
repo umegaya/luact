@@ -19,8 +19,18 @@ local pbuf = require 'luact.pbuf'
 local router = require 'luact.router'
 local conn = require 'luact.conn'
 local supervise = require 'luact.supervise'
+local uuid = require 'luact.uuid'
 
 local _M = {}
+_M.event = require 'pulpo.event'
+_M.tentacle = require 'pulpo.tentacle'
+_M.clock = require 'luact.clock'
+_M.memory = require 'pulpo.memory'
+_M.exception = require 'pulpo.exception'
+_M.util = require 'pulpo.util'
+_M.thread_id = false
+_M.machine_id = false
+
 
 _M.DEFAULT_ROOT_DIR = fs.abspath("tmp", "luact")
 
@@ -98,7 +108,7 @@ end
 -- module function 
 function _M.start(opts, executable)
 	opts.init_params = serpent.dump(opts)
-	opts.init_proc = _G.luact and init_worker or init_worker_and_global_ref
+	opts.init_proc = _G.luact and init_worker_and_global_ref or init_worker
 	pulpo.initialize(opts)
 	-- TODO : need to change pulpo configuration from commandline
 	_M.initialize(opts)
@@ -116,6 +126,11 @@ function _M.initialize(opts)
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
 	dht.initialize(opts.dht)
+
+	-- initialize node identifier
+	_M.thread_id = pulpo.thread_id
+	_M.machine_id = uuid.node_address
+	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
 
 	-- initialize listener of internal actor messaging 
 	listener.unprotected_listen(tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port))

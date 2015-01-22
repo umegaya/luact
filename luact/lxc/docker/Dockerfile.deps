@@ -5,3 +5,4 @@ RUN apt-get update
 ADD ./luact/lxc /tmp/lxc
 RUN /tmp/lxc/build/deps.sh
 RUN rm -rf /tmp/lxc
+WORKDIR=/tmp/lunarsurface

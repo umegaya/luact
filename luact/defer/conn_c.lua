@@ -247,10 +247,11 @@ function conn_index:cmapkey()
 end
 function conn_index:read_int(io, sr)
 	local rb = self.rb
+	local sup = sr:stream_unpacker(rb)
 	while self.dead ~= 1 do
-		rb:read(io, 1024) 
+		rb:read(io, 1024)
 		while true do 
-			local parsed, err = sr:unpack_packet(rb)
+			local parsed, err = sr:unpack_packet(sup)
 			if not parsed then 
 				if err then exception.raise('invalid', 'encoding', err) end
 				break
