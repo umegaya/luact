@@ -1,6 +1,5 @@
 local luact = require 'luact'
 
-luact.start({
-	cache_dir = "/tmp/lunarsurface",
+luact.start {
 	exclusive = true,
-}, arg[1])
+}

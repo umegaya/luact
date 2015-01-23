@@ -125,7 +125,11 @@ function rbuf_index:reserve_with_cmd(sz, cmd)
 end
 function rbuf_index:read(io, size)
 	self:reserve_and_reduce_unsed(size)
-	self.used = self.used + io:read(self.buf + self.used, size)
+	local len = io:read(self.buf + self.used, size)
+	if len then
+		self.used = self.used + len
+		return true
+	end
 end
 function rbuf_index:available()
 	return self.used - self.hpos

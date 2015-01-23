@@ -28,6 +28,7 @@ _M.clock = require 'luact.clock'
 _M.memory = require 'pulpo.memory'
 _M.exception = require 'pulpo.exception'
 _M.util = require 'pulpo.util'
+_M.listen = listener.listen
 _M.thread_id = false
 _M.machine_id = false
 
@@ -39,6 +40,10 @@ local opts_defs = {
 	{"a", "local_address"},
 	{"t", "startup_at"},
 	{"p", "port"},
+	{nil, "n_core", "%w+", function (m)
+		if m == "false" then return false end 
+		return tonumber(m)
+	end}, 
 	{nil, "timeout_resolution"},
 	{nil, "proto"},
 }
@@ -101,24 +106,31 @@ local function init_worker_and_global_ref(opts)
 end
 local function get_opts(opts)
 	opts = util.merge_table(require 'luact.option', opts or {})
-	return util.merge_table(opts, optparse(_G.arg, opts_defs), true)
+	local cmdl, others = optparse(_G.arg, opts_defs)
+	for i=1,#others do
+		if others[i]:match("^.+%.lua$") then
+			opts.executable = others[i]
+			break
+		end
+	end
+	return util.merge_table(opts, cmdl, true)
 end
 
 
 -- module function 
 function _M.start(opts, executable)
+	opts = get_opts(opts)
 	opts.init_params = serpent.dump(opts)
 	opts.init_proc = _G.luact and init_worker_and_global_ref or init_worker
 	pulpo.initialize(opts)
 	-- TODO : need to change pulpo configuration from commandline
 	_M.initialize(opts)
-	pulpo.run(opts, executable)
+	pulpo.run(opts, executable or opts.executable)
 end
 function _M.stop()
 	pulpo.stop()
 end
 function _M.initialize(opts)
-	opts = get_opts(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules

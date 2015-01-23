@@ -1,6 +1,6 @@
 #!/bin/bash
 # initializing main repo
-LUACT_VERSION=umegaya/feature/vid
+LUACT_VERSION=umegaya/feature/polish_single_node
 git clone https://github.com/umegaya/luact.git --branch=$LUACT_VERSION
 pushd luact
 sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules

@@ -188,7 +188,7 @@ local ok,r = xpcall(function ()
 
 	p:range_commit(actor, 1, last_index - 2)
 	logger.info('wait until commit applied')
-	clock.sleep(0.3)
+	clock.sleep(1.0)
 	logger.info('commit applied')
 	for i=1, last_index-2 do
 		local s = p.progress:at(i)

@@ -33,6 +33,7 @@ ffi.cdef [[
 		luact_wbuf_t wb;
 		unsigned char serde_id, dead;
 		unsigned short task_processor_id;
+		uint32_t numeric_ipv4;
 	} luact_conn_t;
 	typedef struct luact_ext_conn {
 		pulpo_io_t *io;
@@ -164,14 +165,16 @@ function conn_index:sweep()
 end
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
+	-- assures coroutines are never execute any line
+	if obj == rev then
+		tentacle.cancel(wev)
+	elseif obj == web then
+		tentacle.cancel(rev)
+	end
 	-- these 2 line assures another tentacle (read for write/write for read)
 	-- start to finish.
-	self:close()
-	-- CAUTION: we never wait all tentacle related with this connection finished.
-	-- that depend on our conn_index:write, read_int, read_ext implementation, 
-	-- which once io:close called, above coroutine are immediately finished.
-	-- if this fact is changed, please wait for termination of all tentacles.
 	self:destroy('error')
+	self:close()
 end
 function conn_index:task()
 	-- do keep alive
@@ -188,6 +191,7 @@ function conn_index:new(machine_ipv4, opts)
 	local hostname = _M.internal_hostname_by_addr(machine_ipv4)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
+	self.numeric_ipv4 = machine_ipv4
 	self:start_io(opts, self:serde())
 	return self
 end
@@ -195,6 +199,7 @@ function conn_index:new_server(io, opts)
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
+	self.numeric_ipv4 = io:address():as_machine_id()
 	self:start_io(opts, self:serde(), true)
 	return self
 end
@@ -208,8 +213,8 @@ function conn_index:close()
 	self.io:close()
 end
 local function conn_common_destroy(self, reason, map, free_list)
-	if map[self:cmapkey()] ~= self then
-		assert(false, "connection not match:"..tostring(self).." and "..tostring(map[self:cmapkey()]))
+	if map[self:cmapkey()] and (map[self:cmapkey()] ~= self) then
+		assert(false, "connection not match:"..tostring(self).." and "..tostring(map[self:cmapkey()]).." "..tostring(self:cmapkey()))
 	end
 	if not _M.use_connection_cache then
 		map[self:cmapkey()] = nil
@@ -229,27 +234,18 @@ function conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
 function conn_index:machine_id()
-	assert(self:address_family() == AF_INET)
-	return self.io:address():as_machine_id()
+	return self.numeric_ipv4
 end
 function conn_index:address_family()
 	return self.io:address().p[0].sa_family
 end
 function conn_index:cmapkey()
-	local af = self:address_family()
-	if af == AF_INET then
-		return self:machine_id()
-	elseif af == AF_INET6 then
-		return socket.inet_namebyhost(self.io:address().p)
-	else
-		exception.raise('invalid', 'address', 'family', af)
-	end
+	return tonumber(self:machine_id())
 end
 function conn_index:read_int(io, sr)
 	local rb = self.rb
 	local sup = sr:stream_unpacker(rb)
-	while self.dead ~= 1 do
-		rb:read(io, 1024)
+	while self.dead ~= 1 and rb:read(io, 1024) do
 		while true do 
 			local parsed, err = sr:unpack_packet(sup)
 			if not parsed then 
@@ -263,8 +259,7 @@ function conn_index:read_int(io, sr)
 end
 function conn_index:read_ext(io, unstrusted, sr)
 	local rb = self.rb
-	while self.dead ~= 1 do
-		rb:read(io, 1024) 
+	while self.dead ~= 1 and rb:read(io, 1024) do
 		while true do 
 			local parsed, err = sr:unpack_packet(rb)
 			if not parsed then 
@@ -401,21 +396,10 @@ end
 local function new_internal_conn(machine_id, opts)
 	local c = allocate_conn()
 	c:new(machine_id, opts)
+	logger.info('add conn to map', c:cmapkey(), c)
 	cmap[c:cmapkey()] = c
 	return c
 end
-local function new_server_conn(io, opts)
-	local c = allocate_conn()
-	c:new_server(io, opts)
-	if opts.internal and (not cmap[c:cmapkey()]) then
-		-- it is possible that more than 2 connection which has same ip address from external.
-		-- OTOH there is only 1 connection required to communicate other machine in server cluster, 
-		-- only internal connection will be cached.
-		cmap[c:cmapkey()] = c
-	end
-	return c
-end
-
 
 
 --[[
@@ -433,6 +417,14 @@ function ext_conn_index:new(hostname, opts)
 	self:start_io(opts, self:serde())
 	return self
 end
+function ext_conn_index:new_server(io, opts)
+	self.hostname = memory.strdup(socket.inet_namebyhost(self.io:address().p))
+	self.io = io
+	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
+	self.dead = 0
+	self:start_io(opts, self:serde(), true)
+	return self
+end
 function ext_conn_index:cmapkey()
 	return ffi.string(self.hostname)
 end
@@ -444,7 +436,7 @@ ffi.metatype('luact_ext_conn_t', ext_conn_mt)
 
 -- create external connections
 local function allocate_ext_conn()
-	local c = table.remove(local_conn_free_list)
+	local c = table.remove(ext_conn_free_list)
 	if not c then
 		c = memory.alloc_typed('luact_ext_conn_t')
 		c:init_buffer()
@@ -457,7 +449,25 @@ local function new_external_conn(hostname, opts)
 	cmap[hostname] = c
 	return c
 end
-
+local function new_server_conn(io, opts)
+	local af = io:address().p[0].sa_family
+	if af == AF_INET then
+		local c = allocate_conn()
+		c:new_server(io, opts)
+	elseif af == AF_INET6 then
+		local c = allocate_ext_conn()
+		c:new_server(io, opts)		
+	end
+	-- it is possible that more than 2 connection which has same ip address from external.
+	-- OTOH there is only 1 connection established to communicate other machine in server cluster, 
+	-- currently only internal connection will be cached to reduce total number of connection
+	if opts.internal then
+		cmap[c:cmapkey()] = c
+	else
+		-- but we need to use connection to client to send something.
+	end
+	return c
+end
 
 
 --[[

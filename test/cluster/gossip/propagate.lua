@@ -95,6 +95,7 @@ tools.start_luact(4, nil, function ()
 				break
 			end
 			count = count + 1
+			logger.report('not join event:', count, tp, #g.nodes)
 			if count > 10 then
 				assert(false, "node addition timeout")
 			end

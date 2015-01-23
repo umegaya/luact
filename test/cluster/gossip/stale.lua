@@ -23,9 +23,11 @@ tools.start_luact(4, nil, function ()
 		exchange_interval = 4.0,
 	})
 	assert(gossiper:wait_bootstrap(5), "initialization should not be timeout")
-	clock.sleep(1.0)
+	clock.sleep(2.0)
 	assert(gossiper:probe(function (g)
-		assert(#g.nodes == 4)
+		while #g.nodes < 4 do
+			clock.sleep(0.1)
+		end
 	end))
 	p:wait(1)
 
