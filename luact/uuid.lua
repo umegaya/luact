@@ -1,11 +1,13 @@
 local ffi = require 'ffiex.init'
 
 local clock = require 'luact.clock'
+local serde_common = require 'luact.serde.common'
 
 local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local socket = require 'pulpo.socket'
 local exception = require 'pulpo.exception'
+
 local _M = {}
 local C = ffi.C
 
@@ -40,6 +42,7 @@ assert(ffi.sizeof('struct luact_id_detail') == 12)
 assert(ffi.sizeof('struct luact_id_tag2') == 12)
 assert(ffi.sizeof('struct luact_id_tag') == 12)
 assert(ffi.sizeof('union luact_uuid') == 12)
+serde_common.register_ctype('union', 'luact_uuid', nil, serde_common.LUACT_UUID)
 
 -- vars
 local idgen = {

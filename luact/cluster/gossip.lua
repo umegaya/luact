@@ -227,6 +227,7 @@ function gossip_index:exchange_with(target_actor, mship, join)
 			end
 		end
 	end
+	peer_nodes:fin()
 end
 ffi.metatype('luact_gossip_t', gossip_mt)
 
@@ -283,6 +284,7 @@ function membership_index:push_and_pull(nodes, join)
 			self:add_node(nd)
 		end
 	end
+	nodes:fin()
 	return self.nodes:pack(join)
 end
 function membership_index:pull()

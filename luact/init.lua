@@ -20,6 +20,7 @@ local router = require 'luact.router'
 local conn = require 'luact.conn'
 local supervise = require 'luact.supervise'
 local uuid = require 'luact.uuid'
+local common = require 'luact.serde.common'
 
 local _M = {}
 _M.event = require 'pulpo.event'

@@ -40,8 +40,8 @@ function b2s_conv_index:unsigned2ptr(v, rfl)
 	end
 	return self.p
 end
-function b2s_conv_index:ptr2unsigned(ptr)
-	local size = #ptr
+function b2s_conv_index:ptr2unsigned(ptr, size)
+	size = size or #ptr
 	ffi.copy(self.p, ptr, size)
 	if size == 1 then
 		return self.b
@@ -95,6 +95,54 @@ function b2s_conv_index:ptr2float(ptr, size)
 		return self.d
 	end
 end
+
+local map_ctype_id = {
+	struct = {},
+	union = {},
+}
+local map_id_ctype = {}
+-- reserve system ctype id
+_M.LUACT_UUID = 1
+_M.LUACT_GOSSIP_NODELIST = 2
+_M.LUACT_RAFT_SNAPSHOT_HEADER = 3
+_M.LUACT_BUF_SLICE = 4
+-- packer maps
+_M.serpent_packer = {}
+_M.json_packer = {}
+_M.protobuf_packer = {}
+_M.msgpack_packer = {}
+-- unpacker maps
+_M.serpent_unpacker = {}
+_M.json_unpacker = {}
+_M.protobuf_unpacker = {}
+_M.msgpack_unpacker = {}
+function _M.register_ctype(what, name, serde, id)
+	local t = what.." "..name
+	if id then
+		map_ctype_id[what][name] = id
+		map_id_ctype[id] = ffi.typeof("$ *", ffi.typeof(t))
+	else
+		-- TODO : generate id autometically by registering it to dht
+		local defs = ffi.src_of(t)
+	end
+	if serde then
+		for kind, procs in pairs(serde) do
+			local packer_key = kind.."_packer"
+			local unpacker_key = kind.."_unpacker"
+			_M[packer_key][id] = procs.packer
+			_M[unpacker_key][id] = procs.unpacker
+		end
+	end
+end
+function _M.ctype_id(what, name)
+	return map_ctype_id[what][name]
+end
+function _M.ctype_from_id(id)
+	return map_id_ctype[tonumber(id)]
+end
+
+
+-- TODO : move below to serpent and also using ctype id
 local custom_pack = {}
 local custom_unpack = {}
 _M.custom_pack = custom_pack

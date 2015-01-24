@@ -5,6 +5,7 @@ local memory = require 'pulpo.memory'
 local pbuf = require 'luact.pbuf'
 local util = require 'pulpo.util'
 local common = require 'luact.serde.common'
+local mp = require 'msgpack'
 
 ffi.cdef [[
 typedef struct long_struct {
@@ -95,11 +96,11 @@ end
 
 local datasets = {
    { "empty", nLoop*1000, {} },
-   { "iary1", nLoop*100, {1} },
-   { "iary10", nLoop*10, {1,2,3,4,5,6,7,8,9,10} },
-   { "iary100", nLoop*1, makeiary(100) },
-   { "iary1000", nLoop / 10, makeiary(1000) },
-   { "iary10000", nLoop / 10, makeiary(10000) },
+   { "iary1", nLoop*1000, {1} },
+   { "iary10", nLoop*100, {1,2,3,4,5,6,7,8,9,10} },
+   { "iary100", nLoop*10, makeiary(100) },
+   { "iary1000", nLoop, makeiary(1000) },
+   { "iary10000", nLoop, makeiary(10000) },
    { "str1", nLoop*100, "a" },
    { "str10", nLoop*100,  makestr(10)  },
    { "str100", nLoop*100, makestr(100)  },
@@ -114,10 +115,12 @@ for i,v in ipairs(datasets) do
 
 logger.notice('gc mem', collectgarbage("count"), "KB")
 
+   local nLoop = v[2]
   -- streaming api
-  local nLoop = v[2]
+ --[[ 
   st = os.clock()
   for j=1, nLoop do
+  	rb:reset()
   	msgpack:pack(rb, v[3])
     msgpack:unpack_packet(unp)
     rb:shrink_by_hpos()
@@ -125,6 +128,7 @@ logger.notice('gc mem', collectgarbage("count"), "KB")
   et = os.clock()
   local mpstime = et - st
   logger.info('stream: # of iter', nLoop, et - st)
+  ]]
 
   -- non-streaming
   st = os.clock()
@@ -140,10 +144,40 @@ logger.notice('gc mem', collectgarbage("count"), "KB")
   logger.info('normal: # of iter', nLoop, et - st)
   
 --  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime, "orig:", nLoop/mpotime, "(times/sec)", (mpotime/mptime), "times faster")
-  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime )
+  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime)--, "stream:", nLoop/mpstime )
 
 logger.notice('gc mem after', collectgarbage("count"), "KB")
 
 end
+
+--[[
+for i,v in ipairs(datasets) do
+
+logger.notice('gc mem', collectgarbage("count"), "KB")
+
+   local nLoop = v[2]
+  -- streaming api
+  st = os.clock()
+  for j=1, nLoop / 100 do
+  	for i=1, 100 do
+	  	msgpack:pack(rb, v[3])
+	end
+	for i=1, 100 do
+        assert(msgpack:unpack_packet(unp))
+    end
+    rb:shrink_by_hpos()
+  end
+  et = os.clock()
+  local mpstime = et - st
+  logger.info('stream: # of iter', nLoop, et - st)
+
+  
+--  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime, "orig:", nLoop/mpotime, "(times/sec)", (mpotime/mptime), "times faster")
+  print( "mp:", v[1], mptime, "sec", "stream:", nLoop/mpstime)--, "stream:", nLoop/mpstime )
+
+logger.notice('gc mem after', collectgarbage("count"), "KB")
+
+end
+]]
 
 return true

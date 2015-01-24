@@ -40,7 +40,9 @@ function snapshot_header_size(n_replica)
 	return ffi.sizeof('luact_raft_snapshot_header_t') + (n_replica * ffi.sizeof('luact_uuid_t'))
 end
 function snapshot_header_index.alloc(n_replica)
-	local p = memory.alloc_fill(snapshot_header_size(n_replica))
+	local p
+	local sz = snapshot_header_size(n_replica)
+	p = memory.alloc_fill(sz)
 	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
 	return p
@@ -50,6 +52,9 @@ function snapshot_header_index:realloc(n_replica)
 	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
 	return p
+end
+function snapshot_header_index:fin()
+	memory.free(self)
 end
 function snapshot_header_index:to_table()
 	local t = {}
@@ -80,11 +85,30 @@ end
 function snapshot_header_index.unpack(arg)
 	return ffi.cast('luact_raft_snapshot_header_t*', arg)
 end
+ffi.metatype('luact_raft_snapshot_header_t', snapshot_header_mt)
+-- register ctype and customized serde
 serde[serde.kind.serpent]:customize(
 	'struct luact_raft_snapshot_header', 
 	snapshot_header_index.pack, snapshot_header_index.unpack
 )
-ffi.metatype('luact_raft_snapshot_header_t', snapshot_header_mt)
+common.register_ctype('struct', 'luact_raft_snapshot_header_t', {
+	msgpack = {
+		packer = function (pack_procs, buf, ctype_id, obj, length)
+			local sz = snapshot_header_size(obj.n_replica)
+			buf:reserve(sz)
+			local p, ofs = pack_procs.pack_ext_cdata_header(buf, sz, ctype_id)
+			ffi.copy(p + ofs, obj, sz)
+			return ofs + sz
+		end,
+		unpacker = function (rb, len)
+			local obj = ffi.cast('luact_raft_snapshot_header_t*', rb:curr_p())
+			local ptr = snapshot_header_index.alloc(obj.n_replica)
+			local sz = snapshot_header_index.size(obj.n_replica)
+			ffi.copy(ptr, obj, sz)
+			return ptr
+		end,
+	}, 
+}, common.LUACT_RAFT_SNAPSHOT_HEADER)
 
 
 -- luact_raft_snapshot_writer
@@ -163,6 +187,7 @@ function snapshot_writer_index:copy(dir, rio, last_index)
 		rb:reserve(buf.sz)
 		ffi.copy(rb:curr_p(), buf.p, buf.sz)
 		rb:use(buf.sz)
+		buf:fin()
 	end
 	C.write(fd, self.rb:start_p(), self.rb:available())
 	C.fsync(fd)
@@ -225,6 +250,7 @@ function snapshot_writer_index:restore(dir, fsm, serde, rb)
 	if not meta:verify_checksum(rb:curr_p(), rb:available()) then
 		exception.raise('fatal', 'invalid snapshot checksum')
 	end
+	meta:fin()
 	local ok, r = pcall(fsm.restore, fsm, serde, rb)
 	if not ok then
 		exception.raise('fatal', 'cannot restore from snapshot', latest, r)
