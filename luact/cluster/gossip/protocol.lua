@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 local pbuf = require 'luact.pbuf'
 local serde = require 'luact.serde'
-local common = require 'luact.serde.common'
+local serde_common = require 'luact.serde.common'
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
 
@@ -60,6 +60,9 @@ local proto_sys_index = {}
 local proto_sys_mt = {
 	__index = proto_sys_index
 }
+function proto_sys_index:inspect()
+	return ('%x:%u'):format(self.machine_id, self.thread_id)
+end
 function proto_sys_index:set_node(n, with_user_state)
 	self.machine_id = n.machine_id
 	self.thread_id = n.thread_id
@@ -143,10 +146,8 @@ proto_nodelist_mt = {
 	size = function (sz)
 		return ffi.sizeof('luact_gossip_proto_nodelist_t') + sz
 	end,
-	alloc = function (size, managed)
-		local p = managed and 
-			ffi.cast('luact_gossip_proto_nodelist_t*', memory.alloc(proto_nodelist_mt.size(size))) or
-			ffi.cast('luact_gossip_proto_nodelist_t*', memory.managed_alloc(proto_nodelist_mt.size(size)))
+	alloc = function (size)
+		local p = ffi.cast('luact_gossip_proto_nodelist_t*', memory.alloc(proto_nodelist_mt.size(size)))
 		p.size = size
 		return p
 	end,
@@ -216,7 +217,7 @@ serde[serde.kind.serpent]:customize(
 	'struct luact_gossip_proto_nodelist', 
 	proto_nodelist_index.pack, proto_nodelist_index.unpack
 )
-common.register_ctype('struct', 'luact_gossip_proto_nodelist', {
+serde_common.register_ctype('struct', 'luact_gossip_proto_nodelist', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
 			buf:reserve(obj.used)
@@ -229,10 +230,10 @@ common.register_ctype('struct', 'luact_gossip_proto_nodelist', {
 			ptr.used = len
 			ffi.copy(ptr.buffer, rb:curr_byte_p(), len)
 			rb:seek_from_curr(len)
-			return ptr
+			return ffi.gc(ptr, memory.free)
 		end,
 	}, 
-}, common.LUACT_GOSSIP_NODELIST)
+}, serde_common.LUACT_GOSSIP_NODELIST)
 
 
 -- module functions

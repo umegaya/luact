@@ -12,7 +12,7 @@ ffi.cdef[[
 		union {
 			char *buf;
 			uint8_t *ubuf;
-			};
+		};
 		luact_bufsize_t max, used, hpos;
 	} luact_rbuf_t;
 ]]
@@ -67,7 +67,7 @@ function rbuf_index:reserve(sz)
 	end
 	self.buf = buf
 end
-function rbuf_index:reserve_and_reduce_unsed(sz)
+function rbuf_index:reserve_and_reduce_unused(sz)
 	local r = self.max - self.used
 	local buf
 	if r >= sz then return end
@@ -108,7 +108,7 @@ function rbuf_index:reserve_with_cmd(sz, cmd)
 	self:seek_from_last(0)
 end
 function rbuf_index:read(io, size)
-	self:reserve_and_reduce_unsed(size)
+	self:reserve_and_reduce_unused(size)
 	local len = io:read(self.buf + self.used, size)
 	if len then
 		self.used = self.used + len
@@ -122,6 +122,11 @@ function rbuf_index:use(r)
 	self.used = self.used + r
 end
 function rbuf_index:seek_from_curr(r)
+	if self.hpos > self.used then
+		logger.report('invalid seek', self.hpos, self.used, debug.traceback())
+		assert(false)
+	end
+	-- logger.info('seek_from_curr', self.hpos, r, self.hpos + r, self.used)
 	self.hpos = self.hpos + r
 end
 function rbuf_index:seek_from_start(r)
@@ -163,7 +168,7 @@ function rbuf_index:shrink(sz)
 		self.used = 0
 	else
 		self.used = self.used - sz
-		C.memmove(self.buf, self.buf + sz, self.used)
+		memory.move(self.buf, self.buf + sz, self.used)
 	end
 end
 function rbuf_index:shrink_by_hpos()

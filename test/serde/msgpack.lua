@@ -1,11 +1,12 @@
 local luact = require 'luact.init'
 local msgpack = require 'luact.serde.msgpack'
 local uuid = require 'luact.uuid'
-local memory = require 'pulpo.memory'
 local pbuf = require 'luact.pbuf'
-local util = require 'pulpo.util'
 local common = require 'luact.serde.common'
-local mp = require 'msgpack'
+
+local memory = luact.memory
+local exception = luact.exception
+local util = luact.util
 
 ffi.cdef [[
 typedef struct long_struct {
@@ -65,17 +66,64 @@ end, function (obj1, obj2)
 end)
 local id = uuid.first(10, 10)
 serde(id, function (obj1, obj2)
+	assert(ffi.typeof(obj1) == ffi.typeof('luact_uuid_t'), tostring(ffi.typeof(obj1)))
+	assert(ffi.typeof(obj2) == ffi.typeof('luact_uuid_t'), tostring(ffi.typeof(obj2)))
 	local t, m = uuid.thread_id(obj1), uuid.machine_id(obj1)
 	return t == 10 and m == 10 and t == uuid.thread_id(obj2) and m == uuid.machine_id(obj2)
 end)
+local idarray = ffi.new('luact_uuid_t[4]')
+for i=0,3 do
+	uuid.debug_create_id(111 * (i + 1), 11 * (i + 1), idarray[i])
+end
+serde(idarray, function (obj1, obj2)
+	assert(ffi.typeof(obj1) == ffi.typeof('luact_uuid_t[4]'), tostring(ffi.typeof(obj1)))
+	assert(ffi.typeof(obj2) == ffi.typeof('luact_uuid_t[?]'), tostring(ffi.typeof(obj2)))
+	assert(ffi.sizeof(obj2) == 48)
+	for i=0,3 do
+		local m, t = 111 * (i + 1), 11 * (i + 1)
+		assert(uuid.machine_id(obj1[i]) == m)
+		assert(uuid.machine_id(obj2[i]) == m)
+		assert(uuid.thread_id(obj1[i]) == t)
+		assert(uuid.thread_id(obj2[i]) == t)
+	end
+	return true
+end)
+serde(100000000000ULL)
 local obj = ffi.new('long_struct_t')
 ffi.fill(obj.buffer, 100000, 0xFD)
 serde(obj, function (obj1, obj2)
 	return memory.cmp(obj1.buffer, obj2.buffer, 100000)
 end)
+local e = exception.new('invalid', 'test invalid', 3, 4)
+serde(e, function (obj1, obj2)
+	assert(obj1:is('invalid') and obj2:is('invalid'))
+	return util.table_equals(obj1.args, obj2.args)
+end)
+
+local src = [[cb:00:00:00:00:00:a0:63:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:00:1e:41:a5:69:6e:64:65:78:d7:02:01:1a:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:41:40:cb:00:00:00:00:00:c0:63:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:40:1e:41:a5:69:6e:64:65:78:d7:02:01:1b:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:42:40:cb:00:00:00:00:00:e0:63:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:80:1e:41:a5:69:6e:64:65:78:d7:02:01:1c:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:42:40:cb:00:00:00:00:00:00:64:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:c0:1e:41:a5:69:6e:64:65:78:d7:02:01:1d:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:43:40:cb:00:00:00:00:00:20:64:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:00:1f:41:a5:69:6e:64:65:78:d7:02:01:1e:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:43:40:cb:00:00:00:00:00:40:64:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:40:1f:41:a5:69:6e:64:65:78:d7:02:01:1f:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:44:40:cb:00:00:00:00:00:60:64:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:80:1f:41:a5:69:6e:64:65:78:d7:02:01:20:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:49:40:cb:00:00:00:00:00:c0:65:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:20:20:41:a5:69:6e:64:65:78:d7:02:01:21:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:4a:40:cb:00:00:00:00:00:e0:65:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:40:20:41:a5:69:6e:64:65:78:d7:02:01:22:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:4a:40:cb:00:00:00:00:00:00:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:60:20:41:a5:69:6e:64:65:78:d7:02:01:23:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:4b:40:cb:00:00:00:00:00:20:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:80:20:41:a5:69:6e:64:65:78:d7:02:01:24:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:4b:40:cb:00:00:00:00:00:40:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:a0:20:41:a5:69:6e:64:65:78:d7:02:01:25:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:4c:40:cb:00:00:00:00:00:60:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:c0:20:41:a5:69:6e:64:65:78:d7:02:01:26:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:80:4c:40:cb:00:00:00:00:00:80:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:e0:20:41:a5:69:6e:64:65:78:d7:02:01:27:00:00:00:00:00:00:00:84:a4:74:65:72:6d:d7:02:01:01:00:00:00:00:00:00:00:a3:6c:6f:67:92:cb:00:00:00:00:00:00:4d:40:cb:00:00:00:00:00:a0:66:40:a5:6d:73:67:69:64:cb:00:00:00:00:00:00:21:41:]]
+local data, len = memory.alloc_typed('char', #src / 3), 0
+for x in src:gmatch('%w%w') do
+	data[len] = tonumber(x, 16)
+	len = len + 1
+end
+local rbtest = memory.alloc_typed('luact_rbuf_t')
+rbtest:init()
+rbtest:reserve(len)
+ffi.copy(rbtest:curr_p(), data, len)
+rbtest:use(len)
+rbtest:dump()
+local sup = msgpack:stream_unpacker(rbtest)
+while true do
+	local r = msgpack:unpack_packet(sup)
+	if not r then
+		break
+	end
+end
+assert(rbtest.used == rbtest.hpos)
 
 
-logger.notice('---------------- test streaming unpack -------------------')
+os.exit(0)
+
 local rb = memory.alloc_typed('luact_rbuf_t')
 rb:init()
 local unp = msgpack:stream_unpacker(rb)
@@ -108,6 +156,8 @@ local datasets = {
    { "str1000", nLoop*100, makestr(1000)  },
    { "str10000", nLoop*10, makestr(10000)  },
 }
+
+logger.notice('---------------- bench normal unpack -------------------')
 
 local st, et
 _G.BENCH = true
@@ -150,7 +200,8 @@ logger.notice('gc mem after', collectgarbage("count"), "KB")
 
 end
 
---[[
+logger.notice('---------------- bench streaming unpack -------------------')
+
 for i,v in ipairs(datasets) do
 
 logger.notice('gc mem', collectgarbage("count"), "KB")
@@ -158,13 +209,9 @@ logger.notice('gc mem', collectgarbage("count"), "KB")
    local nLoop = v[2]
   -- streaming api
   st = os.clock()
-  for j=1, nLoop / 100 do
-  	for i=1, 100 do
-	  	msgpack:pack(rb, v[3])
-	end
-	for i=1, 100 do
-        assert(msgpack:unpack_packet(unp))
-    end
+  for j=1, nLoop do
+  	msgpack:pack(rb, v[3])
+	assert(msgpack:unpack_packet(unp))
     rb:shrink_by_hpos()
   end
   et = os.clock()
@@ -173,11 +220,11 @@ logger.notice('gc mem', collectgarbage("count"), "KB")
 
   
 --  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime, "orig:", nLoop/mpotime, "(times/sec)", (mpotime/mptime), "times faster")
-  print( "mp:", v[1], mptime, "sec", "stream:", nLoop/mpstime)--, "stream:", nLoop/mpstime )
+  print( "mp:", v[1], mpstime, "sec", "stream:", nLoop/mpstime)--, "stream:", nLoop/mpstime )
 
 logger.notice('gc mem after', collectgarbage("count"), "KB")
 
 end
-]]
+
 
 return true

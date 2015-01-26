@@ -1,3 +1,4 @@
+-- TODO : treat correctly the case client machine is not little endian.
 local ffi = require 'ffiex.init'
 local reflect = require 'reflect'
 local common = require 'luact.serde.common'
@@ -5,6 +6,9 @@ local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
 local socket = require 'pulpo.socket'
 local tentacle = require 'pulpo.tentacle'
+local writer = require 'luact.writer'
+
+local WRITER_RAW = writer.WRITER_RAW
 
 ffi.cdef [[
 typedef enum luact_msgpack_object_type {
@@ -114,20 +118,20 @@ serde_mt.packer["error"] = function (buf, obj)
 	buf:use(2)
 	ofs = buf.used
 	buf:use(4) -- reserve for length
-	serde_mt.pack_any(buf, t.name)
-	serde_mt.pack_any(buf, t.bt)
-	serde_mt.pack_any(buf, t.args)
+	serde_mt.pack_any(buf, obj.name)
+	serde_mt.pack_any(buf, obj.bt)
+	serde_mt.pack_any(buf, obj.args)
 	-- only in here, length can be known
-	serde_mt.pack_length32(buf:start_p() + ofs, buf.used - ofs)
+	serde_mt.pack_length32(buf:start_p() + ofs, buf.used - ofs - 4)
 end
 function serde_mt.packer.table(buf, obj)
 	if exception.akin(obj) then
-		return serde_mt["error"](buf, obj)
+		return serde_mt.packer["error"](buf, obj)
 	end	
 	local len, ofs, p = #obj
 	buf:reserve(4 + 1)
 	p = buf:last_byte_p()
-	if len >= 0 and (not obj.__not_array__) then
+	if len > 0 and (not obj.__not_array__) then
 		if len <= 0xF then
 			p[0] = bit.bor(0x90, len); ofs = 1
 		elseif len <= 0xFFFF then
@@ -228,30 +232,29 @@ local custom_unpack = {}
 function serde_mt.pack_int_cdata(buf, obj, refl)
 	local ofs, p
 	if refl.size == 1 then
-		buf:reseve(4)
+		buf:reserve(4)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], p[3], ofs = 0xd4, EXT_CDATA_INT, refl.unsigned, obj, 4
+		p[0], p[1], p[2], p[3], ofs = 0xd4, EXT_CDATA_INT, refl.unsigned or 0, obj, 4
 	elseif refl.size == 2 then
-		buf:reseve(3 + 2)
+		buf:reserve(3 + 2)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd5, EXT_CDATA_INT, refl.unsigned, 3
+		p[0], p[1], p[2], ofs = 0xd5, EXT_CDATA_INT, refl.unsigned or 0, 3
 		ofs = ofs + serde_mt.pack_length16(p + ofs, obj)
 	elseif refl.size == 4 then
-		buf:reseve(3 + 4)
+		buf:reserve(3 + 4)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd6, EXT_CDATA_INT, refl.unsigned, 3
+		p[0], p[1], p[2], ofs = 0xd6, EXT_CDATA_INT, refl.unsigned or 0, 3
 		ofs = ofs + serde_mt.pack_length32(p + ofs, obj)
 	elseif refl.size == 8 then
-		buf:reseve(3 + 8)
+		buf:reserve(3 + 8)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd7, EXT_CDATA_INT, refl.unsigned, 3
+		p[0], p[1], p[2], ofs = 0xd7, EXT_CDATA_INT, refl.unsigned or 0, 3
 		ffi.copy(p + ofs, serde_mt.conv:unsigned2ptr(obj, refl), refl.size)
 		ofs = ofs + refl.size
 	else
 		exception.raise('invalid', 'integer length', refl.size)
 	end
 	buf:use(ofs)
-	return ofs
 end
 function serde_mt.pack_ext_cdata_header(buf, length, ctype_id)
 	local p, ofs = serde_mt.pack_ext_header(buf, EXT_CDATA_TYPE, length + 4)
@@ -276,6 +279,14 @@ function serde_mt.pack_struct_cdata(buf, obj, refl, length)
 	ofs = ofs + length
 	buf:use(ofs)
 end
+--[[
+CDATA serialize/unserialize rule:
+int/enum => int
+float/double => float/double (no change)
+struct/union => ref of struct/union
+array => array 
+ptr/ref => ref (even if ptr has multiple element of ctype)
+]]
 function serde_mt.packer.cdata(buf, obj)
 	local ofs, p = 0
 	local refl = reflect.typeof(obj)
@@ -299,13 +310,13 @@ function serde_mt.packer.cdata(buf, obj)
 	elseif refl.what == 'array' then
 		local et = refl.element_type
 		local size = (refl.size == 'none' and ffi.sizeof(obj) or refl.size)
-		serde_mt.pack_struct_cdata(p, obj, et, size)
+		serde_mt.pack_struct_cdata(buf, obj, et, size)
 	elseif refl.what == 'ptr' or refl.what == 'ref' then
 		local et = refl.element_type
 		if et.name then -- struct/union
-			serde_mt.pack_struct_cdata(p, obj, et, refl.size)
+			serde_mt.pack_struct_cdata(buf, obj, et, et.size)
 		else
-			serde_mt.pack_int_cdata(p, obj, refl)
+			serde_mt.pack_int_cdata(buf, obj, refl)
 		end
 	end
 end
@@ -313,19 +324,32 @@ function serde_mt.pack_any(buf, obj)
 	return serde_mt.packer[type(obj)](buf, obj)
 end
 function serde_mt:pack_packet(buf, append, ...)
-	pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+	local hdsz = ffi.sizeof('luact_writer_raw_t')
 	local args = {...}
 	if append then
-		local sz = pv.sz
-		for i=1,#args do
-			pv.sz = pv.sz + self.pack_any(buf, pv.p + pv.sz, args[i])
-		end
-		return pv.sz - sz
+		local sz = buf.used
+		--for i=1,#args do
+		--	logger.warn('pack2', i, args[i])
+		--end
+		serde_mt.pack_any(buf, args)
+		sz = buf.used - sz
+		local pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		pv.sz = pv.sz + sz
+		--buf:dump()
+		return sz
 	else
-		pv.sz = 0
-		for i=1,#args do
-			pv.sz = pv.sz + self.pack_any(buf, pv.p + pv.sz, args[i])
-		end
+		buf:reserve_with_cmd(hdsz, WRITER_RAW)
+		-- allocate size for header (luact_writer_raw_t)
+		buf:use(hdsz)
+		local sz = buf.used
+		--for i=1,#args do
+		--	logger.warn('pack', i, args[i])
+		--end
+		serde_mt.pack_any(buf, args)
+		local pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		pv.sz = buf.used - sz
+		pv.ofs = 0
+		--buf:dump()
 		return pv.sz
 	end
 end
@@ -336,15 +360,17 @@ end
 function serde_mt.wait_data_arrived(rb, required)
 	-- logger.info('rrqe', rb:available(), required)
 	while rb:available() < required do
+		--logger.info('wait_data_arrived', rb:available(), required)
 		coroutine.yield()
 	end
 	return rb:curr_byte_p()
 end
 function serde_mt.unpack_map(rb, size)
-	local r = {}
+	local r, k, v = {}
 	for i=1,size do
 		k = serde_mt.unpack_any(rb)
 		v = serde_mt.unpack_any(rb)
+		--logger.notice('unpack_map', i, size, k, v)
 		r[k] = v
 	end
 	return r
@@ -352,17 +378,13 @@ end
 function serde_mt.unpack_array(rb, size)
 	local r = {}
 	for i=1,size do
-		v = serde_mt.unpack_any(rb)
-		-- logger.warn('unpack_array', i, size, v)
+		local v = serde_mt.unpack_any(rb)
+		--logger.warn('unpack_array', i, size, v)
 		table.insert(r, v)
 	end
 	return r
 end
 function serde_mt.unpack_ext_struct_cdata(rb, size)
-	if _G.BENCH then
-		rb:dump()
-		assert(false, "bench mark never come here:"..debug.traceback())
-	end
 	local p = serde_mt.wait_data_arrived(rb, 1 + size)
 	local len = serde_mt.conv:ptr2unsigned(p + 1, size)
 	rb:seek_from_curr(1 + size)
@@ -370,19 +392,26 @@ function serde_mt.unpack_ext_struct_cdata(rb, size)
 	local ctype_id = socket.get32(p + 1) -- +1 for skip ext_type
 	-- logger.warn('struct_cdata', p[0], ctype_id)
 	local unpacker = common.msgpack_unpacker[ctype_id]
+	-- seek to start offset of actual payload
 	rb:seek_from_curr(4 + 1)
 	len = len - 4 - 1
 	if unpacker then
 		return unpacker(rb, len)
 	else
-		local ct = common.ctype_from_id(ctype_id)
-		local ptr = memory.alloc(len)
+		local ct, ctp = common.ctype_from_id(ctype_id)
+		local ptr
+		if len == ffi.sizeof(ct) then
+			ptr = ffi.new(ct)
+		else
+			ptr = ffi.new(ctp, len / ffi.sizeof(ct))
+		end
 		ffi.copy(ptr, rb:curr_byte_p(), len)
 		rb:seek_from_curr(len)
-		return ffi.gc(ffi.cast(ct, ptr), memory.free)
+		return ptr
 	end
 end
 function serde_mt.unpack_ext_error(rb, size)
+	local i = 0
 	local name, bt, args
 	local p = serde_mt.wait_data_arrived(rb, 2 + size)
 	local clen = serde_mt.conv:ptr2unsigned(p + 2, size)
@@ -392,8 +421,7 @@ function serde_mt.unpack_ext_error(rb, size)
 	name = serde_mt.unpack_any(rb) 
 	bt = serde_mt.unpack_any(rb) 
 	args = serde_mt.unpack_any(rb)
-	rb:seek_from_curr(clen)
-	return exception.unserialize(name, bt, args)
+	return exception.new_with_bt(name, bt, unpack(args))
 end
 function serde_mt.unpack_ext_function(rb, size)
 	local p = serde_mt.wait_data_arrived(rb, 1 + size)
@@ -424,6 +452,7 @@ function serde_mt.unpack_ext(rb, size)
 end
 function serde_mt.unpack_ext_numeric_cdata(rb, size)
 	local p = serde_mt.wait_data_arrived(rb, 3 + size)
+	rb:seek_from_curr(3 + size)
 	if p[1] == EXT_CDATA_INT then
 		if p[2] ~= 0 then
 			return serde_mt.conv:ptr2unsigned(p + 3, size)
@@ -679,8 +708,9 @@ unpacker[0xde] = serde_mt.unpack_map16
 unpacker[0xdf] = serde_mt.unpack_map32
 
 function serde_mt.unpack_any(rb)
+	serde_mt.wait_data_arrived(rb, 1)
 	local t = tonumber(rb:curr_byte_p()[0])
-	-- logger.info('unpack_any', rb, t, tostring(serde_mt.unpacker[t]))
+	-- logger.info('unpack_any', rb, t, tostring(serde_mt.unpacker[t]), rb.hpos, rb.used, rb:available())
 	return serde_mt.unpacker[t](rb)
 end
 
@@ -688,11 +718,7 @@ function serde_mt.start_unpacker(rb)
 	-- logger.warn('start_unpacker', tostring(rb))
 	while true do
 		-- logger.warn('start_unpacker', rb:available())
-		if rb:available() > 0 then
-			coroutine.yield(true, serde_mt.unpack_any(rb))
-		else
-			coroutine.yield()
-		end
+		coroutine.yield(true, serde_mt.unpack_any(rb))
 	end
 end
 function serde_mt:stream_unpacker(rb)

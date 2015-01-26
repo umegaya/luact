@@ -3,6 +3,7 @@ local C = ffi.C
 
 local pbuf = require 'luact.pbuf'
 local serde = require 'luact.serde'
+local serde_common = require 'luact.serde.common'
 
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
@@ -91,7 +92,7 @@ serde[serde.kind.serpent]:customize(
 	'struct luact_raft_snapshot_header', 
 	snapshot_header_index.pack, snapshot_header_index.unpack
 )
-common.register_ctype('struct', 'luact_raft_snapshot_header_t', {
+serde_common.register_ctype('struct', 'luact_raft_snapshot_header', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
 			local sz = snapshot_header_size(obj.n_replica)
@@ -105,10 +106,11 @@ common.register_ctype('struct', 'luact_raft_snapshot_header_t', {
 			local ptr = snapshot_header_index.alloc(obj.n_replica)
 			local sz = snapshot_header_index.size(obj.n_replica)
 			ffi.copy(ptr, obj, sz)
-			return ptr
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
 		end,
 	}, 
-}, common.LUACT_RAFT_SNAPSHOT_HEADER)
+}, serde_common.LUACT_RAFT_SNAPSHOT_HEADER)
 
 
 -- luact_raft_snapshot_writer
@@ -187,7 +189,6 @@ function snapshot_writer_index:copy(dir, rio, last_index)
 		rb:reserve(buf.sz)
 		ffi.copy(rb:curr_p(), buf.p, buf.sz)
 		rb:use(buf.sz)
-		buf:fin()
 	end
 	C.write(fd, self.rb:start_p(), self.rb:available())
 	C.fsync(fd)
@@ -250,7 +251,6 @@ function snapshot_writer_index:restore(dir, fsm, serde, rb)
 	if not meta:verify_checksum(rb:curr_p(), rb:available()) then
 		exception.raise('fatal', 'invalid snapshot checksum')
 	end
-	meta:fin()
 	local ok, r = pcall(fsm.restore, fsm, serde, rb)
 	if not ok then
 		exception.raise('fatal', 'cannot restore from snapshot', latest, r)

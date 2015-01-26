@@ -53,9 +53,9 @@ local idgen = {
 			buf = table.remove(self.availables)
 		else
 			buf = ffi.new('luact_uuid_t') -- because wanna use gc
-			buf.__detail__.machine_id = self.seed.__detail__.machine_id
-			buf.__detail__.thread_id = self.seed.__detail__.thread_id
 		end
+		buf.__detail__.machine_id = self.seed.__detail__.machine_id
+		buf.__detail__.thread_id = self.seed.__detail__.thread_id
 		return buf
 	end,
 	free = function (self, uuid)
@@ -145,6 +145,7 @@ function _M.new()
 	_M.set_timestamp(buf, msec_timestamp())
 	if _M.DEBUG then
 		logger.info('new uuid:', buf)-- , debug.traceback())
+		assert(buf.__detail__.machine_id == _M.node_address, debug.traceback())
 	end
 	return buf
 end
@@ -197,8 +198,8 @@ end
 function _M.invalidate(uuid)
 	uuid.__detail__.machine_id = 0
 end
-function _M.debug_create_id(machine_id, thread_id)
-	local id = _M.new()
+function _M.debug_create_id(machine_id, thread_id, buffer)
+	local id = buffer or _M.new()
 	id.__detail__.thread_id = thread_id or 1
 	if type(machine_id) == 'number' then
 		id.__detail__.machine_id = machine_id

@@ -101,6 +101,7 @@ local map_ctype_id = {
 	union = {},
 }
 local map_id_ctype = {}
+local map_id_ctype_ptr = {}
 -- reserve system ctype id
 _M.LUACT_UUID = 1
 _M.LUACT_GOSSIP_NODELIST = 2
@@ -120,7 +121,8 @@ function _M.register_ctype(what, name, serde, id)
 	local t = what.." "..name
 	if id then
 		map_ctype_id[what][name] = id
-		map_id_ctype[id] = ffi.typeof("$ *", ffi.typeof(t))
+		map_id_ctype[id] = ffi.typeof(t)
+		map_id_ctype_ptr[id] = ffi.typeof("$[?]", ffi.typeof(t))
 	else
 		-- TODO : generate id autometically by registering it to dht
 		local defs = ffi.src_of(t)
@@ -138,7 +140,8 @@ function _M.ctype_id(what, name)
 	return map_ctype_id[what][name]
 end
 function _M.ctype_from_id(id)
-	return map_id_ctype[tonumber(id)]
+	local tmp = tonumber(id)
+	return map_id_ctype[tmp], map_id_ctype_ptr[tmp]
 end
 
 

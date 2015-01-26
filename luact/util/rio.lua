@@ -35,7 +35,7 @@ function buf_slice_index.size(sz)
 	return ffi.sizeof('luact_buf_slice_t') + sz
 end
 function buf_slice_index.alloc(sz)
-	local p = ffi.cast('luact_buf_slice_t*', memory.alloc(buf_slice_index.required_size(sz)))
+	local p = ffi.cast('luact_buf_slice_t*', memory.alloc(buf_slice_index.size(sz)))
 	p.sz = sz
 	return p
 end
@@ -68,7 +68,7 @@ serde[serde.kind.serpent]:customize(
 	'struct luact_buf_slice', 
 	buf_slice_index.pack, buf_slice_index.unpack
 )
-common.register_ctype('struct', 'luact_buf_slice', {
+serde_common.register_ctype('struct', 'luact_buf_slice', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
 			buf:reserve(obj.sz)
@@ -77,12 +77,13 @@ common.register_ctype('struct', 'luact_buf_slice', {
 			return ofs + obj.sz
 		end,
 		unpacker = function (rb, len)
-			local ptr = buf_slice_index.create(len)
+			local ptr = buf_slice_index.alloc(len)
 			ffi.copy(ptr.p, rb:curr_p(), len)
-			return ptr
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
 		end,
 	}, 
-}, common.LUACT_BUF_SLICE)
+}, serde_common.LUACT_BUF_SLICE)
 ffi.metatype('luact_buf_slice_t', buf_slice_mt)
 local readbuf_size = 1024
 local readbuf = buf_slice_index.alloc(readbuf_size)

@@ -47,7 +47,11 @@ local node_tostring_work = memory.alloc_typed('pulpo_addr_t')
 local node_mt = {
 	__index = node_index,
 	__tostring = function (t)
+		-- print('tostring', t.addr, t.thread_id)
 		return tostring(t.addr).."/"..t.thread_id
+	end,
+	__gc = function (t)
+		logger.report('nodegc', debug.traceback())
 	end,
 	alloc = function ()
 		if #cache > 0 then
@@ -164,6 +168,7 @@ function nodelist_index:remove(n)
 		self.lookup[key] = nil
 		for idx=1,#self do
 			if self[idx]:key() == key then
+				assert(self[idx] == node)
 				table.remove(self, idx)
 				break
 			end
@@ -211,6 +216,7 @@ end
 
 -- module function
 function _M.new(port, packet_buffer)
+	logger.warn('nodelist buffer', packet_buffer)
 	return setmetatable({
 		lookup = {},
 		packet_buffer = packet_buffer,

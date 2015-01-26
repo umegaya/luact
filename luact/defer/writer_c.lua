@@ -61,8 +61,13 @@ function writer_raw_index.write(buf, append, p, sz)
 	end
 end
 -- after copied into write buff
-function writer_raw_index:syscall(io)
-	return io:write(self.p + self.ofs, self.sz - self.ofs)
+function writer_raw_index:syscall(_io)
+	--logger.info('write', _io, self, self.ofs, self.sz, self.p)
+	--for i=0,tonumber(self.sz)-1 do
+	--	io.write(('%02x'):format(ffi.cast('uint8_t *', self.p)[i])..":")
+	--end
+	--io.write('\n')
+	return _io:write(self.p + self.ofs, self.sz - self.ofs)
 end
 function writer_raw_index:sent(r)
 	-- logger.info('sent:', r, 'bytes')

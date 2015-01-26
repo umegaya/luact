@@ -127,7 +127,7 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		logger.info('============================== b4 probe fsm')
 		local ret = event.join(clock.alarm(5), unpack(evs))
 		assert(ret[#ret][1] ~= 'timeout', "operation should not timeout")
-		clock.sleep(1.0) -- here, assure to apply logs to this node. 
+		clock.sleep(2.0) -- here, assure to apply logs to this node. 
 		p:wait(4)
 		logger.info('============================== probe fsm')
 		local ok, r = arbiter:probe(function (rft)

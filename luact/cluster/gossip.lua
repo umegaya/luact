@@ -122,8 +122,8 @@ function gossip_index:gossip(mship)
 	for _, n in ipairs(nodes) do
 		-- it may resume gossip_index:leave
 		local vec, len = self.queue:pop(mship, mship.opts.mtu)
-		if len then
-			-- logger.info('sendgossip', n:address())
+		if vec and len then
+			-- logger.info('sendgossip', n:address(), self.udp:fd())
 			self.udp:writev(vec, len, n:address())
 		end
 	end
@@ -217,7 +217,7 @@ function gossip_index:exchange_with(target_actor, mship, join)
 		end
 		error(peer_nodes)
 	end
-	logger.info('gossip', 'exchange_with', target_actor, peer_nodes.size)
+	logger.info('gossip', 'exchange_with', target_actor, peer_nodes.size)--, debug.traceback())
 	local actor_node = mship.nodes:find_by_actor(target_actor)
 	for _,nd in peer_nodes:iter() do
 		mship:add_node(nd)
@@ -227,7 +227,6 @@ function gossip_index:exchange_with(target_actor, mship, join)
 			end
 		end
 	end
-	peer_nodes:fin()
 end
 ffi.metatype('luact_gossip_t', gossip_mt)
 
@@ -284,7 +283,6 @@ function membership_index:push_and_pull(nodes, join)
 			self:add_node(nd)
 		end
 	end
-	nodes:fin()
 	return self.nodes:pack(join)
 end
 function membership_index:pull()
@@ -310,6 +308,7 @@ function membership_index:broadcast_user_state()
 	if self.delegate then
 		local me = self.nodes:self()
 		me:update_user_state(self.delegate:user_state())
+		logger.info('new_change send')
 		self:sys_broadcast(protocol.new_change(me, true))
 	end
 end

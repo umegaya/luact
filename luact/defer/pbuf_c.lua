@@ -99,7 +99,7 @@ function wbuf_index:write()
 		local r = w:syscall(self.io)
 		w:sent(r)
 		if w:finish() then
-			-- print(now, w:chunk_size(), last, now + w:chunk_size())
+			--print(now, w:chunk_size(), last, now + w:chunk_size())
 			now = now + w:chunk_size()
 		else
 			break -- cannot send all buffer

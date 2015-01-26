@@ -421,6 +421,7 @@ function raft_state_container_index:snapshot_if_needed()
 	end
 end
 function raft_state_container_index:has_enough_nodes_for_election()
+	logger.warn('initial_node', self.opts.initial_node)
 	if self.opts.initial_node then
 		return true
 	end

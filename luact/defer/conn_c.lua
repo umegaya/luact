@@ -246,8 +246,11 @@ function conn_index:read_int(io, sr)
 	local rb = self.rb
 	local sup = sr:stream_unpacker(rb)
 	while self.dead ~= 1 and rb:read(io, 1024) do
+		-- logger.notice('---------------------------- recv packet')
+		-- rb:dump()
 		while true do 
 			local parsed, err = sr:unpack_packet(sup)
+			--- logger.info('parsed', parsed, rb.hpos, rb.used)
 			if not parsed then 
 				if err then exception.raise('invalid', 'encoding', err) end
 				break

@@ -41,6 +41,7 @@ function _M:pack_packet(buf, append, ...)
 	else 
 		buf:reserve_with_cmd(sz, WRITER_RAW)
 		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		--logger.warn('sz = ', sz)
 		pv.sz = sz
 		pv.ofs = 0
 		ffi.copy(pv.p, data, sz)
