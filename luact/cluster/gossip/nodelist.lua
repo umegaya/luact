@@ -43,7 +43,6 @@ _M.dead = ffi.cast('luact_gossip_node_status_t', "LUACT_GOSSIP_NODE_DEAD")
 -- luact_gossip_node_t
 local node_index = {}
 local cache = {}
-local node_tostring_work = memory.alloc_typed('pulpo_addr_t')
 local node_mt = {
 	__index = node_index,
 	__tostring = function (t)

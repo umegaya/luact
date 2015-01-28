@@ -7,6 +7,7 @@ local read, write = pbuf.read, pbuf.write
 local serde = require 'luact.serde'
 -- serde.DEBUG = true
 local uuid = require 'luact.uuid'
+local vid = require 'luact.vid'
 local clock = require 'luact.clock'
 local actor = require 'luact.actor'
 local msgidgen = require 'luact.msgid'
@@ -145,12 +146,12 @@ function conn_index:init_buffer()
 end
 function conn_index:start_io(opts, sr, server)
 	local rev, wev
+	wev = tentacle(self.write, self, self.io)
 	if opts.internal then
 		rev = tentacle(self.read_int, self, self.io, sr)
 	else
 		rev = tentacle(self.read_ext, self, self.io, true, sr)
 	end
-	wev = tentacle(self.write, self, self.io)
 	tentacle(self.sweeper, self, rev, wev)
 	-- for example, normal http (not 2.0) is volatile.
 	if not (server or opts.volatile_connection) then
@@ -283,11 +284,6 @@ function conn_index:write(io)
 end
 local conn_writer = assert(pbuf.writer.serde)
 local prefixes = actor.prefixes
-local function strip_result(...)
-	local r = {...}
-	if not r[1] then error(r[2]) end
-	return unpack(r, 2)	
-end
 local function common_dispatch(self, sent, id, t, ...)
 	if t.method == 'restart_child' then
 		logger.warn('restart_child', debug.traceback())
@@ -308,7 +304,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
 			return tentacle(self.async_sys, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			return strip_result(self:sys(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:sys(id, t.method, timeout, select(args_idx, ...)))
 		end
 	end
 	if sent then
@@ -317,7 +313,7 @@ local function common_dispatch(self, sent, id, t, ...)
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
 			return tentacle(self.async_send, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			return strip_result(self:send(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:send(id, t.method, timeout, select(args_idx, ...)))
 		end
 	else
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
@@ -325,43 +321,45 @@ local function common_dispatch(self, sent, id, t, ...)
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
 			return tentacle(self.async_call, self, id, t.method, timeout, select(args_idx, ...))
 		else
-			return strip_result(self:call(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:call(id, t.method, timeout, select(args_idx, ...)))
 		end
 	end
+end
+function conn_index:strip_result(ok, ...)
+	if not ok then error(({...})[1]) end
+	return ...
 end
 function conn_index:dispatch(t, ...)
 	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
 	return common_dispatch(self, t.id == select(1, ...), uuid.local_id(t.id), t, ...)
 end
-function conn_index:vdispatch(t, ...)
-	return common_dispatch(self, t.id == select(1, ...), t.id.path, t, ...)
-end
 -- normal family
 function conn_index:send(serial, method, timeout, ...)
 	local msgid = router.regist(tentacle.running(), timeout)
-	self.wb:send(conn_writer, self:serde(), router.SEND, serial, msgid, method, ...)
-	return tentacle.yield(msgid)
+	return self:send_and_wait(router.SEND, serial, msgid, method, ...)
 end
 function conn_index:call(serial, method, timeout, ...)
 	local msgid = router.regist(tentacle.running(), timeout)
-	self.wb:send(conn_writer, self:serde(), router.CALL, serial, msgid, method, ...)
-	return tentacle.yield(msgid)
+	return self:send_and_wait(router.CALL, serial, msgid, method, ...)
 end
 function conn_index:sys(serial, method, timeout, ...)
 	local msgid = router.regist(tentacle.running(), timeout)
-	self.wb:send(conn_writer, self:serde(), router.SYS, serial, msgid, method, ...)
+	return self:send_and_wait(router.SYS, serial, msgid, method, ...)
+end
+function conn_index:send_and_wait(cmd, serial, msgid, method, timeout, ...)
+	self.wb:send(conn_writer, self:serde(), cmd, serial, msgid, method, timeout, ...)
 	return tentacle.yield(msgid)
 end
 
 -- async family
 function conn_index:async_send(serial, method, timeout, ...)
-	return strip_result(self:send(serial, method, timeout, ...))
+	return self:strip_result(self:send(serial, method, timeout, ...))
 end
 function conn_index:async_call(serial, method, timeout, ...)
-	return strip_result(self:call(serial, method, timeout, ...))
+	return self:strip_result(self:call(serial, method, timeout, ...))
 end
 function conn_index:async_sys(serial, method, timeout, ...)
-	return strip_result(self:sys(serial, method, timeout, ...))
+	return self:strip_result(self:sys(serial, method, timeout, ...))
 end
 
 -- notify faimily 
@@ -428,6 +426,10 @@ function ext_conn_index:new_server(io, opts)
 	self:start_io(opts, self:serde(), true)
 	return self
 end
+-- for vid, 
+function ext_conn_index:dispatch(t, ...)
+	return common_dispatch(self, t.id == select(1, ...), t.id.path, t, ...)
+end
 function ext_conn_index:cmapkey()
 	return ffi.string(self.hostname)
 end
@@ -453,13 +455,16 @@ local function new_external_conn(hostname, opts)
 	return c
 end
 local function new_server_conn(io, opts)
+	local c
 	local af = io:address().p[0].sa_family
 	if af == AF_INET then
-		local c = allocate_conn()
+		c = allocate_conn()
 		c:new_server(io, opts)
 	elseif af == AF_INET6 then
-		local c = allocate_ext_conn()
-		c:new_server(io, opts)		
+		c = allocate_ext_conn()
+		c:new_server(io, opts)
+	else
+		exception.raise('invalid', 'unsupported address family', af)
 	end
 	-- it is possible that more than 2 connection which has same ip address from external.
 	-- OTOH there is only 1 connection established to communicate other machine in server cluster, 
@@ -485,8 +490,8 @@ local local_conn_mt = {
 }
 function local_conn_index:start_io(opts, sr, reader, writer)
 	local web, rev
-	rev = tentacle(self.read_int, self, reader, sr)
 	wev = tentacle(self.write, self, writer)
+	rev = tentacle(self.read_int, self, reader, sr)
 	tentacle(self.sweeper, self, wev, rev)
 	conn_tasks:add(self) -- start keeping alive
 end

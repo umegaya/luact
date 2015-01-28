@@ -1,13 +1,12 @@
 local msgidgen = require 'luact.msgid'
-local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local uuid = require 'luact.uuid'
 local actor = require 'luact.actor'
 local clock = require 'luact.clock'
+local vid = require 'luact.vid'
 
 local pulpo = require 'pulpo.init'
 local tentacle = require 'pulpo.tentacle'
--- tentacle.DEBUG2 = true
 local exception = require 'pulpo.exception'
 
 local _M = {}
@@ -31,6 +30,7 @@ _M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 
 local coromap = {}
 local timeout_periods = {}
+local dht
 
 local KIND = 1
 local UUID = 2
@@ -105,12 +105,37 @@ function _M.internal(connection, message)
 	-- logger.notice('router exit', unpack(message))
 end
 
+-- maintain availability during failover on going.
+local function vid_call_with_retry(id, sent, method, ...)
+::RETRY::
+	local a = dht:get(id)
+	local r, retry
+	if sent then
+		r = {pcall(a[method], a, ...)}
+	else
+		r = {pcall(a[method], ...)}
+	end
+	if r[1] then
+		return unpack(r)
+	elseif r[2]:is('actor_not_found') and (not retry) then
+		retry = true
+		dht:reflesh(id)
+		goto RETRY
+	elseif r[2]:is('actor_temporary_failure') then
+		clock.sleep(0.5)
+		goto RETRY
+	else
+		return unpack(r)
+	end
+end
+
 function _M.external(connection, message, from_untrusted)
+	logger.notice('router_external', unpack(message))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, EXCLUDE_NOTICE_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if from_untrusted then
 		if message[METHOD][1] == '_' then
-			connection:resp(message[MSGID], false, exception.raise('invalid', 'calling protected call', method[METHOD]))
+			connection:resp(message[MSGID], false, exception.raise('invalid', 'protected call', method[METHOD]))
 			return
 		end
 	end
@@ -119,21 +144,21 @@ function _M.external(connection, message, from_untrusted)
 	elseif not notice then
 		if kind == KIND_CALL then
 			tentacle(function (c, msg)
-				c:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], unpack(msg[ARGS])))
+				c:resp(msg[MSGID], vid_call_with_retry(msg[UUID], false, msg[METHOD], unpack(msg, ARGS)))
 			end, connection, message)
 		elseif kind == KIND_SEND then
 			tentacle(function (c, msg)
-				c:resp(msg[MSGID], pcall(dht[msg[UUID]][msg[METHOD]], dht[msg[UUID]], unpack(msg[ARGS])))
+				c:resp(msg[MSGID], vid_call_with_retry(msg[UUID], true, msg[METHOD], unpack(msg, ARGS)))
 			end, connection, message)	
 		end
 	else
 		if kind == KIND_CALL then
 			tentacle(function (msg)
-				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], unpack(msg[NOTIFY_ARGS]))
+				vid_call_with_retry(msg[UUID], false, msg[METHOD], unpack(msg, ARGS))
 			end, message)
 		elseif kind == KIND_SEND then
 			tentacle(function (msg)
-				pcall(dht[msg[NOTIFY_UUID]][msg[NOTIFY_METHOD]], dht[msg[NOTIFY_UUID]], unpack(msg[NOTIFY_ARGS]))
+				vid_call_with_retry(msg[UUID], true, msg[METHOD], unpack(msg, ARGS))
 			end, message)
 		end
 	end
@@ -166,12 +191,6 @@ end
 function _M.regist(co, timeout)
 	local msgid = msgidgen.new()
 	coromap[msgid] = co
-	if tentacle.DEBUG2 then
-		if not co then
-			logger.report('co null:', debug.traceback())
-		end			
-		co.bt2 = debug.traceback()
-	end
 	if timeout then
 		local nt = clock.get()
 		timeout_periods[msgid] = (timeout + nt)
@@ -181,6 +200,7 @@ function _M.regist(co, timeout)
 end
 
 function _M.initialize(opts)
+	dht = vid.dht
 	if _M.DEBUG then
 		debug_log = function (...)
 			logger.warn(...)
@@ -198,11 +218,7 @@ function _M.initialize(opts)
 				local co = coromap[id]
 				if co then
 					coromap[id] = nil
-					if tentacle.DEBUG2 then
-						tentacle.resume(co, false, exception.new('actor_timeout', id, co.bt, co.bt2))
-					else
-						tentacle.resume(co, false, exception.new('actor_timeout', id))
-					end
+					tentacle.resume(co, false, exception.new_with_bt('actor_timeout', "", id))
 				end
 			end
 		end

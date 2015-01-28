@@ -12,7 +12,7 @@ return {
 		config = {}, -- see cluster/gossip.lua for key and default
 	},
 	conn = {
-		internal_proto = "tcp+serpent",
+		internal_proto = "tcp+msgpack",
 		internal_port = 8008, 
 		use_connection_cache = false,
 	}, 

@@ -110,6 +110,7 @@ function gossip_index:run_reader(mship)
 	local mtu = mship.opts.mtu
 	local buf, len = ffi.new('char[?]', mtu)
 	while true do 
+		a:init()
 		len = self.udp:read(buf, mtu, a)
 		if len then
 			-- logger.info('receive', len)

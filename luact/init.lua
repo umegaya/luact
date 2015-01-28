@@ -14,12 +14,12 @@ require 'luact.util.patch'
 local actor = require 'luact.actor'
 local optparse = require 'luact.optparse'
 local listener = require 'luact.listener'
-local dht = require 'luact.dht'
 local pbuf = require 'luact.pbuf'
 local router = require 'luact.router'
 local conn = require 'luact.conn'
 local supervise = require 'luact.supervise'
 local uuid = require 'luact.uuid'
+local vid = require 'luact.vid'
 local common = require 'luact.serde.common'
 
 local _M = {}
@@ -93,6 +93,7 @@ factory = {
 	end,
 }
 local from_file, from_module = factory["file"], factory["module"]
+local dht
 
 -- additional thread startup routines
 local function init_worker(opts)
@@ -126,6 +127,7 @@ function _M.start(opts, executable)
 	pulpo.initialize(opts)
 	-- TODO : need to change pulpo configuration from commandline
 	_M.initialize(opts)
+	logger.warn('exe', tostring(executable), tostring(opts.executable))	
 	pulpo.run(opts, executable or opts.executable)
 end
 function _M.stop()
@@ -138,11 +140,11 @@ function _M.initialize(opts)
 	actor.initialize(opts.actor)
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
-	dht.initialize(opts.dht)
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id
 	_M.machine_id = uuid.node_address
+	dht = vid.dht
 	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
 
 	-- initialize listener of internal actor messaging 
@@ -163,8 +165,8 @@ function _M.initialize(opts)
 		_M.root = {
 			new = actor.new,
 			destroy = actor.destroy,
-			register = actor.register,
-			unregister = actor.unregister,
+			register = _M.register,
+			unregister = _M.unregister,
 			["require"] = _M.require, 
 			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
@@ -192,6 +194,29 @@ end
 function _M.supervise(target, opts, ...)
 	return supervise(assert(factory[type(target)]), opts, target, ...)
 end
+
+function _M.register(vid, fn, ...)
+	return dht:put(vid, function (ctor, ...)
+		return _M.supervise(ctor, false, ...)
+	end, fn, ...)
+end
+function _M.unregister(vid)
+	dht:remove(vid, function (a, id)
+		local tid = uuid.thread_id(a)
+		if tid == _M.thread_id then
+			actor.destroy(a)
+		else
+			actor.root_of(nil, tid).unregister(id)
+		end
+	end, vid)
+end
+--[[
+	create remote actor reference from its url
+	eg. ssh+json://myservice.com:10000/user/id0001
+--]]
+function _M.ref(url)
+	return vid.new(url)
+end
 function _M.monitor(watcher, target)
 	actor.monitor(watcher, target)
 end
@@ -201,6 +226,7 @@ function _M.kill(...)
 	end
 end
 _M.of = actor.of
+_M.root_of = actor.root_of
 -- for calling from dockerfile. initialize cdef cache of ffiex 
 -- so that it can be run 
 function _M.init_cdef_cache()
