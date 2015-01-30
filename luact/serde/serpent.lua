@@ -35,15 +35,17 @@ function _M:pack_packet(buf, append, ...)
 		-- pv must get after necessary size allocated. 
 		-- because reserve changed internal pointer of buf
 		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
+		assert((buf.buf + buf.max) >= (pv.p + pv.sz + sz))
 		ffi.copy(pv.p + pv.sz, data, sz)
 		pv.sz = pv.sz + sz
 		buf:use(sz)
 	else 
-		buf:reserve_with_cmd(sz, WRITER_RAW)
+		buf:reserve_with_cmd(sz + ffi.sizeof('luact_writer_raw_t'), WRITER_RAW)
 		pv = ffi.cast('luact_writer_raw_t*', buf:curr_p())
 		--logger.warn('sz = ', sz)
 		pv.sz = sz
 		pv.ofs = 0
+		assert((buf.buf + buf.max) >= (pv.p + sz))
 		ffi.copy(pv.p, data, sz)
 		buf:use(ffi.sizeof('luact_writer_raw_t') + sz)
 	end	

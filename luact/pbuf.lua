@@ -53,7 +53,7 @@ function rbuf_index:reserve(sz)
 		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
-		logger.info('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)--, debug.traceback())
+		logger.info('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max, newsz)
 		self.max = newsz
 		self.used = copyb
 	else

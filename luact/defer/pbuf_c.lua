@@ -62,32 +62,21 @@ end
 function wbuf_index:send(w, ...)
 	w.write(self.next, self.last_cmd == w.cmd, ...)
 	if self.last_cmd == WRITER_DEACTIVATE then
-		-- logger.info('wbuf_index:send', self.io)
+		-- logger.info('wbuf_index:send', self.io:address())
 		self.io:reactivate_write() -- add edge trigger again.
 		-- so even no actual environment changed, edge trigger should be triggered again.
 	end
 	self.last_cmd = w.cmd
 end
 function wbuf_index:write()
-	-- print('avail:', self.curr:available(), self.next:available())
-	if self.curr:available() == 0 then
-		-- print('swap current:', self.curr, self.next)
-		repeat
-			-- there should be no unread buffer (because available() == 0)
-			-- TODO : reduce curr buffer size if its too large.
-			self.curr:reset()
-			-- because pulpo's polling always edge triggered, 
-			-- it waits for triggering edged write event caused by calling io:reactivate_write()
-			-- most of case. (see wbuf_index.do_send)
-			-- even if reactivate_write calls before pulpo.event.wait_write, it works.
-			-- because next epoll_wait or kqueue call will be done after this coroutine yields 
-			-- thus, pulpo.event.wait_write always calls before polling syscall.
-			if not event.wait_reactivate_write(self.io) then
-				logger.warn('write thread terminate:', self.io:fd())
-				return
-			end
-			-- wait until next wbuf_index.send called...
-		until self:swap()
+	-- logger.info('avail:', self.curr:available(), self.next:available())
+	while not self:swap() do
+		-- because pulpo's polling always edge triggered, 
+		-- it waits for triggering edged write event, caused by calling io:reactivate_write().
+		if not event.wait_reactivate_write(self.io) then
+			logger.warn('write thread terminate:', self.io:fd())
+			return
+		end
 	end
 	local r
 	local curr = self.curr
@@ -101,7 +90,7 @@ function wbuf_index:write()
 		local r = w:syscall(self.io)
 		w:sent(r)
 		if w:finish() then
-			--print(now, w:chunk_size(), last, now + w:chunk_size())
+			-- logger.info(now, w:chunk_size(), last, now + w:chunk_size())
 			now = now + w:chunk_size()
 		else
 			break -- cannot send all buffer
@@ -111,19 +100,24 @@ function wbuf_index:write()
 	curr:seek_from_curr(now - curr:curr_p())
 end
 function wbuf_index:swap()
-	local tmp = self.curr
-	self.curr = self.next
-	self.next = tmp
-	self.curr:seek_from_start(0) -- rewind hpos to read from start
 	if self.curr:available() == 0 then
-		-- it means there is no more packet to send at this timing
-		-- calling wbuf_index:do_send from any thread, resumes this yield
-		self.last_cmd = WRITER_DEACTIVATE
-		self.io:deactivate_write()
-		-- yield is done after exiting swap() call
-		return false
-	else
-		self.last_cmd = WRITER_NONE -- make next write append == false 
+		-- there should be no unread buffer (because self.next:available() == 0)
+		self.curr:reset()
+		-- logger.info('swap current:', self.curr, self.next)
+		local tmp = self.curr
+		self.curr = self.next
+		self.next = tmp
+		self.curr:seek_from_start(0) -- rewind hpos to read from start
+		if self.curr:available() == 0 then
+			-- it means there is no more packet to send at this timing
+			-- calling wbuf_index:do_send from any thread, resumes this yield
+			self.last_cmd = WRITER_DEACTIVATE
+			self.io:deactivate_write()
+			-- yield is done after exiting swap() call
+			return false
+		else
+			self.last_cmd = WRITER_NONE -- make next write append == false 
+		end
 	end
 	return true
 end

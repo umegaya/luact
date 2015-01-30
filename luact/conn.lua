@@ -1,7 +1,7 @@
 local require_on_boot = (require 'pulpo.package').require
 local _M = require_on_boot 'luact.defer.conn_c'
 
-_M.DEFAULT_SERDE = "serpent"
+_M.DEFAULT_SERDE = "msgpack"
 _M.DEFAULT_TIMEOUT = 5
 
 function _M.parse_hostname(hostname)

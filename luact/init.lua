@@ -20,6 +20,7 @@ local conn = require 'luact.conn'
 local supervise = require 'luact.supervise'
 local uuid = require 'luact.uuid'
 local vid = require 'luact.vid'
+local peer = require 'luact.peer'
 local common = require 'luact.serde.common'
 
 local _M = {}
@@ -127,7 +128,6 @@ function _M.start(opts, executable)
 	pulpo.initialize(opts)
 	-- TODO : need to change pulpo configuration from commandline
 	_M.initialize(opts)
-	logger.warn('exe', tostring(executable), tostring(opts.executable))	
 	pulpo.run(opts, executable or opts.executable)
 end
 function _M.stop()
@@ -181,6 +181,18 @@ function _M.initialize(opts)
 				local ret = {}
 				return util.merge_table(ret, options.stat_proc and options.stat_proc() or {})
 			end,
+			push = function (id, cmd, ...)
+				local c = conn.get_by_peer_id(id)
+				if c then
+					if bit.band(cmd, router.NOTICE_MASK) ~= 0 then
+						c:rawsend(cmd, ...)
+					else
+						return c:send_and_wait(cmd, ...)
+					end
+				else
+					return false, exception.new('actor_not_found', 'peer', id)
+				end
+			end,
 		}
 		return _M.root
 	end, opts)
@@ -216,6 +228,15 @@ end
 --]]
 function _M.ref(url)
 	return vid.new(url)
+end
+--[[
+	returns remote reference to invoke current coroutine execution
+	if calling peer and it returns actor_not_found, this means peer is gone (closed)
+--]]
+function _M.peer(dest_path)
+	if not dest_path then exception.raise('invalid', 'peer require destination path') end
+	local id = _M.tentacle.get_context()[router.CONTEXT_PEER_ID]
+	return id and peer.new(id, dest_path)
 end
 function _M.monitor(watcher, target)
 	actor.monitor(watcher, target)

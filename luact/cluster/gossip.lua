@@ -365,6 +365,7 @@ function membership_index:handle_user_message(message)
 	end
 end
 function membership_index:alive(nodedata, bootstrap)
+	local cnt = 0
 	local n = self.nodes:find_by_nodedata(nodedata)
 	local is_my_node = self.nodes:self():has_same_nodedata(nodedata)
 	local resurrect, newly_added, changed

@@ -84,11 +84,11 @@ serde_mt.__index = serde_mt
 serde_mt.packer = {}
 serde_mt.conv = ffi.new('luact_bytearray_scalar_conv_t')
 function serde_mt.pack_length16(p, len)
-	ffi.cast('uint16_t*', p)[0] = socket.htons(len)
+	ffi.cast('uint16_t*', p)[0] = socket.htons(tonumber(len))
 	return 2
 end
 function serde_mt.pack_length32(p, len)
-	ffi.cast('uint32_t*', p)[0] = socket.htonl(len)
+	ffi.cast('uint32_t*', p)[0] = socket.htonl(tonumber(len))
 	return 4
 end
 function serde_mt.packer.string(buf, str)

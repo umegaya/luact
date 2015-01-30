@@ -39,6 +39,9 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 	end
 	local commit_results = {}
 	for i=1,#res do
+		if thread_id == 1 then
+			logger.report('thread1, propose result', unpack(res[i], 3))
+		end
 		table.insert(commit_results, {unpack(res[i], 3)})
 	end
 	local ok, r = arbiter:probe(function (rft, tid, res)
@@ -53,6 +56,7 @@ tools.start_local_cluster(3, 2, tools.new_fsm, function (arbiter, thread_id)
 					local commit_tid, val = unpack(fsm[i])
 					assert(val == i * (10 + commit_tid), "commit should be done")
 				else
+					logger.warn('commit for ', i, 'discarded by timeout')
 					-- propose may be discarded if propose is sent to the leader 
 					-- before its stale propagate to other node by heartbeat timeout
 					assert(err:is('actor_timeout'), 'only timeout error is permisible:'..tostring(err))

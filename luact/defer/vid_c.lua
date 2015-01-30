@@ -54,7 +54,6 @@ function vid_manager_mt:put(k, fn, ...)
 	return self.map:touch(function (data, key, ctor, ...) 
 		return data:put(key, function (ent, f, ...)
 			ent.data:init(f, ...)
-			logger.warn('vid_manager_mt:put', key, ent.data)
 		end, ctor, ...)
 	end, k, fn, ...)
 end

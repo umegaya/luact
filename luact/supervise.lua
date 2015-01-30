@@ -16,7 +16,7 @@ local opts_mt = { __index = _M.opts }
 
 -- hook system event
 function supervisor_index:__actor_event__(act, event, ...)
-	-- print('sv event == ', act, event, ...)
+	-- logger.report('sv event == ', act, event, debug.traceback())
 	if event == actor.EVENT_LINK_DEAD then
 		local id, reason = select(1, ...)
 		if reason or self.opts.always then

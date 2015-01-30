@@ -168,7 +168,7 @@ end
 function raft_index:propose(logs, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:propose(logs, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:write_logs(msgid, logs)
 	-- wait until logs are committed
@@ -177,7 +177,7 @@ end
 function raft_index:add_replica_set(replica_set, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:add_replica_set(replica_set, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
 	-- wait until logs are committed
@@ -186,7 +186,7 @@ end
 function raft_index:remove_replica_set(replica_set, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:remove_replica_set(replica_set, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
 	-- wait until logs are committed

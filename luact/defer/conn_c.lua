@@ -8,6 +8,7 @@ local serde = require 'luact.serde'
 -- serde.DEBUG = true
 local uuid = require 'luact.uuid'
 local vid = require 'luact.vid'
+local peer = require 'luact.peer'
 local clock = require 'luact.clock'
 local actor = require 'luact.actor'
 local msgidgen = require 'luact.msgid'
@@ -34,7 +35,7 @@ ffi.cdef [[
 		luact_wbuf_t wb;
 		unsigned char serde_id, dead;
 		unsigned short task_processor_id;
-		uint32_t numeric_ipv4;
+		uint32_t local_peer_id, numeric_ipv4;
 	} luact_conn_t;
 	typedef struct luact_ext_conn {
 		pulpo_io_t *io;
@@ -42,6 +43,7 @@ ffi.cdef [[
 		luact_wbuf_t wb;
 		unsigned char serde_id, dead;
 		unsigned short task_processor_id;
+		uint32_t local_peer_id;
 		char *hostname;
 	} luact_ext_conn_t;
 	typedef struct luact_local_conn {
@@ -53,6 +55,18 @@ ffi.cdef [[
 		int thread_id;
 	} luact_local_conn_t;
 ]]
+ffi.cdef (([[
+typedef union luact_peer {
+	uint64_t peer_id;
+	struct luact_peer_format {
+		uint32_t local_peer_id:%u;
+		uint32_t thread_id:%u;
+		uint32_t machine_id:32;
+	} detail;
+} luact_peer_t;
+]]):format(32 - uuid.THREAD_BIT_SIZE, uuid.THREAD_BIT_SIZE))
+_M.MAX_LOCAL_PEER_ID = bit.lshift(1, 32 - uuid.THREAD_BIT_SIZE) - 1
+
 
 local AF_INET = ffi.defs.AF_INET
 local AF_INET6 = ffi.defs.AF_INET6
@@ -62,6 +76,7 @@ local AF_INET6 = ffi.defs.AF_INET6
  	connection managers (just hash map)
 --]]
 local cmap, lcmap = {}, {}
+local peer_cmap = {}
 local conn_free_list = {}
 _M.local_cmap = lcmap -- for external use
 
@@ -193,6 +208,7 @@ function conn_index:new(machine_ipv4, opts)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
 	self.numeric_ipv4 = machine_ipv4
+	self.local_peer_id = 0
 	self:start_io(opts, self:serde())
 	return self
 end
@@ -201,6 +217,7 @@ function conn_index:new_server(io, opts)
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
 	self.numeric_ipv4 = io:address():as_machine_id()
+	self:assign_local_peer_id()
 	self:start_io(opts, self:serde(), true)
 	return self
 end
@@ -231,6 +248,29 @@ local function conn_common_destroy(self, reason, map, free_list)
 		table.insert(free_list, self)
 	end
 end
+-- for server push
+local peer_id_seed = 1
+function conn_index:assign_local_peer_id()
+	local start = peer_id_seed
+	while peer_cmap[peer_id_seed] do
+		peer_id_seed = peer_id_seed + 1
+		if (peer_id_seed - start) > 100000 then
+			exception.raise('fatal', 'peer id seems exhausted')
+		end
+		if peer_id_seed > _M.MAX_LOCAL_PEER_ID then
+			start = start - peer.MAX_LOCAL_PEER_ID -- keep above restriction valid
+			peer_id_seed = 1
+		end
+	end
+	assert(peer_id_seed > 0)
+	self.local_peer_id = peer_id_seed
+end
+function conn_index:peer_id()
+	return _M.make_id(self.local_peer_id, pulpo.thread_id, uuid.node_address)
+end
+function conn_index:local_peer_key()
+	return tonumber(self.local_peer_id)
+end
 function conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
@@ -243,10 +283,13 @@ end
 function conn_index:cmapkey()
 	return tonumber(self:machine_id())
 end
+function conn_index:alive()
+	return self.dead ~= 1 
+end
 function conn_index:read_int(io, sr)
 	local rb = self.rb
 	local sup = sr:stream_unpacker(rb)
-	while self.dead ~= 1 and rb:read(io, 1024) do
+	while self:alive() and rb:read(io, 1024) do
 		-- logger.notice('---------------------------- recv packet')
 		-- rb:dump()
 		while true do 
@@ -263,8 +306,9 @@ function conn_index:read_int(io, sr)
 end
 function conn_index:read_ext(io, unstrusted, sr)
 	local rb = self.rb
-	while self.dead ~= 1 and rb:read(io, 1024) do
+	while self:alive() and rb:read(io, 1024) do
 		while true do 
+			--- logger.report('read_ext', rb.used, rb.hpos)
 			local parsed, err = sr:unpack_packet(rb)
 			if not parsed then 
 				if err then exception.raise('invalid', 'encoding', err) end
@@ -278,50 +322,48 @@ end
 function conn_index:write(io)
 	local wb = self.wb
 	wb:set_io(io)
-	while self.dead ~= 1 do
+	while self:alive() do
 		wb:write()
 	end
 end
 local conn_writer = assert(pbuf.writer.serde)
 local prefixes = actor.prefixes
 local function common_dispatch(self, sent, id, t, ...)
-	if t.method == 'restart_child' then
-		logger.warn('restart_child', debug.traceback())
-	end
 	local r
 	t.id = nil -- release ownership of this table
-	if self.dead ~= 0 then exception.raise('invalid', 'dead connection', tostring(self)) end
+	if not self:alive() then exception.raise('invalid', 'dead connection', tostring(self)) end
 	local args_idx = 1
+	local ctx = tentacle.get_context()
 	if sent then args_idx = args_idx + 1 end
-	local timeout = _M.DEFAULT_TIMEOUT
 	if bit.band(t.flag, prefixes.timed_) ~= 0 then
-		timeout = select(args_idx, ...)
+		ctx = ctx or {}
+		ctx[router.CONTEXT_TIMEOUT] = clock.get() + select(args_idx, ...)
 		args_idx = args_idx + 1
 	end
 	if bit.band(t.flag, prefixes.__actor_) ~= 0 then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_sys(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.async_sys, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_sys, self, id, t.method, ctx, select(args_idx, ...))
 		else
-			return self:strip_result(self:sys(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:sys(id, t.method, ctx, select(args_idx, ...)))
 		end
 	end
 	if sent then
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_send(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.async_send, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_send, self, id, t.method, ctx, select(args_idx, ...))
 		else
-			return self:strip_result(self:send(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:send(id, t.method, ctx, select(args_idx, ...)))
 		end
 	else
 		if bit.band(t.flag, prefixes.notify_) ~= 0 then
 			return self:notify_call(id, t.method, select(args_idx, ...))
 		elseif bit.band(t.flag, prefixes.async_) ~= 0 then
-			return tentacle(self.async_call, self, id, t.method, timeout, select(args_idx, ...))
+			return tentacle(self.async_call, self, id, t.method, ctx, select(args_idx, ...))
 		else
-			return self:strip_result(self:call(id, t.method, timeout, select(args_idx, ...)))
+			return self:strip_result(self:call(id, t.method, ctx, select(args_idx, ...)))
 		end
 	end
 end
@@ -334,52 +376,53 @@ function conn_index:dispatch(t, ...)
 	return common_dispatch(self, t.id == select(1, ...), uuid.local_id(t.id), t, ...)
 end
 -- normal family
-function conn_index:send(serial, method, timeout, ...)
-	local msgid = router.regist(tentacle.running(), timeout)
-	return self:send_and_wait(router.SEND, serial, msgid, method, ...)
+function conn_index:send(serial, method, ctx, ...)
+	return self:send_and_wait(router.SEND, serial, method, ctx, ...)
 end
-function conn_index:call(serial, method, timeout, ...)
-	local msgid = router.regist(tentacle.running(), timeout)
-	return self:send_and_wait(router.CALL, serial, msgid, method, ...)
+function conn_index:call(serial, method, ctx, ...)
+	return self:send_and_wait(router.CALL, serial, method, ctx, ...)
 end
-function conn_index:sys(serial, method, timeout, ...)
-	local msgid = router.regist(tentacle.running(), timeout)
-	return self:send_and_wait(router.SYS, serial, msgid, method, ...)
+function conn_index:sys(serial, method, ctx, ...)
+	return self:send_and_wait(router.SYS, serial, method, ctx, ...)
 end
-function conn_index:send_and_wait(cmd, serial, msgid, method, timeout, ...)
-	self.wb:send(conn_writer, self:serde(), cmd, serial, msgid, method, timeout, ...)
+function conn_index:send_and_wait(cmd, serial, method, ctx, ...)
+-- logger.info('send_and_wait', cmd, serial, method, ctx, debug.traceback())
+	local msgid = router.regist(tentacle.running(), ctx and ctx[router.CONTEXT_TIMEOUT] or (clock.get() + _M.DEFAULT_TIMEOUT))
+	self:rawsend(cmd, serial, msgid, method, ctx, ...)
 	return tentacle.yield(msgid)
 end
 
+
 -- async family
-function conn_index:async_send(serial, method, timeout, ...)
-	return self:strip_result(self:send(serial, method, timeout, ...))
+function conn_index:async_send(serial, method, ctx, ...)
+	return self:strip_result(self:send(serial, method, ctx, ...))
 end
-function conn_index:async_call(serial, method, timeout, ...)
-	return self:strip_result(self:call(serial, method, timeout, ...))
+function conn_index:async_call(serial, method, ctx, ...)
+	return self:strip_result(self:call(serial, method, ctx, ...))
 end
-function conn_index:async_sys(serial, method, timeout, ...)
-	return self:strip_result(self:sys(serial, method, timeout, ...))
+function conn_index:async_sys(serial, method, ctx, ...)
+	return self:strip_result(self:sys(serial, method, ctx, ...))
 end
 
 -- notify faimily 
 function conn_index:notify_call(serial, method, ...)
-	self.wb:send(conn_writer, self:serde(), router.NOTICE_CALL, serial, method, ...)
+	self:rawsend(router.NOTICE_CALL, serial, method, ...)
 end
 function conn_index:notify_send(serial, method, ...)
-	self.wb:send(conn_writer, self:serde(), router.NOTICE_SEND, serial, method, ...)
+	self:rawsend(router.NOTICE_SEND, serial, method, ...)
 end
 function conn_index:notify_sys(serial, method, ...)
-	self.wb:send(conn_writer, self:serde(), router.NOTICE_SYS, serial, method, ...)
+	self:rawsend(router.NOTICE_SYS, serial, method, ...)
 end
 
 -- response family
 function conn_index:resp(msgid, ...)
-	self.wb:send(conn_writer, self:serde(), router.RESPONSE, msgid, ...)
+	self:rawsend(router.RESPONSE, msgid, ...)
 end
 
 -- direct send
 function conn_index:rawsend(...)
+-- logger.warn('conn:rawsend', self.io:address(), ...)
 	self.wb:send(conn_writer, self:serde(), ...)
 end
 
@@ -415,6 +458,7 @@ function ext_conn_index:new(hostname, opts)
 	self.hostname = memory.strdup(hostname)
 	self.io,self.serde_id = open_io(hostname, opts)
 	self.dead = 0
+	self.local_peer_id = 0
 	self:start_io(opts, self:serde())
 	return self
 end
@@ -423,6 +467,7 @@ function ext_conn_index:new_server(io, opts)
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
 	self.dead = 0
+	self:assign_local_peer_id()
 	self:start_io(opts, self:serde(), true)
 	return self
 end
@@ -435,6 +480,7 @@ function ext_conn_index:cmapkey()
 end
 function ext_conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
+	peer_cmap[self:local_peer_key()] = nil	
 	memory.free(self.hostname)
 end
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)
@@ -471,8 +517,8 @@ local function new_server_conn(io, opts)
 	-- currently only internal connection will be cached to reduce total number of connection
 	if opts.internal then
 		cmap[c:cmapkey()] = c
-	else
-		-- but we need to use connection to client to send something.
+	elseif not opts.volatile_connection then
+		peer_cmap[c:local_peer_key()] = c
 	end
 	return c
 end
@@ -529,6 +575,10 @@ end
 function local_conn_index:destroy(reason)
 	conn_common_destroy(self, reason, lcmap, local_conn_free_list)
 end
+function local_conn_index:rawsend(...)
+-- logger.warn('conn:rawsend', self.thread_id, ...)
+	self.wb:send(conn_writer, self:serde(), ...)
+end
 ffi.metatype('luact_local_conn_t', local_conn_mt)
 
 -- create local connections
@@ -548,6 +598,39 @@ local function new_local_conn(thread_id, opts)
 end
 
 
+--[[
+	peer object ()
+--]]
+local peer_mt = pulpo.util.copy_table(conn_index)
+local peer_free_list = {}
+peer_mt.__index = peer_mt
+function peer_mt:send_and_wait(cmd, serial, method, ctx, ...)
+	return actor.root_of(self.detail.machine_id, self.detail.thread_id).push(self.detail.local_peer_id, 
+		cmd, serial, method, ctx, ...)
+end
+function peer_mt:rawsend(cmd, ...)
+	assert(bit.band(cmd, router.NOTICE_MASK) ~= 0)
+	actor.root_of(self.detail.machine_id, self.detail.thread_id).push(self.detail.local_peer_id, cmd, ...)	
+end
+function peer_mt:dispatch(t, ...)
+	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
+	return common_dispatch(self, t.id == select(1, ...), t.id.path, t, ...)
+end
+function peer_mt:alive() 
+	return true
+end
+function peer_mt:__gc()
+	table.insert(peer_free_list, self)
+end
+ffi.metatype('luact_peer_t', peer_mt)
+local function allocate_peer()
+	if #peer_free_list > 0 then
+		return table.remove(peer_free_list)
+	else
+		return memory.alloc_typed('luact_peer_t')
+	end
+end
+
 
 --[[
  	module functions
@@ -561,6 +644,21 @@ function _M.internal_hostname_by_addr(numeric_ipv4)
 	internal_hostname_buffer[2] = socket.host_by_numeric_ipv4_addr(numeric_ipv4)
 	return table.concat(internal_hostname_buffer)
 end
+
+-- create peer object (represent client which initiates current coroutine's execution)
+function _M.new_peer(peer_id)
+	local p = allocate_peer()
+	p.peer_id = peer_id
+	return p
+end
+local make_id_work = memory.alloc_typed('luact_peer_t')
+function _M.make_id(local_peer_id, thread_id, machine_id)
+	make_id_work.detail.local_peer_id = local_peer_id
+	make_id_work.detail.thread_id = thread_id
+	make_id_work.detail.machine_id = machine_id
+	return make_id_work.peer_id
+end
+
 
 -- initialize
 function _M.initialize(opts)
@@ -602,6 +700,9 @@ function _M.get_by_hostname(hostname)
 		c = new_external_conn(hostname, _M.opts)
 	end
 	return c
+end
+function _M.get_by_peer_id(peer_id)
+	return peer_cmap[peer_id]
 end
 
 -- connect to another thread in same node

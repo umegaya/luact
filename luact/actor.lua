@@ -116,6 +116,7 @@ local function parse_method_name(name)
 	until not match 
 	return name,flag
 end	
+_M.parse_method_name = parse_method_name
 
 local function uuid_caller_proc(t, ...)
 	local c = conn.get(t.id)
