@@ -7,6 +7,7 @@ local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local socket = require 'pulpo.socket'
 local exception = require 'pulpo.exception'
+local util = require 'pulpo.util'
 
 local _M = {}
 local C = ffi.C
@@ -83,6 +84,16 @@ function _M.thread_id(t)
 end
 function _M.local_id(t) 
 	return t.__tag__.local_id 
+end
+function _M.check_local_id(id)
+	assert(id)
+	_M.uuid_work.__tag__.local_id = id
+	if (_M.uuid_work.__detail__.timestamp_hi ~= 0) then
+		logger.error('invalid ts', tostring(id))
+		if _M.__RB then
+			_M.__RB:dump()
+		end
+	end
 end
 function _M.serial(t) -- local_id without thread_id
 	return bit.bor(bit.lshift(_M.timestamp(t), _M.SERIAL_BIT_SIZE), t.__detail__.serial)
@@ -218,6 +229,9 @@ local sprintf_workmem_size = 32
 local sprintf_workmem = memory.alloc_typed('char', sprintf_workmem_size)
 function _M.tostring(uuid)
 	return ('%08x:%08x:%08x'):format(uuid.__tag2__.local_id[0], uuid.__tag2__.local_id[1], uuid.__tag__.machine_id)
+end
+function _M.inspect(uuid)
+	print(_M.thread_id(uuid), uuid.__detail__.serial, uuid.__detail__.timestamp_hi)
 end
 
 return _M

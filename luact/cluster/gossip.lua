@@ -124,7 +124,7 @@ function gossip_index:gossip(mship)
 		-- it may resume gossip_index:leave
 		local vec, len = self.queue:pop(mship, mship.opts.mtu)
 		if vec and len then
-			-- logger.info('sendgossip', n:address(), self.udp:fd())
+			-- logger.info('sendgossip', n:address())
 			self.udp:writev(vec, len, n:address())
 		end
 	end
@@ -309,7 +309,7 @@ function membership_index:broadcast_user_state()
 	if self.delegate then
 		local me = self.nodes:self()
 		me:update_user_state(self.delegate:user_state())
-		logger.info('new_change send')
+		-- logger.info('change user state send')
 		self:sys_broadcast(protocol.new_change(me, true))
 	end
 end

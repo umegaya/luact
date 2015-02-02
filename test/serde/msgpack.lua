@@ -3,10 +3,18 @@ local msgpack = require 'luact.serde.msgpack'
 local uuid = require 'luact.uuid'
 local pbuf = require 'luact.pbuf'
 local common = require 'luact.serde.common'
+local socket = require 'pulpo.socket'
 
 local memory = luact.memory
 local exception = luact.exception
 local util = luact.util
+
+local bign = ffi.new('uint64_t', 0x0001349500002001ULL)
+local bign2 = ffi.new('uint64_t', 4743754768895923934ULL)
+local bign3 = ffi.new('uint64_t', 10141066673075246401ULL)
+assert(bign == socket.ntohll(socket.htonll(bign, true), true))
+assert(bign2 == socket.ntohll(socket.htonll(bign2, true), true))
+assert(bign3 == socket.ntohll(socket.htonll(bign3, true), true))
 
 ffi.cdef [[
 typedef struct long_struct {

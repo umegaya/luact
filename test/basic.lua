@@ -6,6 +6,10 @@ luact.start({
 }, function ()
 	local luact = require 'luact.init'
 	local a1 = luact {
+		recv_nil = function (x, y)
+			assert(x == nil and y == 3)
+			return nil, 6
+		end,
 		hoge = function (n)
 			return 'hoge'..n
 		end,
@@ -19,7 +23,9 @@ luact.start({
 
 	print('actors', a1, a2, a3)
 
-	assert(a1.hoge(2) == 'hoge2')
+	assert(a1.hoge(2, nil, false) == 'hoge2')
+	local x, y = a1.recv_nil(nil, 3)
+	assert(x == nil and y == 6)
 	assert(a2:fuga(3) == 4)
 	assert(a3.dump({"remote", "serpent"}) == [[do local _={[1]="remote",[2]="serpent"};return _;end]])
 	luact.kill(a1, a2, a3)

@@ -28,15 +28,15 @@ local b2s_conv_mt = {
 	__index = b2s_conv_index
 }
 
-function b2s_conv_index:unsigned2ptr(v, rfl)
-	if rfl.size == 1 then
+function b2s_conv_index:unsigned2ptr(v, size)
+	if size == 1 then
 		self.b = v
-	elseif rfl.size == 2 then
-		self.us = v
-	elseif rfl.size == 4 then
-		self.u = v
-	elseif rfl.size == 8 then
-		self.ull = v
+	elseif size == 2 then
+		self.us = socket.htons(v)
+	elseif size == 4 then
+		self.u = socket.htonl(v)
+	elseif size == 8 then
+		self.ull = socket.htonll(v)
 	end
 	return self.p
 end
@@ -46,22 +46,22 @@ function b2s_conv_index:ptr2unsigned(ptr, size)
 	if size == 1 then
 		return self.b
 	elseif size == 2 then
-		return self.us
+		return socket.ntohs(self.us)
 	elseif size == 4 then
-		return self.u
+		return socket.ntohl(self.u)
 	elseif size == 8 then
-		return self.ull
+		return socket.ntohll(self.ull)
 	end
 end
-function b2s_conv_index:signed2ptr(v, rfl)
-	if rfl.size == 1 then
+function b2s_conv_index:signed2ptr(v, size)
+	if size == 1 then
 		self.c = v
-	elseif rfl.size == 2 then
-		self.s = v
-	elseif rfl.size == 4 then
-		self.i = v
-	elseif rfl.size == 8 then
-		self.ll = v
+	elseif size == 2 then
+		self.s = socket.htons(v)
+	elseif size == 4 then
+		self.i = socket.htonl(v)
+	elseif size == 8 then
+		self.ll = socket.htonll(v)
 	end
 	return self.p
 end
@@ -71,18 +71,20 @@ function b2s_conv_index:ptr2signed(ptr, size)
 	if size == 1 then
 		return self.c
 	elseif size == 2 then
-		return self.s
+		return socket.ntohs(self.s)
 	elseif size == 4 then
-		return self.i
+		return socket.ntohl(self.i)
 	elseif size == 8 then
-		return self.ll
+		return socket.ntohll_signed(self.ll)
 	end
 end
-function b2s_conv_index:float2ptr(v, rfl)
-	if rfl.size == 4 then
+function b2s_conv_index:float2ptr(v, size)
+	if size == 4 then
 		self.f = v
-	elseif rfl.size == 8 then
+		self.u = socket.htonl(self.u)
+	elseif size == 8 then
 		self.d = v
+		self.ull = socket.htonll(self.ull)
 	end
 	return self.p
 end
@@ -90,8 +92,10 @@ function b2s_conv_index:ptr2float(ptr, size)
 	local size = size or #ptr
 	ffi.copy(self.p, ptr, size)
 	if size == 4 then
+		self.u = socket.ntohl(self.u)
 		return self.f
 	elseif size == 8 then
+		self.ull = socket.ntohll(self.ull)
 		return self.d
 	end
 end
@@ -118,6 +122,7 @@ _M.json_unpacker = {}
 _M.protobuf_unpacker = {}
 _M.msgpack_unpacker = {}
 function _M.register_ctype(what, name, serde, id)
+	-- logger.info('register_ctype', what, name, tostring(serde), id)
 	local t = what.." "..name
 	if id then
 		map_ctype_id[what][name] = id
@@ -141,6 +146,7 @@ function _M.ctype_id(what, name)
 end
 function _M.ctype_from_id(id)
 	local tmp = tonumber(id)
+	-- logger.warn(id, map_id_ctype[tmp], map_id_ctype_ptr[tmp])
 	return map_id_ctype[tmp], map_id_ctype_ptr[tmp]
 end
 
@@ -155,13 +161,13 @@ function b2s_conv_index:escape_cdata(tmp, idx, arg)
 -- print('cdata arg:', refl.what, refl.name, tostring(arg))
 	if refl.what == 'int' or refl.what == 'enum' then
 		if refl.unsigned then
-			tmp[idx] = ffi.string(self:unsigned2ptr(arg, refl), refl.size)
+			tmp[idx] = ffi.string(self:unsigned2ptr(arg, refl.size), refl.size)
 		else
-			tmp[idx] = ffi.string(self:signed2ptr(arg, refl), refl.size)
+			tmp[idx] = ffi.string(self:signed2ptr(arg, refl.size), refl.size)
 		end
 		return {name = 'int', unsigned = refl.unsigned}
 	elseif refl.what == 'float' then
-		tmp[idx] = ffi.string(self:float2ptr(arg, refl), refl.size)
+		tmp[idx] = ffi.string(self:float2ptr(arg, refl.size), refl.size)
 		return {name = 'float'}
 	elseif refl.what == 'struct' or refl.what == 'union' then
 		-- print('refl.name = ', refl.name, 'size = ', refl.size)

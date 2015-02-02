@@ -293,28 +293,29 @@ function conn_index:read_int(io, sr)
 		-- logger.notice('---------------------------- recv packet')
 		-- rb:dump()
 		while true do 
-			local parsed, err = sr:unpack_packet(sup)
+			local parsed, err_or_len = sr:unpack_packet(sup)
 			--- logger.info('parsed', parsed, rb.hpos, rb.used)
 			if not parsed then 
-				if err then exception.raise('invalid', 'encoding', err) end
+				if err_or_len then exception.raise('invalid', 'encoding', err_or_len) end
 				break
 			end
-			router.internal(self, parsed)
+			router.internal(self, parsed, err_or_len)
 		end
 		rb:shrink_by_hpos()
 	end
 end
 function conn_index:read_ext(io, unstrusted, sr)
 	local rb = self.rb
+	local sup = sr:stream_unpacker(rb)
 	while self:alive() and rb:read(io, 1024) do
 		while true do 
 			--- logger.report('read_ext', rb.used, rb.hpos)
-			local parsed, err = sr:unpack_packet(rb)
+			local parsed, err_or_len = sr:unpack_packet(sup)
 			if not parsed then 
-				if err then exception.raise('invalid', 'encoding', err) end
+				if err_or_len then exception.raise('invalid', 'encoding', err_or_len) end
 				break
 			end
-			router.external(self, parsed, untrusted)
+			router.external(self, parsed, err_or_len, untrusted)
 		end
 		rb:shrink_by_hpos()
 	end
@@ -368,12 +369,14 @@ local function common_dispatch(self, sent, id, t, ...)
 	end
 end
 function conn_index:strip_result(ok, ...)
-	if not ok then error(({...})[1]) end
+	if not ok then 
+		error(({...})[1]) 
+	end
 	return ...
 end
 function conn_index:dispatch(t, ...)
 	-- print('conn:dispatch', t.id, ({...})[1], t.id == select(1, ...))
-	return common_dispatch(self, t.id == select(1, ...), uuid.local_id(t.id), t, ...)
+	return common_dispatch(self, t.id == select(1, ...), uuid.local_id(t.id), t, ...)	
 end
 -- normal family
 function conn_index:send(serial, method, ctx, ...)

@@ -70,53 +70,53 @@ local dht
 
 
 -- tentacle runner
-local function run_notice(dispatcher, msg)
-	dispatcher(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
+local function run_notice(dispatcher, msg, len)
+	dispatcher(msg[NOTIFY_UUID], msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS, len))
 end
 
-local function run_request(c, dispatcher, msg)
+local function run_request(c, dispatcher, msg, len)
 	tentacle.set_context(msg[CONTEXT])
-	c:resp(msg[MSGID], dispatcher(msg[UUID], msg[METHOD], unpack(msg, ARGS)))
+	c:resp(msg[MSGID], dispatcher(msg[UUID], msg[METHOD], unpack(msg, ARGS, len)))
 end
 
-function _M.internal(connection, message)
-	-- logger.notice('router_internal', unpack(message))
+function _M.internal(connection, message, len)
+	--logger.notice('router_internal', unpack(message))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, KIND_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if kind == KIND_RESPONSE then
-		_M.respond(message)
+		_M.respond(message, len)
 	else
 		local thread_id = uuid.thread_id_from_local_id(message[UUID])
 		if thread_id == pulpo.thread_id then
 			if notice then
 				if kind == KIND_SYS then
-					tentacle(run_notice, actor.dispatch_sys, message)
+					tentacle(run_notice, actor.dispatch_sys, message, len)
 				elseif kind == KIND_CALL then
-					tentacle(run_notice, actor.dispatch_call, message)
+					tentacle(run_notice, actor.dispatch_call, message, len)
 				elseif kind == KIND_SEND then
-					tentacle(run_notice, actor.dispatch_send, message)
+					tentacle(run_notice, actor.dispatch_send, message, len)
 				end
 			else
 				if kind == KIND_SYS then
-					tentacle(run_request, connection, actor.dispatch_sys, message)
+					tentacle(run_request, connection, actor.dispatch_sys, message, len)
 				elseif kind == KIND_CALL then
-					tentacle(run_request, connection, actor.dispatch_call, message)
+					tentacle(run_request, connection, actor.dispatch_call, message, len)
 				elseif kind == KIND_SEND then
-					tentacle(run_request, connection, actor.dispatch_send, message)
+					tentacle(run_request, connection, actor.dispatch_send, message, len)
 				end
 			end
 		else
 			local dest_conn = conn.get_by_thread_id(thread_id)
 			if notice then
-				dest_conn:rawsend(unpack(message))
+				dest_conn:rawsend(unpack(message, 1, len))
 			else
-				tentacle(function (c, dc, msg)
+				tentacle(function (c, dc, msg, l)
 					local resp_msgid = msg[MSGID]
 					local msgid = _M.regist(tentacle.running())
 					msg[MSGID] = msgid
-					dc:rawsend(unpack(msg))
+					dc:rawsend(unpack(msg, 1, l))
 					c:resp(resp_msgid, tentacle.yield(msgid))
-				end, connection, dest_conn, message)				
+				end, connection, dest_conn, message, len)				
 			end
 		end	
 	end
@@ -154,7 +154,7 @@ local function vid_notify(id, cmd, method, ...)
 end
 
 local context_work = {}
-function _M.external(connection, message, from_untrusted)
+function _M.external(connection, message, len, from_untrusted)
 	-- logger.notice('router_external', unpack(message))
 	local k = message[KIND]
 	local notice = bit.band(k, NOTICE_MASK) ~= 0
@@ -165,29 +165,29 @@ function _M.external(connection, message, from_untrusted)
 		end
 	end
 	if k == KIND_RESPONSE then
-		_M.respond(message)
+		_M.respond(message, len)
 		return
 	end
 	if notice then
-		tentacle(function (c, cmd, msg)
-			vid_notify(msg[NOTIFY_UUID], cmd, msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS))
-		end, connection, k, message)	
+		tentacle(function (cmd, msg, l)
+			vid_notify(msg[NOTIFY_UUID], cmd, msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS, l))
+		end, k, message, len)
 	else
-		tentacle(function (c, cmd, msg)
+		tentacle(function (c, cmd, msg, l)
 			local ctx = msg[CONTEXT] or context_work
 			ctx[CONTEXT_PEER_ID] = c:peer_id()
-			c:resp(msg[MSGID], vid_call_with_retry(msg[UUID], cmd, msg[METHOD], ctx, unpack(msg, ARGS)))
-		end, connection, k, message)
+			c:resp(msg[MSGID], vid_call_with_retry(msg[UUID], cmd, msg[METHOD], ctx, unpack(msg, ARGS, l)))
+		end, connection, k, message, len)
 	end
 end
 
-function _M.respond(message)
+function _M.respond(message, len)
 	local msgid = message[RESP_MSGID]
 	timeout_periods[msgid] = nil
 	co = coromap[msgid]
 	if co then
 		-- logger.info('respond', msgid, unpack(message, RESP_ARGS))
-		tentacle.resume(co, unpack(message, RESP_ARGS))
+		tentacle.resume(co, unpack(message, RESP_ARGS, len))
 		coromap[msgid] = nil
 	end
 end

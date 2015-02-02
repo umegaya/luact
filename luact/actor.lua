@@ -309,6 +309,13 @@ local function err_handler(e)
 	end
 	return e
 end
+local function process_retval(ok, ...)
+	if not ok then
+		return ok, ...
+	else
+		return select('#', ...), {...}
+	end
+end
 function _M.is_fatal_error(e)
 	return not (e:is('runtime') or e:is('actor_runtime_error') or e:is('actor_timeout'))
 end
@@ -319,16 +326,17 @@ function _M.dispatch_send(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {xpcall(b[method], err_handler, b, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(b[method], err_handler, b, ...))
+	if not ok then 
 		if not b[method] then 
-			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif _M.is_fatal_error(r[2]) then
+			return false, exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif _M.is_fatal_error(r) then
 			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			safe_destroy_by_serial(s, r)
 		end
+		return false, r 
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 function _M.dispatch_call(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
@@ -337,35 +345,37 @@ function _M.dispatch_call(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {xpcall(b[method], err_handler, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(b[method], err_handler, ...))
+	if not ok then 
 		if not b[method] then 
-			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif _M.is_fatal_error(r[2]) then
-			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			return false, exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif _M.is_fatal_error(r) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r)
+			safe_destroy_by_serial(s, r) 
 		end
+		return false, r
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 function _M.dispatch_sys(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
 	local p = actormap[b]
 	if not p then return false, exception.new('actor_not_found', tostring(uuid.from_local_id(local_id))) end
-	local r = {xpcall(p[method], err_handler, p, b, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(p[method], err_handler, p, b, ...))
+	if not ok then 
 		if not b then 
 			local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
-			r[2] = exception.new('not_found', p, method)
-		elseif _M.is_fatal_error(r[2]) then
-			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			return false, exception.new('not_found', p, method)
+		elseif _M.is_fatal_error(r) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r)
+			safe_destroy_by_serial(s, r) 
 		end
+		return false, r
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 
 return _M
