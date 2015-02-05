@@ -144,6 +144,7 @@ function _M.initialize(opts)
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id
 	_M.machine_id = uuid.node_address
+	_M.n_core = opts.n_core or util.n_core()
 	dht = vid.dht
 	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
 
@@ -207,20 +208,26 @@ function _M.supervise(target, opts, ...)
 	return supervise(assert(factory[type(target)]), opts, target, ...)
 end
 
-function _M.register(vid, fn, ...)
-	return dht:put(vid, function (ctor, ...)
-		return _M.supervise(ctor, false, ...)
-	end, fn, ...)
+function _M.register(vid, fn_or_opts, fn_or_args1, ...)
+	if type(fn_or_opts) == 'table' then
+		return dht:put(vid, fn_or_opts.multi_actor, function (ctor, opts, ...)
+			return _M.supervise(ctor, opts, ...)
+		end, fn_or_args1, fn_or_opts.supervise, ...)
+	else
+		return dht:put(vid, false, function (ctor, opts, ...)
+			return _M.supervise(ctor, opts, ...)
+		end, fn_or_opts, false, fn_or_args1, ...)
+	end
 end
-function _M.unregister(vid)
-	dht:remove(vid, function (a, id)
-		local tid = uuid.thread_id(a)
+function _M.unregister(vid, actor_id)
+	dht:remove(vid, actor_id, function (key, id)
+		local tid = uuid.thread_id(id)
 		if tid == _M.thread_id then
-			actor.destroy(a)
+			actor.destroy(id)
 		else
-			actor.root_of(nil, tid).unregister(id)
+			actor.root_of(uuid.address(id), tid).notify_unregister(id)
 		end
-	end, vid)
+	end)
 end
 --[[
 	create remote actor reference from its url

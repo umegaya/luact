@@ -124,9 +124,30 @@ function _M.internal(connection, message, len)
 end
 
 -- maintain availability during failover on going.
+--[[
+- vidのactor == 1
+ - 正常終了：そのまま
+ - エラー
+  - actor_no_body : refleshしてリトライ。
+  - actor_temporary_fail : 成功、これ以外の失敗が発生するまでスリープしながらリトライ.かならずtimeoutが発生するので無限に続くことはない
+  - actor_timeout : そのままエラーを返す
+  - actor_error : エラーを返すのでいいのか？この後すぐ再起動するはず
+  - そのほかのエラー : actor_errorも同様に、呼び出し元にエラーを返す
+
+- vidのactor > 1
+ - 正常終了：そのまま
+ - エラー
+  - actor_no_body : refleshしてリトライ。
+  - actor_temporary_fail : 成功、これ以外の失敗が発生するまでスリープしながらリトライ.かならずtimeoutが発生するので無限に続くことはない
+  - actor_timeout : そのままエラーを返す
+  - actor_error, そのほかのエラー : 別のactorを選んでリクエストする
+
+- 上記のrefleshに加えて、一定のtimeoutでcacheをrefleshする
+]]
 local function vid_call_with_retry(id, cmd, method, ctx, ...)
 ::RETRY::
-	local a = dht:get(id)
+	local a, idx = dht:get(id)
+	local ridx -- idx of actor which is used for current retry.
 	if not a then return false, exception.new('actor_not_found', 'vid', id) end
 	local c = conn.get(a)
 	-- logger.notice('vid_call_with_retry', ...)
@@ -135,14 +156,22 @@ local function vid_call_with_retry(id, cmd, method, ctx, ...)
 	-- logger.report('vid_call_with_retry result', unpack(r))
 	if r[1] then
 		return unpack(r)
-	elseif r[2]:is('actor_not_found') and (not retry) then
+	elseif r[2]:is('actor_no_body') and (not retry) then
 		retry = true
 		dht:refresh(id)
 		goto RETRY
 	elseif r[2]:is('actor_temporary_fail') then
 		clock.sleep(0.5)
 		goto RETRY2
+	elseif r[2]:is('actor_timeout') then
+		return unpack(r)
 	else
+		if idx then
+			a, ridx = dht:get(id)
+			if idx ~= ridx then
+				goto RETRY2
+			end
+		end
 		return unpack(r)
 	end
 end
