@@ -183,7 +183,7 @@ function gossip_index:leave(mship, timeout)
 		return 
 	end
 	local me = mship.nodes:self()
-	logger.info('gossip', 'node', 'leave', me)
+	logger.debug('gossip', 'node', 'leave', me)
 	if me:set_state(nodelist.dead) then
 		self:broadcast(mship, protocol.new_change(me))
 		local left = timeout or mship.opts.shutdown_timeout
@@ -218,7 +218,7 @@ function gossip_index:exchange_with(target_actor, mship, join)
 		end
 		error(peer_nodes)
 	end
-	logger.info('gossip', 'exchange_with', target_actor, peer_nodes.size)--, debug.traceback())
+	logger.debug('gossip', 'exchange_with', target_actor, peer_nodes.size)--, debug.traceback())
 	local actor_node = mship.nodes:find_by_actor(target_actor)
 	for _,nd in peer_nodes:iter() do
 		mship:add_node(nd)
@@ -267,7 +267,6 @@ function membership_index:wait_bootstrap(timeout)
 	if not self.gossip.enable then
 		while true do 
 			local t = event.wait(nil, clock.alarm(timeout), self.event)
-			-- logger.info('wait_bootstrap', t)
 			if t == 'start' then
 				return true
 			elseif t == 'read' then
@@ -309,7 +308,6 @@ function membership_index:broadcast_user_state()
 	if self.delegate then
 		local me = self.nodes:self()
 		me:update_user_state(self.delegate:user_state())
-		-- logger.info('change user state send')
 		self:sys_broadcast(protocol.new_change(me, true))
 	end
 end
@@ -336,7 +334,6 @@ function membership_index:retransmit()
 end
 function membership_index:stop_threads()
 	for idx, t in ipairs(self.threads) do
-		-- logger.info('stop_threads', t)
 		tentacle.cancel(t)
 		self.threads[idx] = nil
 	end
@@ -423,7 +420,7 @@ function membership_index:alive(nodedata, bootstrap)
 		n.clock = nodedata.clock
 		changed = n:set_state(nodelist.alive, nodedata)
 	end
-	logger.info('gossip', 'node', 'alive', n)
+	logger.debug('gossip', 'node', 'alive', n)
 	if resurrect or newly_added then
 		self:emit('join', n, #self.nodes)
 	elseif changed then
@@ -436,7 +433,7 @@ function membership_index:suspect(nodedata)
 	local is_my_node = self.nodes:self():has_same_nodedata(nodedata)
 	-- If we've never heard about this node before, ignore it
 	if not n then return end
-	logger.info('gossip', 'node', 'suspect', n)
+	logger.debug('gossip', 'node', 'suspect', n)
 	-- Ignore old clock numbers
 	if nodedata.clock < n.clock then return end
 	-- Ignore non-alive nodes
@@ -466,7 +463,7 @@ function membership_index:dead(nodedata)
 	local is_my_node = self.nodes:self():has_same_nodedata(nodedata)
 	-- If we've never heard about this node before, ignore it
 	if not n then return end
-	logger.info('gossip', 'node', 'dead', n, n:is_alive(), nodedata.clock, n.clock)
+	logger.debug('gossip', 'node', 'dead', n, n:is_alive(), nodedata.clock, n.clock)
 	-- Ignore old clock numbers
 	if nodedata.clock < n.clock then return end
 	-- Ignore non-alive nodes

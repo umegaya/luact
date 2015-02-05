@@ -155,7 +155,7 @@ function _M.new()
 	buf.__detail__.serial = idgen.seed.__detail__.serial
 	_M.set_timestamp(buf, msec_timestamp())
 	if _M.DEBUG then
-		logger.info('new uuid:', buf)-- , debug.traceback())
+		logger.debug('new uuid:', buf)-- , debug.traceback())
 		assert(buf.__detail__.machine_id == _M.node_address, debug.traceback())
 	end
 	return buf

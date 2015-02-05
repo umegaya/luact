@@ -154,7 +154,7 @@ function proposals_index:range_commit(actor, sidx, eidx)
 		end
 	end
 	if accepted then
-		logger.info('notify_accepted', actor)
+		logger.debug('notify_accepted', actor)
 		actor:notify_accepted()
 	end
 end

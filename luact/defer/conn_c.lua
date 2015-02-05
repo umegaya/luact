@@ -443,7 +443,6 @@ end
 local function new_internal_conn(machine_id, opts)
 	local c = allocate_conn()
 	c:new(machine_id, opts)
-	logger.info('add conn to map', c:cmapkey(), c)
 	cmap[c:cmapkey()] = c
 	return c
 end

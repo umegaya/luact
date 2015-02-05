@@ -215,7 +215,6 @@ function _M.respond(message, len)
 	timeout_periods[msgid] = nil
 	co = coromap[msgid]
 	if co then
-		-- logger.info('respond', msgid, unpack(message, RESP_ARGS))
 		tentacle.resume(co, unpack(message, RESP_ARGS, len))
 		coromap[msgid] = nil
 	end

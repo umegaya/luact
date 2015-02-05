@@ -122,7 +122,6 @@ end
 function raft_state_container_index:quorum()
 	local i = #self.replica_set
 	if i <= 2 then return math.max(i, 1) end
-	-- logger.info('quorum', i, math.ceil((i + 1) / 2))
 	return math.ceil((i + 1) / 2)
 end
 function raft_state_container_index:write_any_logs(kind, msgid, logs)
@@ -235,7 +234,7 @@ function raft_state_container_index:stop_replication()
 			if not self:is_leader() then
 				logger.error('bug: no-leader node have valid replicator', machine, k)
 			end
-			logger.info('stop replicator', machine, k)
+			logger.debug('stop replicator', machine, k)
 			v:fin()
 			reps[k] = nil
 		end
@@ -260,9 +259,9 @@ function raft_state_container_index:start_replication(activate, replica_set)
 				-- heartbeat is necessary because in our use case, 
 				-- typically need to prevent newly added node from causing election timeout.
 				if activate then
-					logger.info('start replicator', id)
+					logger.debug('start replicator', id)
 				else
-					logger.info('add replicator', id)
+					logger.debug('add replicator', id)
 				end
 			end
 		end
@@ -309,7 +308,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 					if m and m[thread] then
 						-- from here, this replicator actually involve replication
 						m[thread]:commit_add()
-						logger.info('start replicator', id)
+						logger.debug('start replicator', id)
 					end
 				end
 			end
@@ -416,7 +415,7 @@ end
 function raft_state_container_index:snapshot_if_needed()
 	if (self.state.last_applied_idx - self.snapshot:last_index()) >= self.opts.logsize_snapshot_threshold then
 		-- print('if_needed', self.state.last_applied_idx, self.snapshot:last_index(), self.opts.logsize_snapshot_threshold)
-		logger.info('snapshot', self.state.last_applied_idx)
+		logger.debug('snapshot', self.state.last_applied_idx)
 		self:write_snapshot()
 	end
 end
@@ -532,7 +531,6 @@ function raft_state_container_index:append_param_for(replicator)
 		prev_log_term = log.term
 	end 
 	local entries = self.wal:logs_from(prev_log_idx + 1)
-	-- logger.info('append_param_for:', prev_log_idx, replicator.next_idx)
 	assert(prev_log_idx and prev_log_term, "error: prev index/term should be non-nil")
 	return 
 		self:current_term(), 

@@ -55,7 +55,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		-- (its not necessary for persisted data, so after serde:pack)
 		if i == #logs and msgid then log.msgid = msgid end
 		logcache:put_at(last_index, log)
-		logger.info('writer', 'logat', last_index, logcache:at(last_index))--, debug.traceback())
+		logger.debug('writer', 'logat', last_index, logcache:at(last_index))--, debug.traceback())
 	end
 	-- logger.report('write:after put logcache')
 	-- logcache:dump()
@@ -87,7 +87,7 @@ function wal_writer_index:copy(store, logs, serde, logcache)
 		last_index = log.index
 		last_term = log.term
 		logcache:put_at(last_index, log)
-		logger.info('copy', 'logat', last_index, tostring(logcache:at(last_index)))
+		logger.debug('copy', 'logat', last_index, tostring(logcache:at(last_index)))
 	end
 	local first_index = self.last_index + 1
 	local ok, r = store:put_logs(logcache, serde, first_index, last_index)

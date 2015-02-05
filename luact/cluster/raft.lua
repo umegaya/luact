@@ -72,7 +72,7 @@ function raft_index:tick()
 				-- if election timeout (and has enough node), become candidate
 				self.state:become_candidate()
 			else
-				logger.info('election timeout but # of nodes not enough', tostring(self.state.initial_node), #self.state.replica_set)
+				logger.warn('election timeout but # of nodes not enough', tostring(self.state.initial_node), #self.state.replica_set)
 				self:reset_timeout() -- wait for receiving replica set from leader
 			end
 		end
@@ -143,7 +143,7 @@ function raft_index:run_election()
 						id = set[(i < myid_pos) and i or i + 1]
 					end
 				end
-				logger.info('vote result', id, tp, ok, term, granted)
+				logger.debug('vote result', id, tp, ok, term, granted)
 				-- not timeout and call itself success and vote granted
 				if tp ~= 'timeout' and ok and granted then
 					grant = grant + 1
@@ -325,7 +325,7 @@ Request Vote RPC
 least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 ]]
 function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_last_log_term)
-	logger.info('request_vote from', candidate_id, term)
+	logger.debug('request_vote from', candidate_id, term)
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
@@ -351,7 +351,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		return self.state:current_term(), false
 	end
 	-- grant vote (§5.2, §5.4)
-	logger.info('raft', 'request_vote', 'vote for', candidate_id, term)
+	logger.debug('raft', 'request_vote', 'vote for', candidate_id, term)
 	return self.state:current_term(), true
 end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
@@ -382,7 +382,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	self.state.wal:compaction(last_snapshot_index)
 	-- reset timeout to prevent election timeout
 	self:reset_timeout()
-	logger.info("raft", 'install_snapshot', "Installed remote snapshot")
+	logger.debug("raft", 'install_snapshot', "Installed remote snapshot")
 	return true
 end
 

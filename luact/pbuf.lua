@@ -53,7 +53,7 @@ function rbuf_index:reserve(sz)
 		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
-		logger.info('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max, newsz)
+		logger.debug('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max, newsz)
 		self.max = newsz
 		self.used = copyb
 	else
@@ -86,7 +86,7 @@ function rbuf_index:reserve_and_reduce_unused(sz)
 		if copyb > 0 then 
 			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
-		logger.info('reserve2 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
+		logger.debug('reserve2 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
 		self.hpos = 0
 		self.used = copyb
 		memory.free(self.buf)
@@ -126,7 +126,6 @@ function rbuf_index:seek_from_curr(r)
 		logger.report('invalid seek', self.hpos, self.used, debug.traceback())
 		assert(false)
 	end
-	-- logger.info('seek_from_curr', self.hpos, r, self.hpos + r, self.used)
 	self.hpos = self.hpos + r
 end
 function rbuf_index:seek_from_start(r)

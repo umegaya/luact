@@ -66,7 +66,7 @@ function actor_index:unlink(unlinked)
 end
 -- called with actor:__actor_event__()
 function actor_index:event__(body, event, ...)
-	logger.info('actor_event', self.uuid, body, event, ...)
+	logger.debug('actor_event', self.uuid, body, event, ...)
 	-- TODO : test and if that is significantly slow, better way to hook system events.
 	if body.__actor_event__ and body:__actor_event__(self, event, ...) then
 		return
@@ -269,7 +269,11 @@ local function destroy_by_serial(s, reason)
 		if b.__actor_destroy__ then
 			b:__actor_destroy__(reason)
 		end
-		logger.warn('actor destroyed by', reason or "system", debug.traceback())
+		if pulpo.verbose then
+			logger.warn('actor', s, 'destroyed by', reason or "system", debug.traceback())
+		else
+			logger.warn('actor', s, 'destroyed by', reason or "system")
+		end
 	end
 end
 local function safe_destroy_by_serial(s, reason)

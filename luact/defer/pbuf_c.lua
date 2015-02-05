@@ -56,13 +56,11 @@ function wbuf_index:fin()
 	self.rbuf[1]:fin()
 end
 function wbuf_index:set_io(io)
-	-- logger.info('wbuf_index:set_io', io)
 	self.io = io
 end
 function wbuf_index:send(w, ...)
 	w.write(self.next, self.last_cmd == w.cmd, ...)
 	if self.last_cmd == WRITER_DEACTIVATE then
-		-- logger.info('wbuf_index:send', self.io:address())
 		self.io:reactivate_write() -- add edge trigger again.
 		-- so even no actual environment changed, edge trigger should be triggered again.
 	end

@@ -16,11 +16,11 @@ function new_listener(proto, serde, address, opts)
 	tentacle(function (s, options)
 		while true do
 			local c = s:read()
-			logger.info(address, 'accept')
+			logger.debug(address, 'accept')
 			conn.from_io(c, options)
 		end
 	end, ln, opts)
-	logger.info('listen:'..proto..'+'..serde..'://'..address..' ('..(opts.internal and "internal" or "external")..")")
+	logger.debug('listen:'..proto..'+'..serde..'://'..address..' ('..(opts.internal and "internal" or "external")..")")
 	return ln
 end
 
