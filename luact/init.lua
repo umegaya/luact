@@ -209,6 +209,10 @@ function _M.supervise(target, opts, ...)
 	return supervise(assert(factory[type(target)]), opts, target, ...)
 end
 
+function _M.error(...)
+	exception.raise('actor_error', ...)
+end
+
 function _M.register(vid, fn_or_opts, fn_or_args1, ...)
 	if type(fn_or_opts) == 'table' then
 		return dht:put(vid, fn_or_opts.multi_actor, function (ctor, opts, ...)
