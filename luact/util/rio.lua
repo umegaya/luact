@@ -1,5 +1,6 @@
 local luact = require 'luact.init'
 local serde = require 'luact.serde'
+local serde_common = require 'luact.serde.common'
 local ffi = require 'ffiex.init'
 local fs = require 'pulpo.fs'
 local memory = require 'pulpo.memory'
@@ -30,13 +31,16 @@ local buf_slice_index = {}
 local buf_slice_mt = {
 	__index = buf_slice_index,
 }
-function buf_slice_index.required_size(sz)
+function buf_slice_index.size(sz)
 	return ffi.sizeof('luact_buf_slice_t') + sz
 end
-function buf_slice_index.create(sz)
-	local p = ffi.cast('luact_buf_slice_t*', memory.alloc(buf_slice_index.required_size(sz)))
+function buf_slice_index.alloc(sz)
+	local p = ffi.cast('luact_buf_slice_t*', memory.alloc(buf_slice_index.size(sz)))
 	p.sz = sz
 	return p
+end
+function buf_slice_index:fin()
+	memory.free(self)
 end
 function buf_slice_index:reserve(sz)
 	if sz > self.sz then
@@ -44,7 +48,7 @@ function buf_slice_index:reserve(sz)
 		while sz > newsize do
 			newsize = newsize * 2
 		end
-		local tmp = memory.realloc(self, buf_slice_index.required_size(newsize))
+		local tmp = memory.realloc(self, buf_slice_index.size(newsize))
 		if tmp == ffi.NULL then
 			exception.raise('malloc', 'char', readbuf_size)
 		end
@@ -54,7 +58,7 @@ function buf_slice_index:reserve(sz)
 	return self
 end
 function buf_slice_index.pack(arg)
-	return ffi.string(arg, buf_slice_index.required_size(arg.sz))
+	return ffi.string(arg, buf_slice_index.size(arg.sz))
 end
 function buf_slice_index.unpack(arg)
 	return ffi.cast('luact_buf_slice_t*', arg)
@@ -64,9 +68,25 @@ serde[serde.kind.serpent]:customize(
 	'struct luact_buf_slice', 
 	buf_slice_index.pack, buf_slice_index.unpack
 )
+serde_common.register_ctype('struct', 'luact_buf_slice', {
+	msgpack = {
+		packer = function (pack_procs, buf, ctype_id, obj, length)
+			buf:reserve(obj.sz)
+			local p, ofs = pack_procs.pack_ext_cdata_header(buf, obj.sz, ctype_id)
+			ffi.copy(p + ofs, obj.p, obj.sz)
+			return ofs + obj.sz
+		end,
+		unpacker = function (rb, len)
+			local ptr = buf_slice_index.alloc(len)
+			ffi.copy(ptr.p, rb:curr_p(), len)
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
+		end,
+	}, 
+}, serde_common.LUACT_BUF_SLICE)
 ffi.metatype('luact_buf_slice_t', buf_slice_mt)
 local readbuf_size = 1024
-local readbuf = buf_slice_index.create(readbuf_size)
+local readbuf = buf_slice_index.alloc(readbuf_size)
 
 
 -- luact_remote_io

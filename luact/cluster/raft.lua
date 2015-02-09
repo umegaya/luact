@@ -72,7 +72,7 @@ function raft_index:tick()
 				-- if election timeout (and has enough node), become candidate
 				self.state:become_candidate()
 			else
-				logger.info('election timeout but # of nodes not enough', tostring(self.state.initial_node), #self.state.replica_set)
+				logger.warn('election timeout but # of nodes not enough', tostring(self.state.initial_node), #self.state.replica_set)
 				self:reset_timeout() -- wait for receiving replica set from leader
 			end
 		end
@@ -143,7 +143,7 @@ function raft_index:run_election()
 						id = set[(i < myid_pos) and i or i + 1]
 					end
 				end
-				logger.info('vote result', id, tp, ok, term, granted)
+				logger.debug('vote result', id, tp, ok, term, granted)
 				-- not timeout and call itself success and vote granted
 				if tp ~= 'timeout' and ok and granted then
 					grant = grant + 1
@@ -168,7 +168,7 @@ end
 function raft_index:propose(logs, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:propose(logs, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:write_logs(msgid, logs)
 	-- wait until logs are committed
@@ -177,7 +177,7 @@ end
 function raft_index:add_replica_set(replica_set, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:add_replica_set(replica_set, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
 	-- wait until logs are committed
@@ -186,7 +186,7 @@ end
 function raft_index:remove_replica_set(replica_set, timeout)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:remove_replica_set(replica_set, timeout) end
-	local msgid = router.regist(tentacle.running(), timeout)
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
 	-- wait until logs are committed
@@ -325,7 +325,7 @@ Request Vote RPC
 least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 ]]
 function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_last_log_term)
-	logger.info('request_vote from', candidate_id, term)
+	logger.debug('request_vote from', candidate_id, term)
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
@@ -351,7 +351,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 		return self.state:current_term(), false
 	end
 	-- grant vote (§5.2, §5.4)
-	logger.info('raft', 'request_vote', 'vote for', candidate_id, term)
+	logger.debug('raft', 'request_vote', 'vote for', candidate_id, term)
 	return self.state:current_term(), true
 end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
@@ -382,7 +382,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	self.state.wal:compaction(last_snapshot_index)
 	-- reset timeout to prevent election timeout
 	self:reset_timeout()
-	logger.info("raft", 'install_snapshot', "Installed remote snapshot")
+	logger.debug("raft", 'install_snapshot', "Installed remote snapshot")
 	return true
 end
 
@@ -397,15 +397,15 @@ local default_opts = {
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
 	storage = "rocksdb", 
-	work_dir = luact.DEFAULT_ROOT_DIR,
+	datadir = luact.DEFAULT_ROOT_DIR,
 	initial_node = false,
 }
-local function configure_workdir(id, opts)
-	if not opts.work_dir then
-		exception.raise('invalid', 'config', 'must contain "workdir"')
+local function configure_datadir(id, opts)
+	if not opts.datadir then
+		exception.raise('invalid', 'config', 'options must contain "datadir"')
 	end
-	local p = fs.path(opts.work_dir, tostring(pulpo.thread_id), tostring(id))
-	logger.notice('raft workdir', id, p)
+	local p = fs.path(opts.datadir, tostring(pulpo.thread_id), tostring(id))
+	logger.notice('raft datadir', id, p)
 	return p
 end
 local function configure_serde(opts)
@@ -413,7 +413,7 @@ local function configure_serde(opts)
 end
 local function create(id, fsm_factory, opts, ...)
 	local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
-	local dir = configure_workdir(id, opts)
+	local dir = configure_datadir(id, opts)
 	local sr = configure_serde(opts)
 	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
 	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(pulpo.thread_id))

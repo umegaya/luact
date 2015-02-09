@@ -3,6 +3,7 @@ local C = ffi.C
 
 local pbuf = require 'luact.pbuf'
 local serde = require 'luact.serde'
+local serde_common = require 'luact.serde.common'
 
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
@@ -40,7 +41,9 @@ function snapshot_header_size(n_replica)
 	return ffi.sizeof('luact_raft_snapshot_header_t') + (n_replica * ffi.sizeof('luact_uuid_t'))
 end
 function snapshot_header_index.alloc(n_replica)
-	local p = memory.alloc_fill(snapshot_header_size(n_replica))
+	local p
+	local sz = snapshot_header_size(n_replica)
+	p = memory.alloc_fill(sz)
 	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
 	return p
@@ -50,6 +53,9 @@ function snapshot_header_index:realloc(n_replica)
 	p = ffi.cast('luact_raft_snapshot_header_t*', p)
 	p.n_replica = n_replica
 	return p
+end
+function snapshot_header_index:fin()
+	memory.free(self)
 end
 function snapshot_header_index:to_table()
 	local t = {}
@@ -80,11 +86,31 @@ end
 function snapshot_header_index.unpack(arg)
 	return ffi.cast('luact_raft_snapshot_header_t*', arg)
 end
+ffi.metatype('luact_raft_snapshot_header_t', snapshot_header_mt)
+-- register ctype and customized serde
 serde[serde.kind.serpent]:customize(
 	'struct luact_raft_snapshot_header', 
 	snapshot_header_index.pack, snapshot_header_index.unpack
 )
-ffi.metatype('luact_raft_snapshot_header_t', snapshot_header_mt)
+serde_common.register_ctype('struct', 'luact_raft_snapshot_header', {
+	msgpack = {
+		packer = function (pack_procs, buf, ctype_id, obj, length)
+			local sz = snapshot_header_size(obj.n_replica)
+			buf:reserve(sz)
+			local p, ofs = pack_procs.pack_ext_cdata_header(buf, sz, ctype_id)
+			ffi.copy(p + ofs, obj, sz)
+			return ofs + sz
+		end,
+		unpacker = function (rb, len)
+			local obj = ffi.cast('luact_raft_snapshot_header_t*', rb:curr_p())
+			local ptr = snapshot_header_index.alloc(obj.n_replica)
+			local sz = snapshot_header_index.size(obj.n_replica)
+			ffi.copy(ptr, obj, sz)
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
+		end,
+	}, 
+}, serde_common.LUACT_RAFT_SNAPSHOT_HEADER)
 
 
 -- luact_raft_snapshot_writer

@@ -1,11 +1,14 @@
 local ffi = require 'ffiex.init'
 
 local clock = require 'luact.clock'
+local serde_common = require 'luact.serde.common'
 
 local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local socket = require 'pulpo.socket'
 local exception = require 'pulpo.exception'
+local util = require 'pulpo.util'
+
 local _M = {}
 local C = ffi.C
 
@@ -40,6 +43,7 @@ assert(ffi.sizeof('struct luact_id_detail') == 12)
 assert(ffi.sizeof('struct luact_id_tag2') == 12)
 assert(ffi.sizeof('struct luact_id_tag') == 12)
 assert(ffi.sizeof('union luact_uuid') == 12)
+serde_common.register_ctype('union', 'luact_uuid', nil, serde_common.LUACT_UUID)
 
 -- vars
 local idgen = {
@@ -50,9 +54,9 @@ local idgen = {
 			buf = table.remove(self.availables)
 		else
 			buf = ffi.new('luact_uuid_t') -- because wanna use gc
-			buf.__detail__.machine_id = self.seed.__detail__.machine_id
-			buf.__detail__.thread_id = self.seed.__detail__.thread_id
 		end
+		buf.__detail__.machine_id = self.seed.__detail__.machine_id
+		buf.__detail__.thread_id = self.seed.__detail__.thread_id
 		return buf
 	end,
 	free = function (self, uuid)
@@ -80,6 +84,16 @@ function _M.thread_id(t)
 end
 function _M.local_id(t) 
 	return t.__tag__.local_id 
+end
+function _M.check_local_id(id)
+	assert(id)
+	_M.uuid_work.__tag__.local_id = id
+	if (_M.uuid_work.__detail__.timestamp_hi ~= 0) then
+		logger.error('invalid ts', tostring(id))
+		if _M.__RB then
+			_M.__RB:dump()
+		end
+	end
 end
 function _M.serial(t) -- local_id without thread_id
 	return bit.bor(bit.lshift(_M.timestamp(t), _M.SERIAL_BIT_SIZE), t.__detail__.serial)
@@ -116,7 +130,7 @@ function _M.initialize(mt, startup_at, local_address)
 			assert(af == ffi.defs.AF_INET, exception.new("invalid", "address", "family", af))
 			v[0] = socket.numeric_ipv4_addr_from_sockaddr(addr)
 		end
-		logger.notice('node_address:', ('%x'):format(v[0]))
+		-- logger.notice('node_address:', ('%x'):format(v[0]))
 		return 'uint32_t', v
 	end)
 	_M.node_address = node_address[0]
@@ -141,7 +155,8 @@ function _M.new()
 	buf.__detail__.serial = idgen.seed.__detail__.serial
 	_M.set_timestamp(buf, msec_timestamp())
 	if _M.DEBUG then
-		logger.info('new uuid:', buf)-- , debug.traceback())
+		logger.debug('new uuid:', buf)-- , debug.traceback())
+		assert(buf.__detail__.machine_id == _M.node_address, debug.traceback())
 	end
 	return buf
 end
@@ -194,8 +209,8 @@ end
 function _M.invalidate(uuid)
 	uuid.__detail__.machine_id = 0
 end
-function _M.debug_create_id(machine_id, thread_id)
-	local id = _M.new()
+function _M.debug_create_id(machine_id, thread_id, buffer)
+	local id = buffer or _M.new()
 	id.__detail__.thread_id = thread_id or 1
 	if type(machine_id) == 'number' then
 		id.__detail__.machine_id = machine_id
@@ -214,6 +229,9 @@ local sprintf_workmem_size = 32
 local sprintf_workmem = memory.alloc_typed('char', sprintf_workmem_size)
 function _M.tostring(uuid)
 	return ('%08x:%08x:%08x'):format(uuid.__tag2__.local_id[0], uuid.__tag2__.local_id[1], uuid.__tag__.machine_id)
+end
+function _M.inspect(uuid)
+	print(_M.thread_id(uuid), uuid.__detail__.serial, uuid.__detail__.timestamp_hi)
 end
 
 return _M

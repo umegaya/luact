@@ -95,7 +95,8 @@ tools.start_luact(4, nil, function ()
 				break
 			end
 			count = count + 1
-			if count > 20 then
+			logger.report('not join event:', count, tp, #g.nodes)
+			if count > 10 then
 				assert(false, "node addition timeout")
 			end
 		end
@@ -112,14 +113,17 @@ tools.start_luact(4, nil, function ()
 		clock.sleep(1.0)
 		gossiper:broadcast(msg)
 	else
+		local received 
 		while true do
-			local tp, obj, buf, len = event.wait(false, clock.alarm(10), ev)
+			local tp, obj, buf, len = event.wait(false, clock.alarm(2.0), ev)
 			if tp == 'user' then
+				assert(not received, "message only received one time")
 				logger.info('user msg:', buf, len, ffi.string(buf, len))
 				assert(ffi.string(buf, len) == msg, "correct broadcast msg should be received")
-				break
+				received = true
 			elseif tp == 'read' then
-				assert(false, "broadcast msg should arrive within timeout")
+				assert(received, "broadcast msg should arrive within timeout")
+				break
 			end
 		end
 	end

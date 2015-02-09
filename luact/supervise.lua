@@ -16,7 +16,7 @@ local opts_mt = { __index = _M.opts }
 
 -- hook system event
 function supervisor_index:__actor_event__(act, event, ...)
-	-- print('sv event == ', act, event, ...)
+	-- logger.report('sv event == ', act, event, debug.traceback())
 	if event == actor.EVENT_LINK_DEAD then
 		local id, reason = select(1, ...)
 		if reason or self.opts.always then
@@ -78,7 +78,7 @@ function supervisor_index:restart_child(died_actor_id)
 	if _M.DEBUG then logger.warn('restart_child try:', self.restart, died_actor_id, #self.restarting) end
 	self:add_restarting_id(died_actor_id)
 	local supervise_opts = { supervised = true, uuid = died_actor_id }
-	local ok, r = xpcall(actor.new_link_with_opts, err_handler, actor.of(self), supervise_opts, self.ctor, unpack(self.args))
+	local ok, r = xpcall(actor.new_link_with_opts, err_handler, actor.of(self), supervise_opts, self.ctor, unpack(self.args, 1, alen))
 	if _M.DEBUG then logger.warn('restart_child result:', ok, r, self, #self.restarting) end
 	if not ok then
 		-- retry restart.
@@ -100,7 +100,7 @@ end
 
 local function supervisor(ctor, opts, ...)
 	local sv = setmetatable({
-		ctor = ctor, args = {...}, 
+		ctor = ctor, args = {...}, alen = select('#', ...),
 		children = {}, restarting = {}, 
 		opts = opts and setmetatable(opts, opts_mt) or _M.opts,
 	}, supervisor_mt)

@@ -12,11 +12,13 @@ tools.start_luact(3, nil, function ()
 	local tools = require 'test.tools.cluster'
 	local n_core = 3
 	local leader_thread_id = 2
+	local p = tools.create_latch('checker', 3)
+
 	local arb
 	
 	if pulpo.thread_id == leader_thread_id then
-		arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', tools.new_fsm, nil, pulpo.thread_id)
-		clock.sleep(2)
+		arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', tools.new_fsm, {initial_node = true}, pulpo.thread_id)
+		clock.sleep(2.5)
 		assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
 		logger.info('------------------- add another nodes as replica set ---------------------')
 		local replica_set = {}
@@ -28,9 +30,10 @@ tools.start_luact(3, nil, function ()
 		logger.info('------------------- call add_replica_set() ---------------------')
 		arb:add_replica_set(replica_set)
 		logger.info('------------------- finish add_replica_set() ---------------------')
+		p:wait(1)
 	else
 		logger.info('------------------- wait for being added as replica set ---------------------')
-		clock.sleep(2 + 2)
+		p:wait(1)
 		arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
 	end
 	local rs = arb:replica_set()
@@ -44,7 +47,7 @@ tools.start_luact(3, nil, function ()
 	end
 	assert(found, "each thread's uuid should be included in replica set:"..tostring(arb))
 	logger.info('success')
-	clock.sleep(2)
+	p:wait(2)
 end)
 
 return true

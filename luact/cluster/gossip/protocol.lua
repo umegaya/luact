@@ -1,6 +1,7 @@
 local luact = require 'luact.init'
 local pbuf = require 'luact.pbuf'
 local serde = require 'luact.serde'
+local serde_common = require 'luact.serde.common'
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
 
@@ -59,6 +60,9 @@ local proto_sys_index = {}
 local proto_sys_mt = {
 	__index = proto_sys_index
 }
+function proto_sys_index:inspect()
+	return ('%x:%u'):format(self.machine_id, self.thread_id)
+end
 function proto_sys_index:set_node(n, with_user_state)
 	self.machine_id = n.machine_id
 	self.thread_id = n.thread_id
@@ -164,6 +168,9 @@ function proto_nodelist_index:reserve(size)
 	end
 	return self
 end
+function proto_nodelist_index:fin()
+	memory.free(self)
+end
 function proto_nodelist_index:iter() 
 	return function (l, ofs)
 		if ofs >= l.used then
@@ -193,10 +200,10 @@ function proto_nodelist_index:dump(tag)
 		ent:dump_user_state(tag)
 	end
 end
+local nodelist_unpack_buffer
 function proto_nodelist_index.pack(arg)
 	return ffi.string(arg.buffer, arg.used)
 end
-local nodelist_unpack_buffer
 function proto_nodelist_index.unpack(arg)
 	nodelist_unpack_buffer = nodelist_unpack_buffer:reserve(#arg)
 	ffi.copy(nodelist_unpack_buffer.buffer, arg, #arg)
@@ -204,11 +211,29 @@ function proto_nodelist_index.unpack(arg)
 	-- nodelist_unpack_buffer:dump('unpack')
 	return nodelist_unpack_buffer
 end
+ffi.metatype('luact_gossip_proto_nodelist_t', proto_nodelist_mt)
+-- register ctype and custom serde
 serde[serde.kind.serpent]:customize(
 	'struct luact_gossip_proto_nodelist', 
 	proto_nodelist_index.pack, proto_nodelist_index.unpack
 )
-ffi.metatype('luact_gossip_proto_nodelist_t', proto_nodelist_mt)
+serde_common.register_ctype('struct', 'luact_gossip_proto_nodelist', {
+	msgpack = {
+		packer = function (pack_procs, buf, ctype_id, obj, length)
+			buf:reserve(obj.used)
+			local p, ofs = pack_procs.pack_ext_cdata_header(buf, obj.used, ctype_id)
+			ffi.copy(p + ofs, obj.buffer, obj.used)
+			return ofs + obj.used
+		end,
+		unpacker = function (rb, len)
+			local ptr = proto_nodelist_mt.alloc(len)
+			ptr.used = len
+			ffi.copy(ptr.buffer, rb:curr_byte_p(), len)
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
+		end,
+	}, 
+}, serde_common.LUACT_GOSSIP_NODELIST)
 
 
 -- module functions

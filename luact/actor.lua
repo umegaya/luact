@@ -66,7 +66,7 @@ function actor_index:unlink(unlinked)
 end
 -- called with actor:__actor_event__()
 function actor_index:event__(body, event, ...)
-	logger.info('actor_event', self.uuid, body, event, ...)
+	logger.debug('actor_event', self.uuid, body, event, ...)
 	-- TODO : test and if that is significantly slow, better way to hook system events.
 	if body.__actor_event__ and body:__actor_event__(self, event, ...) then
 		return
@@ -116,6 +116,7 @@ local function parse_method_name(name)
 	until not match 
 	return name,flag
 end	
+_M.parse_method_name = parse_method_name
 
 local function uuid_caller_proc(t, ...)
 	local c = conn.get(t.id)
@@ -154,7 +155,7 @@ local uuid_metatable = {
 --]]
 local function vid_caller_proc(t, ...)
 	local c = conn.get_by_hostname(t.id.host)
-	return c:vdispatch(t, ...)
+	return c:dispatch(t, ...)
 end
 local vid_caller_mt = {
 	__call = vid_caller_proc,
@@ -186,7 +187,7 @@ local bodymap = {}
 local root_actor_id
 function _M.initialize(opts)
 	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
-	vid.initialize(vid_metatable)
+	vid.initialize(vid_metatable, opts.vid_map_initial_size)
 	root_actor_id = uuid.first(uuid.node_address, pulpo.thread_id, true)
 end
 
@@ -247,27 +248,6 @@ function _M.root_of(machine_id, thread_id)
 	assert(thread_id, "thread_id should")
 	return uuid.first(machine_id or uuid.node_address, thread_id)
 end
-function _M.register(name, ctor, ...)
-	-- TODO : choose owner thread of this actor
-	-- maybe using consistent hash with parameter 'name' and uuid of root actor (_M.root)
-	-- if name should be created in this node then
-		local a = _M.new(ctor, ...)
-		-- TODO : register name and uuid to dht
-		return a
-	--[[ else
-		local assigned_node = dht.get_node_for(name)
-		return assigned_node.register(name, ctor, ...)	
-	end ]]--
-end
-function _M.unregister(vid)
-end
---[[
-	create remote actor reference from its url
-	eg. ssh+json://myservice.com:10000/user/id0001
---]]
-function _M.ref(url)
-	return vid.new(url)
-end
 
 local ACTOR_WAIT_RESTART = false
 local function destroy_by_serial(s, reason)
@@ -289,7 +269,11 @@ local function destroy_by_serial(s, reason)
 		if b.__actor_destroy__ then
 			b:__actor_destroy__(reason)
 		end
-		logger.warn('actor destroyed by', reason or "system", debug.traceback())
+		if pulpo.verbose then
+			logger.warn('actor', s, 'destroyed by', reason or "system", debug.traceback())
+		else
+			logger.warn('actor', s, 'destroyed by', reason or "system")
+		end
 	end
 end
 local function safe_destroy_by_serial(s, reason)
@@ -329,6 +313,13 @@ local function err_handler(e)
 	end
 	return e
 end
+local function process_retval(ok, ...)
+	if not ok then
+		return ok, ...
+	else
+		return select('#', ...), {...}
+	end
+end
 function _M.is_fatal_error(e)
 	return not (e:is('runtime') or e:is('actor_runtime_error') or e:is('actor_timeout'))
 end
@@ -339,16 +330,17 @@ function _M.dispatch_send(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {xpcall(b[method], err_handler, b, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(b[method], err_handler, b, ...))
+	if not ok then 
 		if not b[method] then 
-			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif _M.is_fatal_error(r[2]) then
+			return false, exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif _M.is_fatal_error(r) then
 			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			safe_destroy_by_serial(s, r)
 		end
+		return false, r 
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 function _M.dispatch_call(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
@@ -357,35 +349,37 @@ function _M.dispatch_call(local_id, method, ...)
 		local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 		return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 	end
-	local r = {xpcall(b[method], err_handler, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(b[method], err_handler, ...))
+	if not ok then 
 		if not b[method] then 
-			r[2] = exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
-		elseif _M.is_fatal_error(r[2]) then
-			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			return false, exception.new('actor_no_method', tostring(uuid.from_local_id(local_id)), method)
+		elseif _M.is_fatal_error(r) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r)
+			safe_destroy_by_serial(s, r) 
 		end
+		return false, r
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 function _M.dispatch_sys(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)
 	local b = body_of(s)
 	local p = actormap[b]
 	if not p then return false, exception.new('actor_not_found', tostring(uuid.from_local_id(local_id))) end
-	local r = {xpcall(p[method], err_handler, p, b, ...)}
-	if not r[1] then 
+	local ok, r = process_retval(xpcall(p[method], err_handler, p, b, ...))
+	if not ok then 
 		if not b then 
 			local tp = (b ~= ACTOR_WAIT_RESTART and 'actor_no_body' or 'actor_temporary_fail')
 			return false, exception.new(tp, tostring(uuid.from_local_id(local_id))) 
 		elseif not p[method] then 
-			r[2] = exception.new('not_found', p, method)
-		elseif _M.is_fatal_error(r[2]) then
-			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r[2])
-			safe_destroy_by_serial(s, r[2]) 
+			return false, exception.new('not_found', p, method)
+		elseif _M.is_fatal_error(r) then
+			logger.warn('fatal message error at', uuid.from_local_id(local_id), method, 'by', r)
+			safe_destroy_by_serial(s, r) 
 		end
+		return false, r
 	end
-	return unpack(r)
+	return true, unpack(r, 1, ok)
 end
 
 return _M

@@ -116,7 +116,7 @@ function replicator_index:update_last_appended(leader_actor, state, entries)
 		-- Mark any proposals as committed
 		-- logger.info('entries:', #entries, first and first.index, last and last.index)
 		local first, last = entries[1], entries[#entries]
-		logger.info('range commit:', first.index, last.index)
+		logger.debug('range commit:', first.index, last.index)
 		state.proposals:range_commit(leader_actor, first.index, last.index)
 
 		-- Update the indexes
@@ -134,6 +134,7 @@ function replicator_index:failure_cooldown(n_failure)
 	clock.sleep(0.5 * n_failure)
 end
 function replicator_index:replicate(leader_actor, actor, state)
+	logger.report('replicate start', leader_actor, actor)
 	-- arguments
 	local current_term, leader, 
 		prev_log_idx, prev_log_term, 
@@ -143,7 +144,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local term, success, last_index
 ::START::
 	if self.added == 0 then
-		-- logger.info('replicaiton to ', actor, 'has not committed yet')
+		logger.debug('replicaiton to ', actor, 'has not committed yet')
 		return
 	end
 	if self.failures > 0 then

@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 	arbiter = false, -- don't use default vid 
 }, function ()
@@ -31,7 +31,7 @@ local ok,r = xpcall(function ()
 		proposal_timeout_sec = 5.0,
 		serde = "serpent",
 		storage = "rocksdb",
-		workdir = luact.DEFAULT_ROOT_DIR,
+		datadir = luact.DEFAULT_ROOT_DIR,
 		
 		debug_node_kind = "leader", 
 		debug_leader_id = uuid.debug_create_id("1.1.1.1", 1),
@@ -146,7 +146,7 @@ local ok,r = xpcall(function ()
 		return QUORUM
 	end
 	function st:append_param_for(st)
-		return nil -- append_entries fails
+		return nil -- force append_entries to fail
 	end
 	function body:accepted()
 		for idx, log in ipairs(p.accepted) do
@@ -190,8 +190,8 @@ local ok,r = xpcall(function ()
 	clock.sleep(0.5)
 	-- start replication
 	print('start repl')
-	local rep, endev = replicator.new(actor, actor2, st, true)
-	clock.sleep(0.5)
+	local rep, endev = replicator.new(actor, actor2, st, true)	
+	clock.sleep(1.0) -- wait for replicator done its work
 
 	-- after meantime of sleep, fsm should updated (by snapshot)
 	for i=1,8 do

@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 	arbiter = false, 
 }, function ()
@@ -74,7 +74,7 @@ local ok,r = xpcall(function ()
 		serde = "serpent",
 		storage = "rocksdb",
 		debug_node_kind = "leader", 
-		workdir = luact.DEFAULT_ROOT_DIR,
+		datadir = luact.DEFAULT_ROOT_DIR,
 	}
 	-- add replica set => 1
 	local logs = {
@@ -188,7 +188,7 @@ local ok,r = xpcall(function ()
 
 	p:range_commit(actor, 1, last_index - 2)
 	logger.info('wait until commit applied')
-	clock.sleep(0.3)
+	clock.sleep(1.0)
 	logger.info('commit applied')
 	for i=1, last_index-2 do
 		local s = p.progress:at(i)

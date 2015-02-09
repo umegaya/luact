@@ -3,11 +3,13 @@ local router = require 'luact.router'
 router.DEBUG = true
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 }, function ()
 	local luact = require 'luact.init'
 	local future = require 'luact.future'
+	local router = require 'luact.router'
+	router.DEBUG = true
 	local a1 = luact "./test/tools/ping.lua"
 	local a2 = luact "./test/tools/ping.lua"
 	local b = luact "./test/tools/test_actor.lua"

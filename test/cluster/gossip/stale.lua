@@ -23,28 +23,55 @@ tools.start_luact(4, nil, function ()
 		exchange_interval = 4.0,
 	})
 	assert(gossiper:wait_bootstrap(5), "initialization should not be timeout")
-	clock.sleep(1.0)
+	clock.sleep(2.0)
 	assert(gossiper:probe(function (g)
-		assert(#g.nodes == 4)
+		while #g.nodes < 4 do
+			clock.sleep(0.1)
+		end
 	end))
 	p:wait(1)
 
 	-- stale thread 3
 	if pulpo.thread_id == 3 then
+		logger.report('start staling')
 		util.sleep(10.0) -- hard sleep
+		logger.report('end staling')
 	else
 		assert(gossiper:timed_probe(15, function (g)
 			local clock = require 'luact.clock'
 			local event = require 'pulpo.event'
 			local count = 0
-			while true do
-				local tp = event.wait(nil, g.event, clock.alarm(0.5))
-				if tp == 'leave' then
-					break
+			local n
+			for i=1,4 do
+				if g.nodes[i].thread_id == 3 then
+					n = g.nodes[i]
 				end
-				count = count + 1
-				if count > 20 then
-					assert(false, "node addition timeout")
+			end
+			assert(n)
+			if n:is_dead() then
+				logger.warn('staling thread already marked as dead')
+			else
+				local change_count = 0
+				while true do
+					local tp = event.wait(nil, g.event, clock.alarm(0.5))
+					if tp == 'leave' then
+						assert(n:is_dead())
+						break
+					end
+					if tp == 'change' then
+						change_count = change_count + 1
+						if change_count == 1 then
+							assert(n:is_suspicious())
+						elseif change_count == 2 then
+							-- node 3 wakeup early and refute suspect message
+							assert(n:is_alive())
+							break
+						end
+					end
+					count = count + 1
+					if count > 30 then
+						assert(false, "node leaving timeout")
+					end
 				end
 			end
 			assert(#g.nodes == 4)
