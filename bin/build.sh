@@ -9,4 +9,4 @@ rm Dockerfile
 docker push umegaya/luact:$TYPE
 
 # remove unused image
-docker rmi $(docker images | grep "^<none>" | awk "{print \$3}")
+# docker rmi $(docker images | grep "^<none>" | awk "{print \$3}")

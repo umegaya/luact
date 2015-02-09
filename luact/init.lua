@@ -144,7 +144,7 @@ function _M.initialize(opts)
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id
 	_M.machine_id = uuid.node_address
-	_M.n_core = opts.n_core or util.n_core()
+	_M.n_core = opts.n_core or util.n_cpu()
 	_M.verbose = pulpo.verbose
 	dht = vid.dht
 	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
