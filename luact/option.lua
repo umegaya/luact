@@ -1,6 +1,6 @@
 return {
-	cache_dir = "/tmp/luact",
-	work_dir = "/tmp/luact", 
+	logdir = false, -- "/tmp/luact/logs",
+	datadir = "/tmp/luact", 
 	n_core = 1, exclusive = true,
 	bootstrap = false, 
 	arbiter = {

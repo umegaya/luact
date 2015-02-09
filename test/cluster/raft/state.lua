@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 	arbiter = false, 
 }, function ()
@@ -74,7 +74,7 @@ local ok,r = xpcall(function ()
 		serde = "serpent",
 		storage = "rocksdb",
 		debug_node_kind = "leader", 
-		workdir = luact.DEFAULT_ROOT_DIR,
+		datadir = luact.DEFAULT_ROOT_DIR,
 	}
 	-- add replica set => 1
 	local logs = {

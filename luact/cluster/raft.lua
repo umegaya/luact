@@ -397,15 +397,15 @@ local default_opts = {
 	proposal_timeout_sec = 5.0,
 	serde = "serpent",
 	storage = "rocksdb", 
-	work_dir = luact.DEFAULT_ROOT_DIR,
+	datadir = luact.DEFAULT_ROOT_DIR,
 	initial_node = false,
 }
-local function configure_workdir(id, opts)
-	if not opts.work_dir then
-		exception.raise('invalid', 'config', 'must contain "workdir"')
+local function configure_datadir(id, opts)
+	if not opts.datadir then
+		exception.raise('invalid', 'config', 'options must contain "datadir"')
 	end
-	local p = fs.path(opts.work_dir, tostring(pulpo.thread_id), tostring(id))
-	logger.notice('raft workdir', id, p)
+	local p = fs.path(opts.datadir, tostring(pulpo.thread_id), tostring(id))
+	logger.notice('raft datadir', id, p)
 	return p
 end
 local function configure_serde(opts)
@@ -413,7 +413,7 @@ local function configure_serde(opts)
 end
 local function create(id, fsm_factory, opts, ...)
 	local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
-	local dir = configure_workdir(id, opts)
+	local dir = configure_datadir(id, opts)
 	local sr = configure_serde(opts)
 	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
 	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(pulpo.thread_id))

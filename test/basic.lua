@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 }, function ()
 	local luact = require 'luact.init'

@@ -66,7 +66,7 @@ function _M.start_luact(n_core, arbiter, proc)
 	local ptr = memory.alloc_typed('luact_thread_payload_t')
 	ptr:encode(proc)
 	luact.start({
-		cache_dir = "/tmp/luact",
+		datadir = "/tmp/luact",
 		n_core = n_core, exclusive = true,
 		arg = ptr, 
 		arbiter = arbiter, 
@@ -103,7 +103,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 	ptr[2]:encode(leader_thread_id)
 	ptr[3]:encode(n_core)
 	luact.start({
-		cache_dir = "/tmp/luact",
+		datadir = "/tmp/luact",
 		n_core = n_core, exclusive = true,
 		arg = ptr, 
 		arbiter = arbiter, 

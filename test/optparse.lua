@@ -1,14 +1,14 @@
 local fn = require 'luact.optparse'
 
 local args = {
-	"--cache_dir=/tmp/hoge",
+	"--datadir=/tmp/hoge",
 	"main.lua",
 	"--foo.bar.baz=fuga",
 }
 
 local r, o = fn(args)
 
-assert(r.cache_dir == "/tmp/hoge")
+assert(r.datadir == "/tmp/hoge")
 assert(r.foo.bar.baz == "fuga")
 assert(#o == 1 and o[1] == "main.lua")
 
@@ -19,7 +19,7 @@ local args2 = {
 }
 
 local r2 = fn(args2, {
-	{"c", "cache_dir", "^[%w]+", function (m) return "/tmp/"..m end },
+	{"c", "datadir", "^[%w]+", function (m) return "/tmp/"..m end },
 	{"fbb", "foo.bar.baz"},
 	{"w", "watch", "%w+", function (m)
 		if m == "false" then return false end
@@ -27,7 +27,7 @@ local r2 = fn(args2, {
 	end}
 })
 
-assert(r2.cache_dir == "/tmp/hogehoge")
+assert(r2.datadir == "/tmp/hogehoge")
 assert(r2.foo.bar.baz == "bot.but")
 assert(r2.watch == false)
 

@@ -1,7 +1,7 @@
 local luact = require 'luact.init'
 
 luact.start({
-	cache_dir = "/tmp/luact",
+	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
 	arbiter = false, -- don't use default vid 
 }, function ()
@@ -31,7 +31,7 @@ local ok,r = xpcall(function ()
 		proposal_timeout_sec = 5.0,
 		serde = "serpent",
 		storage = "rocksdb",
-		workdir = luact.DEFAULT_ROOT_DIR,
+		datadir = luact.DEFAULT_ROOT_DIR,
 		
 		debug_node_kind = "leader", 
 		debug_leader_id = uuid.debug_create_id("1.1.1.1", 1),
