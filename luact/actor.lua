@@ -2,7 +2,6 @@
 local uuid = require 'luact.uuid'
 uuid.DEBUG = true
 local vid = require 'luact.vid'
-local dht = require 'luact.dht'
 local conn = require 'luact.conn'
 local clock = require 'luact.clock'
 

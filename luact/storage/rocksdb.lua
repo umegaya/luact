@@ -8,6 +8,7 @@ exception.define('rocksdb')
 
 local _M = {}
 local dbpath_map = {}
+local merger_map = {}
 
 -- cdefs 
 local C = ffi.C
@@ -32,10 +33,17 @@ typedef struct luact_rocksdb_txn {
 	rocksdb_t *db;
 	rocksdb_writebatch_t *b;
 } luact_rocksdb_txn_t;
+typedef struct luact_rocksdb_merge_cas {
+	char tag[4]; //always "cas "
+	bool *result; //cas result
+	uint32_t cl, sl;
+	char p[0];
+} luact_rocksdb_merge_cas_t;
 ]]
 local LIB = ffi.load('rocksdb')
 
 -- local functions
+local vsz_work = ffi.new('size_t[1]')
 local errptr = ffi.new('char*[1]')
 local function callapi(fn, ...)
 	-- I really wanna append errptr, but it causes only first element of ... is passed to fn.
@@ -95,6 +103,65 @@ local function rocksdb_txn_new(db)
 end
 
 
+-- generic merge operator
+local function merge_operator_dtor(state)
+	logger.info('merge_operator deleted', state)
+end
+local function merge_operator_full(state, 
+	key, key_length, existing, existing_length, 
+	operands, operands_length, num_operands, 
+	success, new_value_length)
+	local new_value
+	new_value_length[0] = existing_length
+	success[0] = 1
+	for i=0,num_operands-1 do
+		local parsed
+		for j=0,tonumber(operands_length[i])-1 do
+			if tonumber(operands[i][j]) == (' '):byte() then
+				parsed = true
+				local merger_key = ffi.string(operands[i], j)
+				local ok, r = pcall(assert(merger_map[merger_key]), 
+					key, key_length, existing, existing_length, 
+					operands[i], operands_length[i], j + 1, 
+					new_value_length)
+				if not (ok and r) then 
+					logger.report('merger fails', ok, r)
+					success[0] = 0
+					return new_value
+				end
+				new_value = r
+				existing = new_value
+				existing_length = new_value_length[0]
+			end
+		end
+		if not parsed then 
+			logger.report('invalid merge operator', ffi.string(operands[i], operands_length[i]))
+			success[0] = 0
+			return new_value
+		end
+	end
+	return new_value
+end
+local function merge_operator_partial(state, 
+	key, key_length, 
+	operands, operands_length, num_operands, 
+	new_value, new_value_length)
+	return false -- always not possible to merge operands
+end
+local function merge_operator_delete_value(state, value, value_length)
+	-- currently, value will
+	logger.debug('merge_operator delete value', value, value_length)
+end
+local function merge_operator_name(state)
+	return "luact.rocksdb.generic.merger"
+end
+local merge_operator = LIB.rocksdb_mergeoperator_create(
+	nil, merge_operator_dtor, 
+	merge_operator_full, merge_operator_partial, 
+	merge_operator_delete_value, merge_operator_name
+)
+
+
 -- rocksdb options
 local rocksdb_o_opts_index, rocksdb_r_opts_index, rocksdb_w_opts_index = {}, {}, {}
 local rocksdb_o_opts_mt = { __index = rocksdb_o_opts_index, __gc = LIB.rocksdb_options_destroy }
@@ -121,6 +188,7 @@ local open_opts, read_opts, write_opts =
 -- add default settings
 open_opts:init({
 	create_if_missing = 1, 
+	merge_operator = merge_operator,
 })
 
 
@@ -234,13 +302,13 @@ function rocksdb_iter_index:search(k)
 	LIB.rocksdb_iter_seek(k, #k)
 end
 function rocksdb_iter_index:key()
-	return LIB.rocksdb_iter_key(self, vsz), vsz[0]
+	return LIB.rocksdb_iter_key(self, vsz_work), vsz_work[0]
 end
 function rocksdb_iter_index:keystr()
 	return ffi.string(self:key())
 end
 function rocksdb_iter_index:val()
-	return LIB.rocksdb_iter_value(self, vsz), vsz[0]
+	return LIB.rocksdb_iter_value(self, vsz_work), vsz_work[0]
 end
 function rocksdb_iter_index:valstr()
 	return ffi.string(self:val())
@@ -257,7 +325,6 @@ local rocksdb_index = {}
 local rocksdb_mt = {
 	__index = rocksdb_index
 }
-local vsz = ffi.new('size_t[1]')
 local wpset
 function rocksdb_index:column_family(name, opts)
 	local key = db_from_key(self)
@@ -273,12 +340,12 @@ function rocksdb_index:column_family(name, opts)
 end
 function rocksdb_index:get(k, opts)
 	local v, vl = self:rawget(k, #k, opts)
-	local s = ffi.string(v, vl)
+	local s = vl > 0 and ffi.string(v, vl) or nil
 	memory.free(v)
 	return s
 end
 function rocksdb_index:rawget(k, kl, opts)
-	return callapi(LIB.rocksdb_get, self, opts or read_opts, k, kl, vsz), vsz[0]
+	return callapi(LIB.rocksdb_get, self, opts or read_opts, k, kl, vsz_work), vsz_work[0]
 end
 function rocksdb_index:put(k, v, opts)
 	return self:rawput(k, #k, v, #v, opts)
@@ -300,7 +367,7 @@ function rocksdb_index:rawmerge(k, kl, v, vl, opts)
 end
 function rocksdb_index:new_txn()
 	return rocksdb_txn_new(self)
-end
+end	
 local function rocksdb_iter_next(it)
 	if it:valid() then
 		local k,kl = it:key()
@@ -355,7 +422,7 @@ local rocksdb_cf_mt = {
 	__index = rocksdb_cf_index,
 }
 function rocksdb_cf_index:rawget(k, kl, opts)
-	return callapi(LIB.rocksdb_get_cf, self.db, opts or read_opts, self.cf, k, kl, vsz), vsz[0]
+	return callapi(LIB.rocksdb_get_cf, self.db, opts or read_opts, self.cf, k, kl, vsz_work), vsz_work[0]
 end
 function rocksdb_cf_index:rawput(k, kl, v, vl, opts)
 	return callapi(LIB.rocksdb_put_cf, self.db, opts or write_opts, self.cf, k, kl, v, vl)
@@ -493,7 +560,7 @@ function _M.open(name, opts, debug_conf)
 	dbpath_map[key] = db
 	return db
 end
--- you can change global options only once by using init
+-- you can change global options by calling _M.open_options:init(settings)
 _M.open_options, _M.read_options, _M.write_options = open_opts, read_opts, write_opts
 -- create independent option instance
 function _M.new_open_opts(opts_table)
@@ -513,6 +580,69 @@ function _M.new_write_opts(opts_table)
 end
 function _M.close(db)
 	db:fin()
+end
+-- add application specific merger
+function _M.register_merger(name, merger)
+	merger_map[name] = merger
+end
+
+-- builtin merger compare and swap (only run correctly with sync write)
+local merger_cas_mt = {}
+merger_cas_mt.__index = merger_cas_mt
+merger_cas_mt.result_buffer = memory.alloc_typed('bool')
+function merger_cas_mt.size(cl, sl)
+	return ffi.sizeof('luact_rocksdb_merge_cas_t') + cl + sl
+end
+function merger_cas_mt.new(compare, swap, result_buffer, cl, sl)
+	cl = cl or (compare and #compare or 0)
+	sl = sl or #swap
+	local p = ffi.cast('luact_rocksdb_merge_cas_t*', memory.alloc(merger_cas_mt.size(cl, sl)))
+	ffi.copy(p.tag, "cas ", 4)
+	p.cl = cl
+	p.result = result_buffer or merger_cas_mt.result_buffer
+	if cl > 0 then
+		ffi.copy(p:compare(), compare, cl)
+	end
+	ffi.copy(p:swap(), swap, sl)
+	p.sl = sl
+	return p
+end
+function merger_cas_mt:compare()
+	return self.cl > 0 and self.p or nil
+end
+function merger_cas_mt:swap()
+	return self.p + self.cl
+end
+function merger_cas_mt:__len()
+	return merger_cas_mt.size(self.cl, self.sl)
+end
+ffi.metatype('luact_rocksdb_merge_cas_t', merger_cas_mt)
+
+_M.register_merger('cas', function (key, key_length, 
+					existing, existing_length, 
+					payload, payload_length, operand_offset, 
+					new_value_length)
+	local context = ffi.cast('luact_rocksdb_merge_cas_t*', payload)
+	local cmp = context:compare()
+	-- logger.warn('cas merger', payload, ffi.string(existing, existing_length), context.cl, cmp)
+	if existing_length <= 0 then
+		if cmp == nil then
+			new_value_length[0] = context.sl
+			context.result[0] = true
+			return context:swap()
+		end
+	elseif cmp and memory.cmp(existing, cmp, existing_length) then
+		new_value_length[0] = context.sl
+		context.result[0] = true
+		return context:swap()
+	end
+	new_value_length[0] = existing_length
+	context.result[0] = false
+	return ffi.cast('char *', existing)
+end)
+function _M.op_cas(compare, swap, result_buffer, cl, sl)
+	local p = merger_cas_mt.new(compare, swap, result_buffer, cl, sl)
+	return ffi.string(p, #p)
 end
 
 return _M

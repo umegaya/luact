@@ -170,7 +170,8 @@ function raft_index:read(state_key, consistent, timeout)
 	if l then return l:read(state_key, consistent, timeout) end
 	if consistent then
 		-- TODO : implement 'consistent' read
-		exception.raise('invalid', 'option', 'consistent read not supported')
+		logger.warn('invalid', 'option', 'consistent read not supported yet, use stale read instead')
+		return self.state.fsm:get(key)
 	else
 		return self.state.fsm:get(key)
 	end

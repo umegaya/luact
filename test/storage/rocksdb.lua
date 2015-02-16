@@ -112,8 +112,25 @@ local ok,r = xpcall(function ()
 	assert(cf1:get('key') == 'val', "column family should store key value pair correctly")
 	assert(cf2:get('key') == 'value', "column family should store key value pair correctly")
 
+	-- merge test
+	local result_buffer1, result_buffer2 = ffi.new('bool[1]'), ffi.new('bool[1]')
+	cf1:put('merge_key', 'foo')
+	cf2:put('merge_key', 'bar')
+	cf1:merge('merge_key', rocksdb.op_cas('foo', 'bar', result_buffer1))
+	cf2:merge('merge_key', rocksdb.op_cas('foo', 'bar', result_buffer2))
+	assert((cf1:get('merge_key') == 'bar') and result_buffer1[0], 
+		"cf1 cas meets comparison condition, so value should change")
+	assert((cf2:get('merge_key') == 'bar') and (not result_buffer2[0]), 
+		"cf2 cas does not meet comparison condition, so value should not change")
+	cf1:merge('merge_key_not_exist', rocksdb.op_cas('foo', 'bar', result_buffer1))
+	cf2:merge('merge_key_not_exist', rocksdb.op_cas(nil, 'bar', result_buffer2))
+	assert((not cf1:get('merge_key_not_exist')) and (not result_buffer1[0]), 
+		"cas for non-existent key should match with nil value, so value should not set")
+	assert((cf2:get('merge_key_not_exist') == 'bar') and result_buffer2[0], 
+		"cas for non-existent key should match with nil value, so value should set")
+	
 end, function (e)
-	logger.error('err', e, debug.traceback())
+	logger.error(e, debug.traceback())
 end)
 	-- fs.rmdir('/tmp/luact/rocksdb/testdb')	
 
