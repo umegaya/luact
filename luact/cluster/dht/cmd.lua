@@ -1,24 +1,25 @@
 local ffi = require 'ffiex.init'
 local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
+local uuid = require 'luact.uuid'
 
 local _M = {}
 
 ffi.cdef [[
-struct luact_dht_cmd_get {
+typedef struct luact_dht_cmd_get {
 	uint8_t kind, padd;
 	uint16_t kl;
 	char k[0];
 } luact_dht_cmd_get_t;
 
-struct luact_dht_cmd_put {
+typedef struct luact_dht_cmd_put {
 	uint8_t kind, padd;
 	uint16_t kl;
 	uint32_t vl;
 	char kv[0];	
 } luact_dht_cmd_put_t;
 
-struct luact_dht_cmd_cas {
+typedef struct luact_dht_cmd_cas {
 	uint8_t kind, padd;
 	uint16_t kl;
 	uint32_t ol;
@@ -26,14 +27,14 @@ struct luact_dht_cmd_cas {
 	char kon[0];		
 } luact_dht_cmd_cas_t;
 
-struct luact_dht_cmd_merge {
+typedef struct luact_dht_cmd_merge {
 	uint8_t kind, padd;
 	uint16_t kl;
 	uint32_t vl;
 	char kv[0];		
-} luact_dht_cmd_cas_t;
+} luact_dht_cmd_merge_t;
 
-struct luact_dht_cmd_watch {
+typedef struct luact_dht_cmd_watch {
 	uint8_t kind, padd;
 	uint16_t kl;
 	luact_uuid_t watcher;
@@ -42,7 +43,7 @@ struct luact_dht_cmd_watch {
 	char p[0];
 } luact_dht_cmd_watch_t;
 
-struct luact_dht_cmd_split {
+typedef struct luact_dht_cmd_split {
 	uint8_t kind, padd;
 	uint16_t kl;
 	char k[0];
@@ -60,6 +61,7 @@ function get_mt.new(kind, k, kl)
 	p.kind = kind
 	p.kl = kl
 	ffi.copy(p:key(), k, kl)
+	return p
 end
 _M.get = get_mt.new
 function get_mt:key()
@@ -84,6 +86,7 @@ function put_mt.new(kind, k, kl, v, vl)
 	p.vl = vl
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:val(), v, vl)
+	return p
 end
 _M.put = put_mt.new
 function put_mt:key()
@@ -105,7 +108,7 @@ function cas_mt.size(kl, ol, nl)
 	return ffi.sizeof('luact_dht_cmd_cas_t') + kl + ol + nl
 end
 function cas_mt.new(kind, k, kl, o, ol, n, nl)
-	local p = ffi.cast('luact_dht_cmd_cas_t*', memory.alloc(cas_mt.size(kl)))
+	local p = ffi.cast('luact_dht_cmd_cas_t*', memory.alloc(cas_mt.size(kl, ol, nl)))
 	p.kind = kind
 	p.kl = kl
 	p.ol = ol
@@ -113,16 +116,17 @@ function cas_mt.new(kind, k, kl, o, ol, n, nl)
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:oldval(), o, ol)
 	ffi.copy(p:newval(), n, nl)
+	return p
 end
 _M.cas = cas_mt.new
 function cas_mt:key()
-	return self.kv
+	return self.kon
 end
 function cas_mt:oldval()
-	return self.kv + self.kl
+	return self.kon + self.kl
 end
 function cas_mt:newval()
-	return self.kv + self.kl + self.ol
+	return self.kon + self.kl + self.ol
 end
 function cas_mt:apply_to(storage, range)
 	return range:exec_cas(storage, self:key(), self.kl, self:oldval(), self.ol, self:newval(), self.nl)
@@ -143,6 +147,7 @@ function merge_mt.new(kind, k, kl, v, vl)
 	p.vl = vl
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:val(), v, vl)
+	return p
 end
 _M.merge = merge_mt.new
 function merge_mt:key()
@@ -174,6 +179,7 @@ function watch_mt.new(kind, k, kl, watcher, method, arg, arglen)
 	if arg then
 		ffi.copy(p:arg(), arg, arglen)
 	end
+	return p
 end
 _M.watch = watch_mt.new
 function watch_mt:key()
@@ -183,7 +189,9 @@ function watch_mt:method()
 	return self.p + self.kl
 end
 function watch_mt:arg()
-	return self.p + self.kl + self.name_len
+	if self.arg_len > 0 then
+		return self.p + self.kl + self.name_len
+	end
 end
 function watch_mt:apply_to(storage, range)
 	if self.arg_len > 0 then
@@ -199,13 +207,14 @@ ffi.metatype('luact_dht_cmd_watch_t', watch_mt)
 local split_mt = {}
 split_mt.__index = split_mt
 function split_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_get_t') + kl
+	return ffi.sizeof('luact_dht_cmd_split_t') + kl
 end
 function split_mt.new(kind, k, kl)
-	local p = ffi.cast('luact_dht_cmd_get_t*', memory.alloc(get_mt.size(kl)))
+	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(kl)))
 	p.kind = kind
 	p.kl = kl
 	ffi.copy(p:key(), k, kl)
+	return p
 end
 _M.split = split_mt.new
 function split_mt:key()
