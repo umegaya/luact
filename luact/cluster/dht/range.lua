@@ -2,6 +2,7 @@ local luact = require 'luact.init'
 local uuid = require 'luact.uuid'
 local clock = require 'luact.clock'
 local serde = require 'luact.serde'
+local serde_common = require 'luact.serde.common'
 local router = require 'luact.router'
 local actor = require 'luact.actor'
 
@@ -11,6 +12,7 @@ local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
 local socket = require 'pulpo.socket'
 local tentacle = require 'pulpo.tentacle'
+local exception = require 'pulpo.exception'
 local fs = require 'pulpo.fs'
 
 local raft = require 'luact.cluster.raft'
@@ -35,9 +37,9 @@ local range_caches = {}
 _M.MAX_BYTE = 64 * 1024 * 1024
 _M.INITIAL_BYTE = 1 * 1024 * 1024
 _M.DEFAULT_REPLICA = 3
-_M.META1_FAMILY = '__meta1__'
-_M.META2_FAMILY = '__meta2__'
-_M.DEFAULT_FAMILY = '__data__'
+_M.META1_FAMILY = '__dht.meta1__'
+_M.META2_FAMILY = '__dht.meta2__'
+_M.DEFAULT_FAMILY = '__dht.data__'
 _M.KIND_META1 = 1
 _M.KIND_META2 = 2
 _M.KIND_DEFAULT = 3
@@ -50,7 +52,7 @@ ffi.cdef [[
 typedef struct luact_dht_range {
 	luact_dht_key_t start_key;
 	luact_dht_key_t end_key;
-	uint8_t n_replica, kind, padd[2];
+	uint8_t n_replica, kind, replica_available, padd;
 	luact_uuid_t replicas[0];		//arbiter actors' uuid
 } luact_dht_range_t;
 ]]
@@ -66,18 +68,29 @@ local function make_metakey(kind, key)
 end
 -- sys key is stored in root range
 local function make_syskey(category, key)
-	return '\0'..string.char(kind)..key
+	return '\0'..string.char(category)..key
+end
+-- synchorinized merge
+local function sync_merge(storage, k, kl, v, vl)
+	storage:rawmerge(k, kl, v, vl)
+	v, vl = storage:rawget(k, kl) -- resolve all logs for this key (thus it processed above merge now)
+	memory.free(v)
 end
 
 
 -- range
 local range_mt = {}
 range_mt.__index = range_mt
+function range_mt.size(n_replica)
+	return ffi.sizeof('luact_dht_range_t') + (n_replica * ffi.sizeof('luact_uuid_t'))
+end
+function range_mt.n_replica_from_size(size)
+	return math.ceil((size - ffi.sizeof('luact_dht_range_t')) / ffi.sizeof('luact_uuid_t'))
+end
 function range_mt.alloc(n_replica)
-	local p = ffi.cast('luact_dht_range_t*', 
-		memory.alloc(ffi.sizeof('luact_dht_range_t') + (n_replica * ffi.sizeof('luact_uuid_t')))
-	)
+	local p = ffi.cast('luact_dht_range_t*', memory.alloc(range_mt.size(n_replica)))
 	p.n_replica = n_replica
+	p.replica_available = 0
 	return p
 end
 function range_mt.fsm_factory(rng)
@@ -89,8 +102,9 @@ function range_mt:init(start_key, end_key, kind)
 	self.kind = kind
 end
 function range_mt:add_replica(remote)
-	remote = remote or actor.root_of()
-	self.replica[self.n_replica] = remote.arbiter(self:arbiter_id(), range_mt.fsm_factory, self)
+	remote = remote or actor.root_of(nil, luact.thread_id)
+	self.replicas[self.replica_available] = remote.arbiter(self:arbiter_id(), range_mt.fsm_factory, self)
+	self.replica_available = self.replica_available + 1
 end
 function range_mt:fin()
 	-- TODO : consider when range need to be removed, and do correct finalization
@@ -103,7 +117,7 @@ function range_mt:metakey()
 	return make_metakey(self.kind, ffi.string(self.start_key.p, self.start_key.length))
 end
 function range_mt:check_replica()
-	if self.n_replica < _M.NUM_REPLICA then
+	if self.replica_available < _M.NUM_REPLICA then
 		exception.raise('invalid', 'dht', 'not enough replica', self.n_replica)
 	end
 end
@@ -135,7 +149,7 @@ function range_mt:cas(k, ov, nv, timeout)
 	local cas = storage_module.op_cas(ov, nv, nil, ovl, nvl)
 	return self:rawcas(k, #k, oval, ol, nval, nl, timeout)
 end
-function range_mt:rawcas(k, ov, ovl, nv, nvl, timeout)
+function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, timeout)
 	self:check_replica()
 	return self.replicas[0]:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl), timeout)
 end
@@ -149,7 +163,10 @@ function range_mt:split(range_key, timeout)
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl)
-	return storage:rawget(k, kl)
+	local v, vl = storage:rawget(k, kl)
+	local p = ffi.string(v, vl)
+	memory.free(v)
+	return p
 end
 function range_mt:exec_put(storage, k, kl, v, vl)
 	return storage:rawput(k, kl, v, vl)
@@ -158,10 +175,14 @@ function range_mt:exec_merge(storage, k, kl, v, vl)
 	return storage:rawmerge(k, kl, v, vl)
 end
 range_mt.cas_result = memory.alloc_typed('bool')
-function range_mt:exec_cas(storage, k, kl, o, ol, n, nl)
-	local cas = storage_module.op_cas(ov, nv, range_mt.cas_result, ovl, nvl)
-	storage:rawmerge(k, kl, v, vl, range_mt.sync_write_opts)
+local function sync_cas(storage, k, kl, o, ol, n, nl)
+	range_mt.cas_result[0] = false
+	local cas = storage_module.op_cas(o, n, range_mt.cas_result, ol, nl)
+	sync_merge(storage, k, kl, cas, #cas)
 	return range_mt.cas_result[0]
+end
+function range_mt:exec_cas(storage, k, kl, o, ol, n, nl)
+	return sync_cas(storage, k, kl, o, ol, n, nl)
 end
 function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen)
 	assert(false, "TBD")
@@ -194,15 +215,33 @@ end
 function range_mt:detach()
 	logger.info('range', 'detached')
 end
+serde_common.register_ctype('struct', 'luact_dht_range', {
+	msgpack = {
+		packer = function (pack_procs, buf, ctype_id, obj, length)
+			local used = range_mt.size(obj.n_replica)
+			local p, ofs = pack_procs.pack_ext_cdata_header(buf, used, ctype_id)
+			buf:reserve(used)
+			ffi.copy(p + ofs, obj, used)
+			return ofs + used
+		end,
+		unpacker = function (rb, len)
+			local n_replica = range_mt.n_replica_from_size(len)
+			local ptr = range_mt.alloc(n_replica)
+			ffi.copy(ptr, rb:curr_byte_p(), len)
+			rb:seek_from_curr(len)
+			return ffi.gc(ptr, memory.free)
+		end,
+	},
+}, serde_common.LUACT_DHT_RANGE)
 ffi.metatype('luact_dht_range_t', range_mt)
 
 
 -- module functions
 function _M.initialize(root, datadir, opts)
-	storage_module = require ('luact.cluster.store.'..opts.storage) 
-	persistent_db = storage_module.new(datadir, "dht")
+	storage_module = require ('luact.storage.'..opts.storage) 
+	persistent_db = storage_module.open(datadir)
 	range_mt.sync_write_opts = storage_module.new_write_opts({ sync = true })
-	_M.NUM_REPLICA = opts.replica
+	_M.NUM_REPLICA = opts.n_replica
 	if root then -- memorize root_range. all other ranges can be retrieve from it
 		root_range = root
 	else -- create initial range hirerchy structure manualy 
@@ -216,16 +255,17 @@ function _M.initialize(root, datadir, opts)
 		-- put initial meta2 storage into root_range
 		meta2 = _M.new(key.MIN, key.MAX, _M.KIND_META2)
 		meta2_key = meta2:metakey()
-		root_cf:rawput(meta2_key, #meta2_key, meta2, ffi.sizeof(meta2))
+		root_cf:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), ffi.sizeof(meta2))
 		-- put initial default storage into meta2_range
 		default = _M.new(key.MIN, key.MAX, _M.KIND_DEFAULT)
 		default_key = default:metakey()
-		meta2_cf:rawput(default_key, #default_key, default, ffi.sizeof(default))
+		meta2_cf:rawput(default_key, #default_key, ffi.cast('char *', default), ffi.sizeof(default))
 	end
+	return root_range
 end
 
 function _M.new_family(kind, name, cluster_bootstrap)
-	if column_families.count >= 255 then
+	if #column_families >= 255 then
 		exception.raise('invalid', 'cannot create new family: full')
 	end
 	local c = column_families.lookup[name]
@@ -237,8 +277,7 @@ function _M.new_family(kind, name, cluster_bootstrap)
 	end
 	if cluster_bootstrap then
 		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(kind))
-		local cas = storage_module.op_cas(nil, name)
-		if not c:merge(syskey, cas) then
+		if not sync_cas(c, syskey, #syskey, nil, 0, name, #name) then
 			exception.raise('fatal', 'initial kind of dht cannot registered', kind, name)
 		end
 	end

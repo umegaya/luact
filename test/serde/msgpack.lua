@@ -25,6 +25,7 @@ common.register_ctype('struct', 'long_struct', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length, refl)
 			local p, ofs = pack_procs.pack_ext_cdata_header(buf, 1, ctype_id)
+			buf:reserve(1)
 			p[ofs] = obj.buffer[0]
 			return ofs + 1
 		end,

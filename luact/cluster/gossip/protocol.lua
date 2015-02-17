@@ -220,8 +220,8 @@ serde[serde.kind.serpent]:customize(
 serde_common.register_ctype('struct', 'luact_gossip_proto_nodelist', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
-			buf:reserve(obj.used)
 			local p, ofs = pack_procs.pack_ext_cdata_header(buf, obj.used, ctype_id)
+			buf:reserve(obj.used)
 			ffi.copy(p + ofs, obj.buffer, obj.used)
 			return ofs + obj.used
 		end,

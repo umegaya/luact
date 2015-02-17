@@ -279,6 +279,9 @@ function serde_mt.pack_ext_cdata_header(buf, length, ctype_id)
 end
 function serde_mt.pack_struct_cdata(buf, obj, refl, length)
 	local ctype_id = common.ctype_id(refl.what, refl.name)
+	if not ctype_id then
+		exception.raise('not_found', 'ctype_id', refl.what, refl.name)
+	end
 	local packer = common.msgpack_packer[ctype_id]
 	local ofs = 0
 	local p
@@ -331,8 +334,8 @@ function serde_mt.packer.cdata(buf, obj)
 		local et = refl.element_type
 		if et.name then -- struct/union
 			serde_mt.pack_struct_cdata(buf, obj, et, et.size)
-		else
-			serde_mt.pack_int_cdata(buf, obj, refl)
+		else -- ptr of scalar type
+			serde_mt.pack_int_cdata(buf, obj[0], refl)
 		end
 	end
 end

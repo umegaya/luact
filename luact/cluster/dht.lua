@@ -83,7 +83,7 @@ end
 
 -- module functions
 local default_opts = {
-	replica = range.DEFAULT_REPLICA,
+	n_replica = range.DEFAULT_REPLICA,
 	storage = "rocksdb",
 	datadir = luact.DEFAULT_ROOT_DIR,
 }

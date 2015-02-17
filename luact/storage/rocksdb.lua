@@ -120,6 +120,7 @@ local function merge_operator_full(state,
 			if tonumber(operands[i][j]) == (' '):byte() then
 				parsed = true
 				local merger_key = ffi.string(operands[i], j)
+	--logger.warn('merge full', '['..merger_key..']', ('%q'):format(ffi.string(operands[i], operands_length[i])))
 				local ok, r = pcall(assert(merger_map[merger_key]), 
 					key, key_length, existing, existing_length, 
 					operands[i], operands_length[i], j + 1, 
@@ -132,6 +133,7 @@ local function merge_operator_full(state,
 				new_value = r
 				existing = new_value
 				existing_length = new_value_length[0]
+				break
 			end
 		end
 		if not parsed then 

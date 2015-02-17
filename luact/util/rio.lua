@@ -71,8 +71,8 @@ serde[serde.kind.serpent]:customize(
 serde_common.register_ctype('struct', 'luact_buf_slice', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
-			buf:reserve(obj.sz)
 			local p, ofs = pack_procs.pack_ext_cdata_header(buf, obj.sz, ctype_id)
+			buf:reserve(obj.sz)
 			ffi.copy(p + ofs, obj.p, obj.sz)
 			return ofs + obj.sz
 		end,

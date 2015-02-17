@@ -98,10 +98,22 @@ local ok,r = xpcall(function ()
 
 
 	local cf1, cf2 = db:column_family('hoge'), db:column_family('fuga')
+	local result_buffer1, result_buffer2 = ffi.new('bool[1]'), ffi.new('bool[1]')
 	cf1:put('key', 'val')
 	cf2:put('key', 'value')
 	assert(cf1:get('key') == 'val', "column family should store key value pair correctly")
 	assert(cf2:get('key') == 'value', "column family should store key value pair correctly")
+
+	cf1:merge('key', rocksdb.op_cas('val', 'value', result_buffer1))
+	assert(cf1:get('key') == 'value' and result_buffer1[0], "cas change value correctly")
+
+	cf1:merge('key', rocksdb.op_cas('value', 'val', result_buffer1))
+	assert(cf1:get('key') == 'val' and result_buffer1[0], "cas change value correctly")
+
+	local sync_write_opts = rocksdb.new_write_opts({sync = 1})
+	cf2:merge('not_found', rocksdb.op_cas(nil, 'var', result_buffer2), sync_write_opts)
+	assert(cf2:get('not_found') == 'var' and result_buffer2[0], "cas with no value should success")
+	
 	cf1:fin()
 	cf2:fin()
 	db:close()
@@ -113,7 +125,7 @@ local ok,r = xpcall(function ()
 	assert(cf2:get('key') == 'value', "column family should store key value pair correctly")
 
 	-- merge test
-	local result_buffer1, result_buffer2 = ffi.new('bool[1]'), ffi.new('bool[1]')
+	result_buffer1[0], result_buffer2[0] = false, false
 	cf1:put('merge_key', 'foo')
 	cf2:put('merge_key', 'bar')
 	cf1:merge('merge_key', rocksdb.op_cas('foo', 'bar', result_buffer1))

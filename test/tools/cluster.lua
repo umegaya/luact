@@ -83,7 +83,7 @@ function _M.start_luact(n_core, arbiter, proc)
 				local fn = ffi.cast('luact_thread_payload_t*', p):decode()
 				fn()
 			end, function (e)
-				logger.error('err', e, debug.traceback())
+				logger.error(e, debug.traceback())
 				os.exit(-2)
 			end)
 			luact.stop()
@@ -163,16 +163,13 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local fn = ffi.cast('luact_thread_payload_t*', p)[1]:decode()
 			fn(arb, pulpo.thread_id)
 		end, function (e)
-			logger.fatal('err', e, debug.traceback())
+			logger.fatal(e, debug.traceback())
 			os.exit(-2)
 		end)
 		luact.stop()
 	end)
 	ptr:fin()
 	return true
-end
-
-function _M.start_partitioned_cluster(n_core, initial_leader_id, minority, majority, fsm_factory, proc)
 end
 
 local thread_latch_index = {}

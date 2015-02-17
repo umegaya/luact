@@ -96,8 +96,8 @@ serde_common.register_ctype('struct', 'luact_raft_snapshot_header', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
 			local sz = snapshot_header_size(obj.n_replica)
-			buf:reserve(sz)
 			local p, ofs = pack_procs.pack_ext_cdata_header(buf, sz, ctype_id)
+			buf:reserve(sz)
 			ffi.copy(p + ofs, obj, sz)
 			return ofs + sz
 		end,

@@ -24,9 +24,9 @@ typedef struct luact_dht_key {
 
 
 -- constant cdata
-_M.MIN = memory.alloc_fill_typed('luact_dht_key_t')
+_M.MIN = (memory.alloc_fill_typed('luact_dht_key_t'))[0]
 _M.MIN.length = 0
-_M.MAX = memory.alloc_fill_typed('luact_dht_key_t', 0xFF, _M.MAX_LENGTH)
+_M.MAX = (memory.alloc_fill_typed('luact_dht_key_t', 0xFF, _M.MAX_LENGTH))[0]
 _M.MAX.length = _M.MAX_LENGTH
 
 
