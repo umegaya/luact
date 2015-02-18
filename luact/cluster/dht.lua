@@ -93,9 +93,9 @@ local function configure_datadir(opts)
 	end
 	return fs.path(opts.datadir, tostring(pulpo.thread_id))
 end
-function _M.initialize(root_range, opts)
+function _M.initialize(parent_address, opts)
 	opts = util.merge_table(default_opts, opts)
-	range.initialize(root_range, configure_datadir(opts), opts)
+	range.initialize(parent_address, configure_datadir(opts), opts)
 end
 
 function _M.finalize()

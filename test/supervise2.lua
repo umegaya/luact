@@ -5,6 +5,9 @@ sv.DEBUG = true
 luact.start({
 	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
+	dht = {
+		gossip_port = false,	
+	}, 
 }, function ()
 	local luact = require 'luact.init'
 	local clock = require 'luact.clock'

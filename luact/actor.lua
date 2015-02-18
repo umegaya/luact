@@ -148,6 +148,7 @@ local uuid_metatable = {
 		uuid.free(t)
 	end,
 }
+_M.uuid_metatable = uuid_metatable
 
 --[[
 	make vid cdata itself message-sendable
@@ -178,6 +179,7 @@ local vid_metatable = {
 		return v
 	end,	
 }
+_M.vid_metatable = vid_metatable
 
 -- vars
 local bodymap = {}
@@ -185,8 +187,6 @@ local bodymap = {}
 -- module function
 local root_actor_id
 function _M.initialize(opts)
-	uuid.initialize(uuid_metatable, opts.startup_at, opts.local_address)
-	vid.initialize(vid_metatable, opts.vid_map_initial_size)
 	root_actor_id = uuid.first(uuid.node_address, pulpo.thread_id, true)
 end
 
@@ -209,7 +209,11 @@ function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
 end
 function _M.new_link_with_opts(to, opts, ctor, ...)
-	local body = ctor(...)
+	local ok, body = pcall(ctor, ...)
+	if not ok then
+		logger.report('fail to create actor body', body)
+		error(body)
+	end
 	local id = opts.uuid or uuid.new()
 	local s = uuid.serial(id)
 	if to then 

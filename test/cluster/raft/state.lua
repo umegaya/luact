@@ -3,7 +3,9 @@ local luact = require 'luact.init'
 luact.start({
 	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
-	arbiter = false, 
+	dht = {
+		gossip_port = false, -- disable dht. vid will run in local mode
+	}, 
 }, function ()
 local luact = require 'luact.init'
 local ok,r = xpcall(function ()

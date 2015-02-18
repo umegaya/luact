@@ -40,8 +40,9 @@ _M.DEFAULT_ROOT_DIR = fs.abspath("tmp", "luact")
 -- command line option definitions
 local opts_defs = {
 	{"a", "local_address"},
+	{"p", "parent_address"},
 	{"t", "startup_at"},
-	{"p", "port"},
+	{nil, "port"},
 	{nil, "n_core", "%w+", function (m)
 		if m == "false" then return false end 
 		return tonumber(m)
@@ -94,7 +95,6 @@ factory = {
 	end,
 }
 local from_file, from_module = factory["file"], factory["module"]
-local dht
 
 -- additional thread startup routines
 local function init_worker(opts)
@@ -137,7 +137,14 @@ function _M.initialize(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 	-- initialize other modules
+	uuid.initialize(actor.uuid_metatable, opts.startup_at, opts.local_address)
 	actor.initialize(opts.actor)
+	if opts.dht.gossip_port then
+		vid.initialize_dist(actor.vid_metatable, opts.parent_address, opts.dht, opts.vid)
+	else
+		vid.initialize_local(actor.vid_metatable, opts.vid)
+	end
+	_M.dht = vid.dht
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
 
@@ -146,7 +153,6 @@ function _M.initialize(opts)
 	_M.machine_id = uuid.node_address
 	_M.n_core = opts.n_core or util.n_cpu()
 	_M.verbose = pulpo.verbose
-	dht = vid.dht
 	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
 
 	-- initialize listener of internal actor messaging 
@@ -154,23 +160,15 @@ function _M.initialize(opts)
 	-- external port should be declared at each startup routine.
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
-		local arbiter_opts = options.arbiter or {}
-		local gossiper_opts = options.gosipper or {}
+		local arbiter_opts = options.arbiter
+		local gossiper_opts = options.gossiper
 		local arbiter_module = require('luact.cluster.'..(arbiter_opts.kind or 'raft'))
 		local gossiper_module = require('luact.cluster.'..(gossiper_opts.kind or "gossip"))
-		gossiper_opts.config = gossiper_opts.config or {}
-		arbiter_opts.config = arbiter_opts.config or {}
 		if pulpo.thread_id ~= 1 then
-			table.insert(gossiper_opts.config, actor.root_of(nil, 1, true))
+			table.insert(gossiper_opts.config.nodelist, actor.root_of(nil, 1, true))
 			gossiper_opts.config.local_mode = true
 		end
 		_M.root = {
-			new = actor.new,
-			destroy = actor.destroy,
-			register = _M.register,
-			unregister = _M.unregister,
-			["require"] = _M.require, 
-			load = _M.load, 
 			arbiter = function (group, fsm_factory, opts, ...)
 				return fsm_factory and arbiter_module.new(group, fsm_factory, util.merge_table(arbiter_opts.config, opts or {}), ...)
 					or arbiter_module.find(group)
@@ -215,17 +213,17 @@ end
 
 function _M.register(vid, fn_or_opts, fn_or_args1, ...)
 	if type(fn_or_opts) == 'table' then
-		return dht:put(vid, fn_or_opts.multi_actor, function (ctor, opts, ...)
+		return _M.dht:put(vid, fn_or_opts.multi_actor, function (ctor, opts, ...)
 			return _M.supervise(ctor, opts, ...)
 		end, fn_or_args1, fn_or_opts.supervise, ...)
 	else
-		return dht:put(vid, false, function (ctor, opts, ...)
+		return _M.dht:put(vid, false, function (ctor, opts, ...)
 			return _M.supervise(ctor, opts, ...)
 		end, fn_or_opts, false, fn_or_args1, ...)
 	end
 end
 function _M.unregister(vid, actor_id)
-	dht:remove(vid, actor_id, function (key, id)
+	_M.dht:remove(vid, actor_id, function (key, id)
 		local tid = uuid.thread_id(id)
 		if tid == _M.thread_id then
 			actor.destroy(id)

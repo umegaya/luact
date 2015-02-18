@@ -3,6 +3,9 @@ local luact = require 'luact.init'
 luact.start({
 	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
+	dht = {
+		gossip_port = false,	
+	}, 
 }, function ()
 	local luact = require 'luact.init'
 	local a1 = luact {

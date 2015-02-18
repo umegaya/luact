@@ -2,14 +2,18 @@ return {
 	logdir = false, -- "/tmp/luact/logs",
 	datadir = "/tmp/luact", 
 	n_core = 1, exclusive = true,
-	bootstrap = false, 
+	startup_at = nil,
+	parent_address = nil,
+	local_address = nil,
 	arbiter = {
 		kind = "raft", 
-		config = {}, -- see cluster/raft.lua for key and default
+		config = {}, -- see cluster/raft.lua for other keys and defaults
 	},
 	gossiper = {
 		kind = "gossip",
-		config = {}, -- see cluster/gossip.lua for key and default
+		config = {
+			nodelist = {}, 
+		}, -- see cluster/gossip.lua for other keys and defaults
 	},
 	conn = {
 		internal_proto = "tcp+msgpack",
@@ -17,13 +21,14 @@ return {
 		use_connection_cache = false,
 	}, 
 	actor = {
-		-- startup_at = number,
-		-- local_address = uint32_t,
 	}, 
 	router = {
 		timeout_resolution = 1, -- 1 sec
 	},
 	dht = {
+		gossip_port = 8008,
+	}, 
+	vid = {
 
 	}, 
 }

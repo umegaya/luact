@@ -16,6 +16,7 @@ local exception = require 'pulpo.exception'
 local fs = require 'pulpo.fs'
 
 local raft = require 'luact.cluster.raft'
+local gossip = require 'luact.cluster.gossip'
 local key = require 'luact.cluster.dht.key'
 local cache = require 'luact.cluster.dht.cache'
 local cmd = require 'luact.cluster.dht.cmd'
@@ -39,10 +40,10 @@ _M.INITIAL_BYTE = 1 * 1024 * 1024
 _M.DEFAULT_REPLICA = 3
 _M.META1_FAMILY = '__dht.meta1__'
 _M.META2_FAMILY = '__dht.meta2__'
-_M.DEFAULT_FAMILY = '__dht.data__'
+_M.VID_FAMILY = '__dht.vid__'
 _M.KIND_META1 = 1
 _M.KIND_META2 = 2
-_M.KIND_DEFAULT = 3
+_M.KIND_VID = 3
 
 _M.SYSKEY_CATEGORY_KIND = 0
 
@@ -60,7 +61,7 @@ typedef struct luact_dht_range {
 
 -- common helper
 local function make_metakey(kind, key)
-	if kind >= _M.KIND_DEFAULT then
+	if kind >= _M.KIND_VID then
 		return string.char(kind)..key
 	else
 		return key
@@ -237,19 +238,30 @@ ffi.metatype('luact_dht_range_t', range_mt)
 
 
 -- module functions
-function _M.initialize(root, datadir, opts)
+function _M.initialize(parent_address, datadir, opts)
 	storage_module = require ('luact.storage.'..opts.storage) 
 	persistent_db = storage_module.open(datadir)
 	range_mt.sync_write_opts = storage_module.new_write_opts({ sync = true })
 	_M.NUM_REPLICA = opts.n_replica
-	if root then -- memorize root_range. all other ranges can be retrieve from it
-		root_range = root
+	if parent_address then -- memorize root_range. all other ranges can be retrieve from it
+		_M.gossiper = luact.root_actor.gossiper(opts.gossip_port, {
+			nodelist = {actor.root_of(parent_address, 1)},
+			delegate = function ()
+				return (require 'luact.cluster.dht.range').delegate
+			end
+		})
+		logger.info('wait for bootstrap dht cluster')
+		while not _M.delegate.initialized do
+			io.write('.')
+			luact.clock.sleep(1.0)
+		end
+		io.write('\n')
 	else -- create initial range hirerchy structure manualy 
 		local meta2, default, meta2_key, default_key, root_cf, meta2_cf, default_cf
 		-- create storage for initial dht setting with bootstrap mode
 		root_cf = _M.new_family(_M.KIND_META1, _M.META1_FAMILY, true)
 		meta2_cf = _M.new_family(_M.KIND_META2, _M.META2_FAMILY, true)
-		default_cf = _M.new_family(_M.KIND_DEFAULT, _M.DEFAULT_FAMILY, true)
+		default_cf = _M.new_family(_M.KIND_VID, _M.VID_FAMILY, true)
 		-- create root range
 		root_range = _M.new(key.MIN, key.MAX, _M.KIND_META1)
 		-- put initial meta2 storage into root_range
@@ -257,11 +269,16 @@ function _M.initialize(root, datadir, opts)
 		meta2_key = meta2:metakey()
 		root_cf:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), ffi.sizeof(meta2))
 		-- put initial default storage into meta2_range
-		default = _M.new(key.MIN, key.MAX, _M.KIND_DEFAULT)
+		default = _M.new(key.MIN, key.MAX, _M.KIND_VID)
 		default_key = default:metakey()
 		meta2_cf:rawput(default_key, #default_key, ffi.cast('char *', default), ffi.sizeof(default))
 	end
 	return root_range
+end
+
+_M.delegate = {}
+function _M.delegate:memberlist_event(type, ...)
+
 end
 
 function _M.new_family(kind, name, cluster_bootstrap)
@@ -313,16 +330,18 @@ function _M.bootstrap(kind, name)
 	end
 end
 
+-- shutdown specified kind of dht
+-- TODO : do following steps to execute cluster-wide shutdown
+-- 1. write something to root_range indicate this kind of dht is shutdown
+-- 2. leader of raft cluster of root_range send special gossip broadcast to notify shutdown
+-- 3. if node receive shutdown gossip message and have any replica of range which have data of this kind of dht, 
+--     remove them.
 function _M.shutdown(kind, truncate)
-	local cf = column_families[kind]
-	if cf then
-		persistent_db:close_column_family(cf, truncate)
-	end
-	range_caches[kind] = nil	
+	assert(false, "TBD")
 end
 
 function _M.new(start_key, end_key, kind)
-	kind = kind or _M.KIND_DEFAULT
+	kind = kind or _M.KIND_VID
 	local r = range_mt.alloc(_M.NUM_REPLICA)
 	r:init(start_key, end_key, kind)
 	r:add_replica()
@@ -333,13 +352,13 @@ end
 -- find range which contains key (k, kl)
 -- search original kind => KIND_META2 => KIND_META1
 function _M.find(k, kl, kind)
-	kind = kind or _M.KIND_DEFAULT
+	kind = kind or _M.KIND_VID
 	local r = range_caches[kind]:find(k, kl)
 	if not r then
 		k = make_metakey(kind, ffi.string(k, kl))
 		kl = #k
-		if kind >= _M.KIND_DEFAULT then
-			-- make unique key over all key in kind >= _M.KIND_DEFAULT
+		if kind >= _M.KIND_VID then
+			-- make unique key over all key in kind >= _M.KIND_VID
 			if not r then
 				-- find range from meta ranges
 				r = _M.find(k, kl, _M.KIND_META2)

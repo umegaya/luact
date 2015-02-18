@@ -250,7 +250,7 @@ function membership_index:start()
 	self.nodes:add_self(self:user_state())
 	assert(#self.nodes > 0, "invalid node data")
 	-- add initial node
-	for _, node in ipairs(self.opts) do
+	for _, node in ipairs(self.opts.nodelist) do
 		if type(node) == 'string' then
 			logger.notice('gossip', 'add initial node', 'hostname', node, #self.nodes)
 			self.nodes:add_by_hostname(node)
@@ -511,6 +511,8 @@ end
 
 -- create gossip service mshipen on *port*
 local default = {
+	nodelist = {},
+
 	startup_timeout = 10,
 	shutdown_timeout = 10,
 	

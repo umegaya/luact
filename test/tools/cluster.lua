@@ -70,6 +70,9 @@ function _M.start_luact(n_core, arbiter, proc)
 		n_core = n_core, exclusive = true,
 		arg = ptr, 
 		arbiter = arbiter, 
+		dht = {
+			gossip_port = false, -- disable dht. vid will run in local mode
+		}, 
 	}, function (p)
 		xpcall(function ()
 			local luact = require 'luact.init'
@@ -106,7 +109,9 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 		datadir = "/tmp/luact",
 		n_core = n_core, exclusive = true,
 		arg = ptr, 
-		arbiter = arbiter, 
+		dht = {
+			gossip_port = false, -- disable dht. vid will run in local mode
+		}, 
 	}, function (p)
 		local luact = require 'luact.init'
 		local ffi = require 'ffiex.init'
