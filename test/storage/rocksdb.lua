@@ -140,7 +140,27 @@ local ok,r = xpcall(function ()
 		"cas for non-existent key should match with nil value, so value should not set")
 	assert((cf2:get('merge_key_not_exist') == 'bar') and result_buffer2[0], 
 		"cas for non-existent key should match with nil value, so value should set")
+
+	-- iterator test
+	local cf3 = db:column_family('test_iter')
+	for i=("z"):byte(),("a"):byte(),-1 do
+		cf3:put((string.char(i)):rep(16), "fuga")
+	end
 	
+	local iter = cf3:iterator()
+	iter:last()
+	iter:first()
+	iter:seek("not found", #("not found")) -- error
+	assert(iter:keystr() == ("o"):rep(16), "if not exist, should seek to smallest of bigger key")
+	iter:seek(("p"):rep(16), 16)
+	local cnt = ("p"):byte()
+	while iter:valid() do
+		assert(iter:valstr() == "fuga")
+		assert(iter:keystr() == (string.char(cnt)):rep(16))
+		cnt = cnt + 1
+		iter:next()
+	end
+	assert(cnt == (1 + ("z"):byte()))
 end, function (e)
 	logger.error(e, debug.traceback())
 end)

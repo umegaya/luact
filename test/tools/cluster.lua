@@ -62,10 +62,10 @@ function thread_payload_index:fin()
 end
 ffi.metatype('luact_thread_payload_t', thread_payload_mt)
 
-function _M.start_luact(n_core, arbiter, proc)
+function _M.start_luact(n_core, opts, proc)
 	local ptr = memory.alloc_typed('luact_thread_payload_t')
 	ptr:encode(proc)
-	luact.start({
+	opts = util.merge_table({
 		datadir = "/tmp/luact",
 		n_core = n_core, exclusive = true,
 		arg = ptr, 
@@ -73,7 +73,8 @@ function _M.start_luact(n_core, arbiter, proc)
 		dht = {
 			gossip_port = false, -- disable dht. vid will run in local mode
 		}, 
-	}, function (p)
+	}, opts or {})
+	luact.start(opts, function (p)
 		xpcall(function ()
 			local luact = require 'luact.init'
 			local ffi = require 'ffiex.init'
@@ -222,6 +223,8 @@ function _M.new_fsm(thread_id)
 				for k,v in pairs(obj) do
 					self[k] = v
 				end
+			end,
+			change_replica_set = function (self, type, self_affected, replica_set)
 			end,
 			apply = function (self, data)
 			logger.warn('apply', data[1], data[2])

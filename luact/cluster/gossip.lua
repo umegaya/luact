@@ -23,7 +23,7 @@ local ringbuf = require 'luact.util.ringbuf'
 
 local _M = {}
 local gossip_map = {}
-local gossip_event_map = {}
+local gossip_body_map = {}
 
 -- cdefs
 ffi.cdef [[
@@ -93,7 +93,7 @@ end
 function gossip_index:broadcast(mship, buf)
 	self.queue:push(mship, buf)
 end
-function gossip_index:receive(mship, payload, plen)
+function gossip_index:receive(mship, payload, plen, from)
 	-- TODO : for WAN gossip, we need to care about endian
 	while plen > 0 do
 		if not payload then
@@ -102,7 +102,7 @@ function gossip_index:receive(mship, payload, plen)
 		local data = protocol.from_ptr(payload)
 		payload = payload + data:length()
 		plen = plen - data:length()
-		data:handle(mship)
+		data:handle(mship, from)
 	end
 end
 function gossip_index:run_reader(mship)
@@ -113,13 +113,15 @@ function gossip_index:run_reader(mship)
 		a:init()
 		len = self.udp:read(buf, mtu, a)
 		if len then
-			-- logger.info('receive', len)
-			self:receive(mship, buf, len)
+			-- logger.info('receive gossip', len)
+			self:receive(mship, buf, len, a)
 		end
 	end
 end
 function gossip_index:gossip(mship)
 	local nodes = mship.nodes:k_random(mship.opts.gossip_nodes)
+	-- logger.warn('gossip', #nodes, mship.opts.gossip_nodes, mship.nodes:debug_num_valid_nodes())
+	assert((#nodes >= mship.opts.gossip_nodes) or (mship.opts.gossip_nodes > mship.nodes:debug_num_valid_nodes()))
 	for _, n in ipairs(nodes) do
 		-- it may resume gossip_index:leave
 		local vec, len = self.queue:pop(mship, mship.opts.mtu)
@@ -297,9 +299,15 @@ end
 function membership_index:indirect_ping(redirect_to)
 	return redirect_to:ping()
 end
-function membership_index:broadcast(buf, clock)
-	self.gossip:broadcast(self, protocol.new_user(memory.strdup(buf), #buf, 
-		clock or self.msg_checker:issue_clock()))
+function membership_index:broadcast(buf, subtype, clock)
+	local packet
+	clock = clock or self.msg_checker:issue_clock()
+	if type(buf) == 'string' then
+		packet = protocol.new_user(memory.strdup(buf), #buf, clock, subtype)
+	elseif type(buf) == 'cdata' then
+		packet = protocol.new_user(buf, #buf, clock, subtype)
+	end
+	self:sys_broadcast(packet)
 end
 function membership_index:sys_broadcast(packet)
 	self.gossip:broadcast(self, packet)
@@ -330,7 +338,7 @@ function membership_index:suspicion_timeout()
 	return self.opts.suspicion_factor * math.log10(#self.nodes) * self.opts.probe_interval
 end
 function membership_index:retransmit()
-	return math.floor(self.opts.retransmit_factor * math.log10(#self.nodes))
+	return math.max(self.opts.gossip_nodes, math.floor(self.opts.retransmit_factor * math.log10(#self.nodes)))
 end
 function membership_index:stop_threads()
 	for idx, t in ipairs(self.threads) do
@@ -351,14 +359,16 @@ function membership_index:add_node(nodedata, bootstrap)
 		exception.raise('invalid', 'gossip node state', state)
 	end
 end
-function membership_index:handle_node_change(nodedata)
+function membership_index:handle_node_change(nodedata, from)
 	self:add_node(nodedata)
 end
-function membership_index:handle_user_message(message)
+function membership_index:handle_user_message(message, from)
 	local msg = ffi.string(message.buf, message.len)
 	if self.msg_checker:fresh(message.clock, msg) then
-		self:emit('user', message.buf, message.len)
-		self:broadcast(msg, message.clock)
+		self:emit('user', message.subtype, message.buf, message.len)
+		self:broadcast(msg, message.subtype, message.clock)
+	else
+		-- logger.warn('not fresh:', message.clock, self.msg_checker:now())
 	end
 end
 function membership_index:alive(nodedata, bootstrap)
@@ -552,7 +562,8 @@ local function create(port, opts)
 	local g = memory.alloc_typed('luact_gossip_t')
 	g:init(port, opts.initial_send_queue_size, opts.mtu)
 	m.gossip = g
-	gossip_event_map[port] = m.event
+	logger.warn('attach gossip object', port, m)
+	gossip_body_map[port] = m
 	m:start()
 	return m
 end
@@ -582,7 +593,11 @@ function _M.new(port, opts)
 	return g
 end
 function _M.event(port)
-	return gossip_event_map[port]
+	return gossip_body_map[port].event
+end
+function _M.nodelist(port)
+	logger.warn('nodelist', port, gossip_body_map[port])
+	return gossip_body_map[port].nodes
 end
 function _M.destroy(m)
 	m:stop_threads()
@@ -590,7 +605,7 @@ function _M.destroy(m)
 	lamport.destroy(m.msg_checker)
 	m.gossip:fin(m)
 	logger.report('gossip destroy', m.nodes.port)
-	gossip_event_map[m.nodes.port] = nil
+	gossip_body_map[m.nodes.port] = nil
 end
 
 return _M

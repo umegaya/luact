@@ -6,6 +6,7 @@ local router = require 'luact.router'
 local actor = require 'luact.actor'
 
 local range = require 'luact.cluster.dht.range'
+local cmd = require 'luact.cluster.dht.cmd'
 
 local pulpo = require 'pulpo.init'
 local event = require 'pulpo.event'
@@ -17,6 +18,8 @@ local fs = require 'pulpo.fs'
 
 local _M = {}
 local dhp_map = {}
+local range_manager
+local range_gossiper
 
 
 -- cdefs 
@@ -32,15 +35,15 @@ typedef struct luact_dht {
 local dht_mt = {}
 dht_mt.__index = dht_mt
 function dht_mt:init(name, operation_timeout)
-	self.kind = range.bootstrap(name)
+	self.kind = range_manager:bootstrap(name)
 	self.timeout = operation_timeout
 end
 function dht_mt:destroy(truncate)
-	range.shutdown(self.kind, truncate)
+	range_manager:shutdown(self.kind, truncate)
 	memory.free(self)
 end
 function dht_mt:range_of(k, kl)
-	return range.find(k, kl, self.kind)
+	return range_manager:find(k, kl, self.kind)
 end
 function dht_mt:__index(k)
 	-- default is consistent read
@@ -81,29 +84,42 @@ function dht_mt:new_txn()
 end
 
 
+
 -- module functions
 local default_opts = {
 	n_replica = range.DEFAULT_REPLICA,
 	storage = "rocksdb",
 	datadir = luact.DEFAULT_ROOT_DIR,
+	allow_same_node = true,
+	root_range_send_interval = 30,
+	replica_maintain_interval = 1.0,
+	collect_garbage_interval = 60 * 60,
+	gossip_port = 8008,
 }
 local function configure_datadir(opts)
 	if not opts.datadir then
 		exception.raise('invalid', 'config', 'options must contain "datadir"')
 	end
-	return fs.path(opts.datadir, tostring(pulpo.thread_id))
+	return fs.path(opts.datadir, tostring(pulpo.thread_id), "dht")
 end
 function _M.initialize(parent_address, opts)
 	opts = util.merge_table(default_opts, opts)
-	range.initialize(parent_address, configure_datadir(opts), opts)
+	local nodelist = parent_address and {actor.root_of(parent_address, 1)} or nil
+	-- initialize module wide shared variables
+	range_manager = range.get_manager(nodelist, configure_datadir(opts), opts)
+	logger.notice('waiting dht module initialization finished')
+	while not range_manager:initialized() do
+		io.write(pulpo.thread_id); io.stdout:flush()
+		luact.clock.sleep(1)
+	end
+	io.write('\n')
 end
 
 function _M.finalize()
-	range.finalize()
+	range_manager:finalize()
 end
 
 function _M.new(name, timeout)
-	name = name or range.DEFAULT_FAMILY
 	local r = dht_map[name]
 	if not r then
 		r = memory.alloc_typed('luact_dht_t')

@@ -5,6 +5,7 @@ local tools = require 'test.tools.cluster'
 tools.start_luact(1, nil, function ()
 	local memory = require 'pulpo.memory'
 	local pulpo = require 'pulpo.init'
+	local lamport = require 'pulpo.lamport'
 	local uuid = require 'luact.uuid'
 	local nodelist = require 'luact.cluster.gossip.nodelist'
 	local protocol = require 'luact.cluster.gossip.protocol'

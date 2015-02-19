@@ -679,7 +679,7 @@ _M.opts = false
 
 -- get (or create) connection to the node which id is exists.
 function _M.get(id)
-	if uuid.owner_of(id) then
+	if uuid.owner_machine_of(id) then
 		return _M.get_by_thread_id(uuid.thread_id(id))
 	else
 		return _M.get_by_machine_id(uuid.addr(id))

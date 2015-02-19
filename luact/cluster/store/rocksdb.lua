@@ -11,7 +11,7 @@ local pbuf = require 'luact.pbuf'
 local db = require 'luact.storage.rocksdb'
 
 local _M = {}
-_M.max_dbname_len = 256
+_M.MAX_DBNAME_LEN = 256
 
 -- cdefs
 ffi.cdef [[
@@ -34,8 +34,8 @@ local store_rocksdb_mt = {
 }
 function store_rocksdb_index:init(dir, name, opts)
 	self.name = memory.strdup(name)
-	if util.strlen(self.name, _M.max_dbname_len + 1) >= (_M.max_dbname_len + 1) then
-		exception.raise('invalid', 'dbname', _M.max_dbname_len)
+	if util.strlen(self.name, _M.MAX_DBNAME_LEN + 1) >= (_M.MAX_DBNAME_LEN + 1) then
+		exception.raise('invalid', 'dbname', _M.MAX_DBNAME_LEN)
 	end
 	self.rb:init()
 	self:open(dir, name, opts)
@@ -58,10 +58,10 @@ function store_rocksdb_index:logkey(idx)
 	return logkeygen.p, logkeysize
 end
 function store_rocksdb_index:state_key()
-	return util.rawsprintf("%s/state", _M.max_dbname_len, self.name)
+	return util.rawsprintf("%s/state", _M.MAX_DBNAME_LEN + 6, self.name)
 end
 function store_rocksdb_index:metadata_key()
-	return util.rawsprintf("%s/meta", _M.max_dbname_len, self.name)
+	return util.rawsprintf("%s/meta", _M.MAX_DBNAME_LEN + 5, self.name)
 end
 function store_rocksdb_index:key_by_kind(kind)
 	if kind == 'state' then
@@ -105,7 +105,11 @@ end
 function store_rocksdb_index:put_object(kind, serde, object)
 	local k, kl = self:key_by_kind(kind)
 	local rb = self:init_rbuf()
-	serde:pack(rb, object)
+	local ok, r = pcall(serde.pack, serde, rb, object)
+	if not ok then
+		logger.report('storage', 'error', 'put_object', r)
+		error(r)
+	end
 	self.db:rawput(k, kl, rb:start_p(), rb:available())
 end
 function store_rocksdb_index:get_object(kind, serde)
@@ -114,7 +118,7 @@ function store_rocksdb_index:get_object(kind, serde)
 	if p ~= util.NULL then
 		local rb = self:to_rbuf(p, pl)
 		local obj, err = serde:unpack(rb)
-		if err then
+		if not obj then
 			exception.raise('invalid', 'object data', err)
 		end
 		return obj

@@ -48,7 +48,7 @@ local ok,r = xpcall(function ()
 	clock.sleep(0.5)
 
 end, function (e)
-	logger.error('err', e)
+	logger.error(e)
 end)
 
 -- fs.rmdir('/tmp/luact/rio/')

@@ -49,6 +49,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 		exception.raise('invalid', 'log term back', self.last_term, log.term)
 	end
 	for i=1,#logs,1 do
+		logger.info('logs', i, logs[i])
 		last_index = last_index + 1
 		local log = self:new_log(kind, term, last_index, logs[i])
 		-- last log have coroutine object to resume after these logs are accepted.

@@ -116,9 +116,12 @@ function node_index:address()
 end
 function node_index:gossiper()
 	if not uuid.valid(self.actor) then
-		self.actor = _M.gossiper_from(self.machine_id, self.thread_id, port)
+		self.actor = _M.gossiper_from(self.machine_id, self.thread_id, self.addr:port() - self.thread_id)
 	end
 	return self.actor
+end
+function node_index:arbiter(group, ...)
+	return _M.arbiter_from(self.machine_id, self.thread_id, group, ...)
 end
 function node_index:has_same_nodedata(nodedata)
 	return self.machine_id == nodedata.machine_id and self.thread_id == nodedata.thread_id	
@@ -128,7 +131,9 @@ function node_index:length(with_user_state)
 end
 function node_index:update_user_state(user_state, user_state_len)
 	self.user_state_len = user_state_len
-	ffi.copy(self.user_state, user_state, user_state_len)
+	if user_state_len > 0 then
+		ffi.copy(self.user_state, user_state, user_state_len)
+	end
 	self.clock = self.clock + 1 -- update clock so that broadcast accept to other nodes
 end
 ffi.metatype('luact_gossip_node_t', node_mt)
@@ -141,6 +146,16 @@ local nodelist_mt = {
 function nodelist_index:k_random(k)
 	local r = util.random_k_from(self, k, node_index.filter)
 	return k == 1 and r[1] or r
+end
+function nodelist_index:debug_num_valid_nodes()
+	local cnt = 0
+	for i=1,#self do
+		local n = self[i]
+		if n:filter() then
+			cnt = cnt + 1
+		end
+	end
+	return cnt
 end
 function nodelist_index:add(n)
 	local key = n:key()
@@ -230,6 +245,9 @@ function _M.destroy(l)
 end
 function _M.gossiper_from(machine_id, thread_id, port)
 	return actor.root_of(machine_id, thread_id).gossiper(port)
+end
+function _M.arbiter_from(machine_id, thread_id, group, ...)
+	return actor.root_of(machine_id, thread_id).arbiter(group, ...)
 end
 
 return _M

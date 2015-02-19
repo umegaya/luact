@@ -11,7 +11,7 @@ local function get_clock(sec)
 		return clock
 	elseif sec < 60 then
 		return medium_clock
-	elseif sec < 3600 then
+	elseif sec <= 3600 then
 		return long_clock
 	else
 		exception.raise('invalid', 'duration', sec)

@@ -68,7 +68,7 @@ local epoc
 -- local functions
 local function msec_timestamp()
 	local s,us = pulpo.util.clock_pair()
-	return ((s + us / 1000) * 1000) - epoc
+	return ((s * 1000) + (us / 1000)) - epoc
 end
 
 -- module function 
@@ -177,9 +177,12 @@ function _M.from(ptr)
 	return ffi.cast('luact_uuid_t*', ptr)
 end
 function _M.owner_of(uuid)
-	if _M.addr(uuid) == 0 then
-		logger.report('invalid addr', debug.traceback())
-	end	
+	return _M.owner_machine_of(uuid) and _M.thread_id(uuid) == pulpo.thread_id
+end
+function _M.owner_machine_of(uuid)
+--	if _M.addr(uuid) == 0 then
+--		logger.report('invalid addr', debug.traceback())
+--	end	
 	return _M.addr(uuid) == _M.node_address
 end
 local uuid_work = ffi.new('luact_uuid_t')

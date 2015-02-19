@@ -115,7 +115,7 @@ tools.start_luact(4, nil, function ()
 	else
 		local received 
 		while true do
-			local tp, obj, buf, len = event.wait(false, clock.alarm(2.0), ev)
+			local tp, obj, subtype, buf, len = event.wait(false, clock.alarm(2.0), ev)
 			if tp == 'user' then
 				assert(not received, "message only received one time")
 				logger.info('user msg:', buf, len, ffi.string(buf, len))

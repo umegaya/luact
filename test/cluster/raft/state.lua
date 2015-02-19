@@ -32,6 +32,8 @@ local ok,r = xpcall(function ()
 						self[k] = v
 					end
 				end,
+				change_replica_set = function (self, type, self_affected, leader, replica_set)
+				end,
 				apply = function (self, data)
 					self[data[1]] = data[2]
 				end,
@@ -132,7 +134,7 @@ local ok,r = xpcall(function ()
 	local store = rdbstore.new(TESTDB_DIR, 'state_test')
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
-	local st = state.new(fsm, w, ss, opts)
+	local st = state.new('state_test1', fsm, w, ss, opts)
 	local p = st.proposals
 	local body = new_actor_body(p, st)
 	local actor = luact(body)
@@ -241,7 +243,7 @@ local ok,r = xpcall(function ()
 	local store = rdbstore.new(TESTDB_DIR, 'state_test')
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
-	local st = state.new(fsm, w, ss, opts)
+	local st = state.new('state_test2', fsm, w, ss, opts)
 	local body = new_actor_body(p, st)
 	local actor = luact(body)
 	local serpent = require 'serpent'
@@ -271,7 +273,7 @@ local ok,r = xpcall(function ()
 	end)()
 
 end, function (e)
-	logger.error('err', e)
+	logger.error(e)
 	os.exit(-2)
 end)
 

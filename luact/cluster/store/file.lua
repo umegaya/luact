@@ -127,8 +127,8 @@ function store_file_index:get_object(kind, serde)
 	self.rb:reset()
 	fs.load2rbuf(path, self.rb)
 	local obj, err = serde:unpack(rb)
-	if err then
-		exception.raise('fatal', 'invalid format for serde', path)
+	if obj then
+		exception.raise('fatal', 'invalid format for serde', err)
 	end
 	return obj
 end

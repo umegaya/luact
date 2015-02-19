@@ -193,6 +193,8 @@ function _M.initialize(opts)
 					return false, exception.new('actor_not_found', 'peer', id)
 				end
 			end,
+			["require"] = _M.require,
+			["load"] = _M.load,
 		}
 		return _M.root
 	end, opts)

@@ -120,6 +120,9 @@ serde_mt.packer["error"] = function (buf, obj)
 	buf:use(6)
 	serde_mt.pack_any(buf, obj.name)
 	serde_mt.pack_any(buf, obj.bt)
+	if type(obj.args) ~= 'table' then
+		exception.raise('fatal', 'invalid error args', obj.args)
+	end
 	serde_mt.pack_any(buf, obj.args)
 	-- only in here, length can be known
 	serde_mt.pack_length32(buf:start_p() + ofs, buf.used - ofs - 5)
@@ -293,6 +296,9 @@ function serde_mt.pack_struct_cdata(buf, obj, refl, length)
 		return
 	else
 		p, ofs = serde_mt.pack_ext_cdata_header(buf, length, ctype_id)
+	end
+	if ctype_id == common.LUACT_DHT_CMD_GET then
+		logger.report('dhtcmdget', obj, length)
 	end
 	ffi.copy(p + ofs, obj, length)
 	ofs = ofs + length

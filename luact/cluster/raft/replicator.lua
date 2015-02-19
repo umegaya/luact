@@ -91,11 +91,11 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 				local obj = ({...})[2]
 				if (not obj) or (obj == self) then
 					if t.rep_thread then
-						logger.warn('stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
+						logger.warn(state:group_id(), 'stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
 						tentacle.cancel(t.rep_thread)
 					end
 					if t.hb_thread then
-						logger.warn('stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
+						logger.warn(state:group_id(), 'stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
 						tentacle.cancel(t.hb_thread)
 					end
 					return true
@@ -116,7 +116,7 @@ function replicator_index:update_last_appended(leader_actor, state, entries)
 		-- Mark any proposals as committed
 		-- logger.info('entries:', #entries, first and first.index, last and last.index)
 		local first, last = entries[1], entries[#entries]
-		logger.debug('range commit:', first.index, last.index)
+		logger.debug(state:group_id(), 'range commit:', first.index, last.index)
 		state.proposals:range_commit(leader_actor, first.index, last.index)
 
 		-- Update the indexes
@@ -134,7 +134,7 @@ function replicator_index:failure_cooldown(n_failure)
 	clock.sleep(0.5 * n_failure)
 end
 function replicator_index:replicate(leader_actor, actor, state)
-	logger.report('replicate start', leader_actor, actor)
+	logger.report('replicate start', state:group_id(), leader_actor, actor)
 	-- arguments
 	local current_term, leader, 
 		prev_log_idx, prev_log_term, 
@@ -144,7 +144,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local term, success, last_index
 ::START::
 	if self.added == 0 then
-		logger.debug('replicaiton to ', actor, 'has not committed yet')
+		logger.debug(state:group_id(), 'replicaiton to ', actor, 'has not committed yet')
 		return
 	end
 	if self.failures > 0 then
@@ -159,7 +159,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 		logger.notice('sync')
 		goto SYNC
 	end
-	logger.notice('replicate', prev_log_idx, 'to', actor)
+	logger.notice(state:group_id(), 'replicate', prev_log_idx, 'to', actor)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
@@ -197,7 +197,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 		self.next_idx = math.max(math.min(tonumber(self.next_idx)-1, tonumber(last_index)+1), 1)
 		self.match_idx = self.next_idx - 1
 		self.failures = self.failures + 1
-		logger.warn(util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
+		logger.warn(state:group_id(), util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
 	end
 
 ::CHECK_MORE::
@@ -217,7 +217,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	if stop then
 		return true
 	elseif err then
-		logger.error(("[ERR] raft: Failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
+		logger.error(state:group_id(), ("[ERR] raft: Failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
 		return
 	end
 	-- Check if there is more to replicate
@@ -260,7 +260,7 @@ function replicator_index:sync(leader_actor, actor, state)
 		self:on_leader_auth_result(true)
 	else
 		self.failures = self.failures + 1
-		logger.warn(("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
+		logger.warn(state:group_id(), ("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
 	end
 	return false -- keep on checking replication log is exist.
 end
@@ -272,7 +272,7 @@ function replicator_index:run_heartbeat(actor, state)
 		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
 		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader())
 		if (not ok) or (not success) then
-			logger.warn(("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
+			logger.warn(state:group_id(), ("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else

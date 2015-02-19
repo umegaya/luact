@@ -49,10 +49,11 @@ local function callapi(fn, ...)
 	-- I really wanna append errptr, but it causes only first element of ... is passed to fn.
 	-- so errptr is given at the caller of callapi :< its really bad.
 	-- TODO : if this is critical for execution speed, give errptr at the caller side of callapi.
+	local alen = select('#', ...)
 	local tmp = {...}
-	table.insert(tmp, errptr)
+	tmp[alen + 1] = errptr
 	errptr[0] = util.NULL
-	local r = fn(unpack(tmp)) 
+	local r = fn(unpack(tmp, 1, alen + 1)) 
 	if errptr[0] ~= util.NULL then
 		exception.raise('rocksdb', 'api_error', ffi.string(errptr[0]))
 	end
@@ -119,8 +120,7 @@ local function merge_operator_full(state,
 		for j=0,tonumber(operands_length[i])-1 do
 			if tonumber(operands[i][j]) == (' '):byte() then
 				parsed = true
-				local merger_key = ffi.string(operands[i], j)
-	--logger.warn('merge full', '['..merger_key..']', ('%q'):format(ffi.string(operands[i], operands_length[i])))
+				local merger_key = j > 0 and ffi.string(operands[i], j) or ""
 				local ok, r = pcall(assert(merger_map[merger_key]), 
 					key, key_length, existing, existing_length, 
 					operands[i], operands_length[i], j + 1, 
@@ -285,8 +285,10 @@ end
 function rocksdb_iter_index:fin()
 	LIB.rocksdb_iter_destroy(self)
 end
+rocksdb_iter_mt.__gc = rocksdb_iter_index.fin
 function rocksdb_iter_index:valid()
-	return LIB.rocksdb_iter_valid(self) ~= 0
+	local ret = LIB.rocksdb_iter_valid(self)
+	return ret ~= 0
 end
 function rocksdb_iter_index:first()
 	LIB.rocksdb_iter_seek_to_first(self)
@@ -300,9 +302,10 @@ end
 function rocksdb_iter_index:prev()
 	LIB.rocksdb_iter_prev(self)
 end
-function rocksdb_iter_index:search(k)
-	LIB.rocksdb_iter_seek(k, #k)
+function rocksdb_iter_index:search(k, kl)
+	LIB.rocksdb_iter_seek(self, k, kl or #k)
 end
+rocksdb_iter_index.seek = rocksdb_iter_index.search
 function rocksdb_iter_index:key()
 	return LIB.rocksdb_iter_key(self, vsz_work), vsz_work[0]
 end
@@ -378,6 +381,7 @@ local function rocksdb_iter_next(it)
 		return k,kl,v,vl
 	end
 end
+_M.next = rocksdb_iter_next
 local function rocksdb_iter_next_str(it)
 	if it:valid() then
 		local k = it:keystr()
@@ -386,6 +390,7 @@ local function rocksdb_iter_next_str(it)
 		return k,v
 	end
 end
+_M.next_str = rocksdb_iter_next_str
 function rocksdb_index:iterator(opts)
 	return LIB.rocksdb_create_iterator(self, opts or read_opts)
 end
@@ -626,7 +631,7 @@ _M.register_merger('cas', function (key, key_length,
 					new_value_length)
 	local context = ffi.cast('luact_rocksdb_merge_cas_t*', payload)
 	local cmp = context:compare()
-	-- logger.warn('cas merger', payload, ffi.string(existing, existing_length), context.cl, cmp)
+	--logger.warn('cas merger', payload, ffi.string(existing, existing_length), cmp and ffi.string(cmp, context.cl) or "nil")
 	if existing_length <= 0 then
 		if cmp == nil then
 			new_value_length[0] = context.sl
@@ -635,11 +640,13 @@ _M.register_merger('cas', function (key, key_length,
 		end
 	elseif cmp and memory.cmp(existing, cmp, existing_length) then
 		new_value_length[0] = context.sl
+		--logger.info('casres intenal', context.result)
 		context.result[0] = true
 		return context:swap()
 	end
 	new_value_length[0] = existing_length
 	context.result[0] = false
+	--logger.info('casres intenal fail', context.result)
 	return ffi.cast('char *', existing)
 end)
 function _M.op_cas(compare, swap, result_buffer, cl, sl)

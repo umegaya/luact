@@ -50,6 +50,8 @@ local ok,r = xpcall(function ()
 						self[k] = v
 					end
 				end,
+				change_replica_set = function (self, type, self_affected, leader, replica_et)
+				end,
 				apply = function (self, data)
 					self[data[1]] = data[2]
 				end,
@@ -88,7 +90,7 @@ local ok,r = xpcall(function ()
 	local store = rdbstore.new(TESTDB_DIR, 'state_test')
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
-	local st = state.new(fsm, w, ss, opts)
+	local st = state.new('replicator_test', fsm, w, ss, opts)
 	local p = st.proposals
 	function st:quorum()
 		return 3
@@ -141,7 +143,7 @@ local ok,r = xpcall(function ()
 	local w = wal.new({hoge = 'fuga'}, store, sr, opts)
 	local ss = snapshot.new(SNAPSHOT_DIR, sr)
 	local ss2 = snapshot.new(SNAPSHOT_DIR2, sr)
-	local st = state.new(fsm, w, ss, opts)
+	local st = state.new('replicator_test', fsm, w, ss, opts)
 	local p = st.proposals
 	local QUORUM = 3
 	function st:quorum()
@@ -210,7 +212,7 @@ local ok,r = xpcall(function ()
 	end)()
 
 end, function (e)
-	logger.error('err', e)
+	logger.error(e)
 	os.exit(-2)
 end)
 

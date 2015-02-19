@@ -76,11 +76,11 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 			assert(uuid.equals(initial_leader, l), "group1: leader should not change:"..tostring(initial_leader).."|"..tostring(l))			
 		end
 		-- confirm any operation end in failure
-		ok, r = arbiter:propose({{'hoge', 'fuga'}}, 1)
+		ok, r = pcall(arbiter.propose, arbiter, {{'hoge', 'fuga'}}, 1)
 		assert((not ok) and r:is('actor_timeout'), "propose should fail because of not enough quorum")
-		ok, r = arbiter:add_replica_set({arbiter}, 1)
+		ok, r = pcall(arbiter.add_replica_set, arbiter, {arbiter}, 1)
 		assert(not ok and r:is('actor_timeout'), "add_replica_set should fail because of not enough quorum")
-		ok, r = arbiter:remove_replica_set({arbiter}, 1)
+		ok, r = pcall(arbiter.remove_replica_set, arbiter, {arbiter}, 1)
 		assert(not ok and r:is('actor_timeout'), "remove_replica_set should fail because of not enough quorum")
 	else
 		local cnt = 0

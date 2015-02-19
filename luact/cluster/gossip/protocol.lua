@@ -32,13 +32,8 @@ typedef struct luact_gossip_proto_sys {
 	char user_state[0]; //when recv
 } luact_gossip_proto_sys_t;
 
-typedef struct luact_gossip_proto_nodelist {
-	uint32_t size, used;
-	char buffer[0];
-} luact_gossip_proto_nodelist_t;
-
 typedef struct luact_gossip_proto_user {
-	uint8_t type, padd;
+	uint8_t type, subtype;
 	uint16_t len;
 	pulpo_lamport_clock_t clock;
 	union {
@@ -46,6 +41,11 @@ typedef struct luact_gossip_proto_user {
 		char buf[1]; //when recv
 	};
 } luact_gossip_proto_user_t;
+
+typedef struct luact_gossip_proto_nodelist {
+	uint32_t size, used;
+	char buffer[0];
+} luact_gossip_proto_nodelist_t;
 ]]
 local LUACT_GOSSIP_PROTO_CHANGE = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_CHANGE")
 local LUACT_GOSSIP_PROTO_USER = ffi.cast('luact_gossip_proto_type_t', "LUACT_GOSSIP_PROTO_USER")
@@ -95,8 +95,8 @@ function proto_sys_index:try_invalidate(packet)
 	end
 	return packet.machine_id == self.machine_id and packet.thread_id == self.thread_id
 end
-function proto_sys_index:handle(mship)
-	mship:handle_node_change(self)
+function proto_sys_index:handle(mship, from)
+	mship:handle_node_change(self, from)
 end
 function proto_sys_index:is_this_node()
 	return self.machine_id == uuid.node_address and self.thread_id == pulpo.thread_id
@@ -130,8 +130,8 @@ end
 function proto_user_index:try_invalidate(packet)
 	return false
 end
-function proto_user_index:handle(mship)
-	mship:handle_user_message(self)
+function proto_user_index:handle(mship, from)
+	mship:handle_user_message(self, from)
 end
 function proto_user_index:finished(mship)
 end
@@ -162,7 +162,7 @@ function proto_nodelist_index:reserve(size)
 		tmp = ffi.cast('luact_gossip_proto_nodelist_t*', memory.realloc(self, proto_nodelist_mt.size(newsize)))
 		if tmp ~= ffi.NULL then
 			tmp.size = newsize
-			logger.warn('reserve:', self, "~~>", tmp)
+			logger.debug('reserve:', self, "=>", tmp)
 			return tmp
 		end
 	end
@@ -261,11 +261,12 @@ function _M.new_change(node, with_user_state)
 	p:set_node(node, with_user_state)
 	return p	
 end
-function _M.new_user(buf, len, clock)
+function _M.new_user(buf, len, clock, subtype)
 	local p = alloc_user_packet()
 	p.type = LUACT_GOSSIP_PROTO_USER
+	p.subtype = subtype or 0
 	p.len = len
-	p.buf_p = buf
+	p.buf_p = ffi.cast('char *', buf)
 	p.clock = clock
 	return p
 end

@@ -153,6 +153,18 @@ function key_mt:__tostring()
 	end
 	return s
 end
+function key_mt:as_digest()
+	local len = tonumber(self.length)
+	local dlen = math.min(16, len)
+	local s = "#"..tostring(len)
+	for i=0,dlen-1 do
+		s=s..(":%02x"):format(self.p[i])
+	end
+	if self.length > dlen then
+		s=s..("...")
+	end
+	return s
+end
 ffi.metatype('luact_dht_key_t', key_mt)
 
 return _M

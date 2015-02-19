@@ -47,4 +47,12 @@ for i=("a"):byte(),("z"):byte() do
 	assert(r and (r.start_key.p[0] == i))
 end
 
+for i=("a"):byte(),("z"):byte() do
+	local k = (string.char(i)):rep(512)
+	local r = c:find(k)
+	c:remove(r)
+	-- print(r, r.start_key.p[0], i, ffi.string(r.start_key.p, r.start_key.length))
+	assert(not c:find(k))
+end
+
 return true

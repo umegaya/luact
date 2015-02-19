@@ -5,6 +5,7 @@ local pbuf = require 'luact.pbuf'
 local clock = require 'luact.clock'
 local proposal = require 'luact.cluster.raft.proposal'
 local replicator = require 'luact.cluster.raft.replicator'
+local serde_common = require 'luact.serde.common'
 
 local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
@@ -24,6 +25,7 @@ typedef enum luact_raft_node_kind {
 typedef enum luact_raft_system_log_kind {
 	SYSLOG_ADD_REPLICA_SET,
 	SYSLOG_REMOVE_REPLICA_SET,
+	SYSLOG_DICTATORIAL_PROPOSE,
 } luact_raft_system_log_kind_t;
 
 typedef struct luact_raft_hardstate {
@@ -48,7 +50,7 @@ local NODE_CANDIDATE = ffi.cast('luact_raft_node_kind_t', "NODE_CANDIDATE")
 local NODE_LEADER = ffi.cast('luact_raft_node_kind_t', "NODE_LEADER")
 local SYSLOG_ADD_REPLICA_SET = ffi.cast('luact_raft_system_log_kind_t', "SYSLOG_ADD_REPLICA_SET")
 local SYSLOG_REMOVE_REPLICA_SET = ffi.cast('luact_raft_system_log_kind_t', "SYSLOG_REMOVE_REPLICA_SET")
-
+local SYSLOG_DICTATORIAL_PROPOSE = ffi.cast('luact_raft_system_log_kind_t', "SYSLOG_DICTATORIAL_PROPOSE")
 
 -- luact_raft_hardstate_t
 local raft_hardstate_index = {}
@@ -84,6 +86,7 @@ function raft_hardstate_index:force_vote_for(v)
 	self.vote = v
 	return true
 end
+serde_common.register_ctype('struct', 'luact_raft_hardstate', nil, serde_common.LUACT_RAFT_HARDSTATE)
 ffi.metatype('luact_raft_hardstate_t', raft_hardstate_mt)
 
 
@@ -104,6 +107,9 @@ function raft_state_container_index:apply_debug_opts(opts)
 	if opts.debug_leader_id then
 		self.state.leader_id = opts.debug_leader_id
 	end
+end
+function raft_state_container_index:group_id()
+	return ('%q'):format(self.id):sub(1, 16)
 end
 function raft_state_container_index:fin()
 	-- TODO : recycle
@@ -135,7 +141,7 @@ function raft_state_container_index:write_any_logs(kind, msgid, logs)
 		-- add and commit 
 		self.proposals:dictatorial_add(actor.of(self.actor_body), start_idx, end_idx)
 	else
-		exception.raise('invalid', 'quorum too short', q)		
+		exception.raise('invalid', self:group_id(), 'quorum too short', q)		
 	end
 end
 function raft_state_container_index:kick_replicator()
@@ -146,6 +152,9 @@ function raft_state_container_index:write_logs(msgid, logs)
 end
 function raft_state_container_index:write_log(msgid, log)
 	self:write_any_logs(nil, msgid, {log})
+end
+function raft_state_container_index:dictatorial_write_logs(msgid, logs)
+	self:write_any_logs(SYSLOG_DICTATORIAL_PROPOSE, msgid, logs)
 end
 function raft_state_container_index:write_syslog(kind, msgid, log)
 	self:write_any_logs(kind, msgid, {log})
@@ -181,10 +190,26 @@ function raft_state_container_index:vote_for(v, term)
 end
 function raft_state_container_index:set_leader(leader_id)
 	-- logger.info('set leader', leader_id)
+	local changed, change_self
 	if leader_id then
+		if not uuid.equals(self.state.leader_id, leader_id) then
+			changed = true
+			if uuid.equals(actor.of(self.actor_body), leader_id) then
+				change_self = true
+			end
+		end		
 		self.state.leader_id = leader_id
 	else
+		if uuid.valid(self.state.leader_id) then
+			changed = true
+			if uuid.equals(actor.of(self.actor_body), self.state.leader_id) then
+				change_self = true
+			end
+		end
 		uuid.invalidate(self.state.leader_id)
+	end
+	if changed then
+		self.fsm:change_replica_set('change_leader', change_self, self.state.leader_id, self.replica_set)
 	end
 end
 -- only for debug
@@ -193,7 +218,7 @@ function raft_state_container_index:debug_set_node_kind(k)
 end
 function raft_state_container_index:become_leader()
 	if not self:is_candidate() then
-		exception.raise('raft', 'invalid state change', 'leader', self.state.node_kind)
+		exception.raise('raft', self:group_id(), 'invalid state change', 'leader', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_LEADER
 	self:set_leader(actor.of(self.actor_body))
@@ -201,7 +226,7 @@ function raft_state_container_index:become_leader()
 end
 function raft_state_container_index:become_candidate()
 	if self.state.node_kind ~= NODE_FOLLOWER then
-		exception.raise('raft', 'invalid state change', 'candidate', self.state.node_kind)
+		exception.raise('raft', self:group_id(), 'invalid state change', 'candidate', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_CANDIDATE
 	self:set_leader(nil)
@@ -232,9 +257,9 @@ function raft_state_container_index:stop_replication()
 	for machine, reps in pairs(self.replicators) do
 		for k,v in pairs(reps) do
 			if not self:is_leader() then
-				logger.error('bug: no-leader node have valid replicator', machine, k)
+				logger.error('bug: no-leader node have valid replicator', self:group_id(), machine, k)
 			end
-			logger.debug('stop replicator', machine, k)
+			logger.debug('stop replicator', self:group_id(), machine, k)
 			v:fin()
 			reps[k] = nil
 		end
@@ -259,9 +284,9 @@ function raft_state_container_index:start_replication(activate, replica_set)
 				-- heartbeat is necessary because in our use case, 
 				-- typically need to prevent newly added node from causing election timeout.
 				if activate then
-					logger.debug('start replicator', id)
+					logger.debug('start replicator', self:group_id(), id)
 				else
-					logger.debug('add replicator', id)
+					logger.debug('add replicator', self:group_id(), id)
 				end
 			end
 		end
@@ -281,7 +306,7 @@ end
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 	local self_actor = actor.of(self.actor_body)
 	if applied then
-		local add_self
+		local add_self, changed
 		for i = 1,#replica_set do
 			local found
 			for j = 1,#self.replica_set do
@@ -295,6 +320,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 			end
 			if not found then
 				table.insert(self.replica_set, replica_set[i])
+				changed = true
 			end
 		end
 		if self:is_leader() then
@@ -308,7 +334,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 					if m and m[thread] then
 						-- from here, this replicator actually involve replication
 						m[thread]:commit_add()
-						logger.debug('start replicator', id)
+						logger.debug('start replicator', self:group_id(), id)
 					end
 				end
 			end
@@ -317,6 +343,9 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 		-- allow this node to be leader even if single node.
 		if add_self and (not self.opts.initial_node) then
 			self.opts.initial_node = true
+		end
+		if changed then
+			self.fsm:change_replica_set('add', add_self, self.state.leader_id, self.replica_set)
 		end
 	elseif self:is_leader() then 
 		if type(replica_set) ~= 'table' then
@@ -331,7 +360,7 @@ end
 function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
 	local self_actor = actor.of(self.actor_body)
 	if applied then
-		local remove_self
+		local remove_self, changed
 		for i = 1,#replica_set do
 			local found
 			for j = 1,#self.replica_set do
@@ -345,17 +374,21 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 			end
 			if found then
 				table.remove(self.replica_set, found)
+				changed = true
 			end
 		end
 		if self:is_leader() then
 			-- replicator removal is occured at following order
 			-- 1. replicator knows replicate target is gone (by error:is('actor_no_body'))
-			-- 2. send message to parent actor
+			-- 2. send message to parent actor (leader_actor:stop_replication())
 			-- 3. actor call state:stop_replicator
 			-- 4. stop_replicator emit stop event to target replicator
 			-- 5. target repliactor cancel all coroutines
 		elseif remove_self then
 			self.actor_body:destroy()
+		end
+		if changed then
+			self.fsm:change_replica_set('remove', remove_self, self.state.leader_id, self.replica_set)
 		end
 	elseif self:is_leader() then
 		if type(replica_set) ~= 'table' then
@@ -363,7 +396,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 		end
 		for i = 1,#replica_set do
 			if uuid.equals(replica_set[i], self_actor) then
-				logger.warn('get a grip!! you are leader and try to remove yourself!!')
+				logger.warn('get a grip!! you are leader and try to remove yourself!!', self:group_id())
 				table.remove(replica_set, i)
 				break
 			end
@@ -386,7 +419,7 @@ function raft_state_container_index:request_routing_id(timeout)
 		timeout = timeout - (clock.get() - start)
 		goto RETRY
 	end
-	exception.raise('runtime', 'raft state', "no leader but don't know who is leader")
+	exception.raise('runtime', self:group_id(), 'raft state', "no leader but don't know who is leader")
 end
 function raft_state_container_index:leader()
 	return self.state.leader_id
@@ -415,7 +448,7 @@ end
 function raft_state_container_index:snapshot_if_needed()
 	if (self.state.last_applied_idx - self.snapshot:last_index()) >= self.opts.logsize_snapshot_threshold then
 		-- print('if_needed', self.state.last_applied_idx, self.snapshot:last_index(), self.opts.logsize_snapshot_threshold)
-		logger.debug('snapshot', self.state.last_applied_idx)
+		logger.debug('snapshot', self:group_id(), self.state.last_applied_idx)
 		self:write_snapshot()
 	end
 end
@@ -429,37 +462,43 @@ end
 -- after replication to majority success, apply called
 function raft_state_container_index:committed(log_idx)
 	if (self:last_commit_index() > 0) and (log_idx - self:last_commit_index()) ~= 1 then
-		logger.warn('raft', 'commit log idx leap (may be previous leader stale)', self:last_commit_index(), log_idx)
+		logger.warn('raft', self:group_id(), 'commit log idx leap (may be previous leader stale)', self:last_commit_index(), log_idx)
 	end
 	self:set_last_commit_index(log_idx)
 end
 function raft_state_container_index:applied(log_idx)
 	if (self.state.last_applied_idx > 0) and (log_idx - self.state.last_applied_idx) ~= 1 then
-		exception.raise('fatal', 'invalid committed log idx', log_idx, self.state.last_applied_idx)
+		exception.raise('fatal', self:group_id(), 'invalid committed log idx', log_idx, self.state.last_applied_idx)
 	end	
 	self.state.last_applied_idx = log_idx
 	self:snapshot_if_needed()
 end
-function raft_state_container_index:apply(log)
-	local ok, r
-	if not log.kind then
-		-- apply to fsm
-		ok, r = pcall(self.fsm.apply, self.fsm, log.log)
-	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
-		ok, r = pcall(self.add_replica_set, self, nil, log.log, true)
-	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
-		ok, r = pcall(self.remove_replica_set, self, nil, log.log, true)
-	else
-		logger.warn('invalid raft system log committed', log.kind)
-	end
+function raft_state_container_index:apply_result(log, ok, ...)
 	if ok then
 		self:applied(log.index)
 	end
-	return ok, r
+	return ok, ...
+end
+function raft_state_container_index:do_apply(log, ...)
+	return self:apply_result(log, pcall(...))
+end
+function raft_state_container_index:apply(log)
+	if not log.kind then
+		-- apply to fsm
+		return self:do_apply(log, self.fsm.apply, self.fsm, log.log)
+	elseif log.kind == SYSLOG_DICTATORIAL_PROPOSE then
+		return self:do_apply(log, self.fsm.apply, self.fsm, log.log)		
+	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
+		return self:do_apply(log, self.add_replica_set, self, nil, log.log, true)
+	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
+		return self:do_apply(log, self.remove_replica_set, self, nil, log.log, true)
+	else
+		logger.warn('invalid raft system log committed', self:group_id(), log.kind)
+	end
 end
 function raft_state_container_index:restore()
 	if not self.wal:can_restore() then
-		logger.warn('persistent data is not for current fsm')
+		logger.warn('persistent data is not for current fsm', self:group_id())
 		self.wal:create_metadata_entry()
 		return 
 	end
@@ -525,7 +564,7 @@ function raft_state_container_index:append_param_for(replicator)
 		-- TODO : this actually happens because quorum of this index is already satisfied, 
 		-- log may be compacted already. compaction margin make some help, but not perfect.
 		if not log then
-			return false, exception.new('raft', 'invalid', 'next_index', replicator.next_idx)
+			return false, exception.new('raft', self:group_id(), 'invalid', 'next_index', replicator.next_idx)
 		end
 		prev_log_idx = log.index
 		prev_log_term = log.term
@@ -543,8 +582,9 @@ end
 
 
 -- module function
-function _M.new(fsm, wal, snapshot, opts)
+function _M.new(id, fsm, wal, snapshot, opts)
 	local r = setmetatable({
+		id = id,
 		state = memory.alloc_fill_typed('luact_raft_state_t'), 
 		proposals = proposal.new(wal, opts.initial_proposal_size), 
 		ev_log = event.new(), 

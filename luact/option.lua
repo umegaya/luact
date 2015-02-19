@@ -26,7 +26,6 @@ return {
 		timeout_resolution = 1, -- 1 sec
 	},
 	dht = {
-		gossip_port = 8008,
 	}, 
 	vid = {
 
