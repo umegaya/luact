@@ -4,7 +4,7 @@ local key = require 'luact.cluster.dht.key'
 local ok, r
 local k = ffi.new('luact_dht_key_t')
 k:init()
-assert(k.length == 0, "no argument initialization makes key which length == 0")
+assert(k:length() == 0, "no argument initialization makes key which length == 0")
 assert(key.MIN == k, "it should be same as minimum key")
 assert(key.MIN <= k, "it should satisfy less than equal condition")
 assert(not (key.MIN > k), "it should satisfy greater than condition")
@@ -13,12 +13,12 @@ assert(not ok and (r:is('invalid')), "if try to set byte array which length is e
 ok, r = pcall(k.dec, k)
 assert(not ok and (r:is('invalid')), "it should not be able to decrement min key")
 k:inc()
-assert(k.length == 1 and (k.p[0] == 0), "next of min key should be length = 1, byte[0] == 0")
+assert(k:length() == 1 and (k.p[0] == 0), "next of min key should be length = 1, byte[0] == 0")
 
 local k2, k3, ktmp = ffi.new('luact_dht_key_t'), ffi.new('luact_dht_key_t'), ffi.new('luact_dht_key_t')
 k2:init(string.char(1), 1)
 k3:init(string.char(0)..(string.char(255)):rep(key.MAX_LENGTH-1))
-assert(k.length == 1, "length is same as 2nd argument of init()")
+assert(k:length() == 1, "length is same as 2nd argument of init()")
 assert(k2 > k, "k2 should greater than k (MIN key)")
 ktmp = k2
 k2:dec()
@@ -39,7 +39,7 @@ assert(not ok and (r:is('invalid')))
 local k6, k7 = ffi.new('luact_dht_key_t'), ffi.new('luact_dht_key_t')
 k6:init((string.char(255)):rep(key.MAX_LENGTH - 1)..string.char(0))
 k7:init((string.char(255)):rep(key.MAX_LENGTH - 1))
-assert(k6.length == key.MAX_LENGTH and k7.length == (key.MAX_LENGTH - 1), 
+assert(k6:length() == key.MAX_LENGTH and k7:length() == (key.MAX_LENGTH - 1), 
 	"with no 2nd argument, key length is same as length of given string")
 assert(k6 > k7, "longer key should be greater")
 k6:prev(kbuf)

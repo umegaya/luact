@@ -6,6 +6,7 @@ local uuid = require 'luact.uuid'
 local serde_common = require 'luact.serde.common'
 
 local key = require 'luact.cluster.dht.key'
+local txncoord = require 'luact.storage.txncoord'
 
 local _M = {}
 
@@ -65,6 +66,13 @@ typedef struct luact_dht_cmd_scan {
 	uint16_t kl;
 	char k[0];	
 } luact_dht_cmd_scan_t;
+
+typedef struct luact_dht_cmd_end_txn {
+	uint8_t kind, commit;
+	uint16_t kl;
+	luact_dht_txn_t txn;
+	char k[0];
+} luact_dht_cmd_end_txn_t;
 
 typedef struct luact_dht_gossip_replica_change {
 	uint8_t kind, padd[3];
@@ -209,7 +217,7 @@ end
 ffi.metatype('luact_dht_cmd_cas_t', cas_mt)
 
 
--- get command
+-- scan command
 local scan_mt = {}
 scan_mt.__index = scan_mt
 scan_mt.__gc = memory.free
@@ -235,6 +243,41 @@ function scan_mt:apply_to(storage, range)
 	return range:exec_scan(storage, self:key(), self.kl, self.timestamp)
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
+
+
+-- scan command
+local end_txn_mt = {}
+end_txn_mt.__index = end_txn_mt
+end_txn_mt.__gc = memory.free
+function end_txn_mt.size(kl)
+	return ffi.sizeof('luact_dht_cmd_end_txn_t') + kl
+end
+function end_txn_mt.new(kind, sk, skl, txn, commit)
+	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(skl)))
+	p.kind = kind
+	p.commit = commit and 1 or 0
+	p.txn = txn
+	p.kl = skl
+	ffi.copy(p:key(), sk, skl)
+	return p
+end
+_M.end_txn = end_txn_mt.new
+function end_txn_mt:txn()
+	return self.txn
+end
+function end_txn_mt:key()
+	return self.k
+end
+function end_txn_mt:commit()
+	return self.commit ~= 0
+end
+function end_txn_mt:__len()
+	return end_txn_mt.size()
+end
+function end_txn_mt:apply_to(storage, range)
+	return range:exec_end_txn(storage, self:key(), self.kl, self:txn(), self:commit())
+end
+ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
 
 
 -- merge command

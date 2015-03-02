@@ -28,7 +28,7 @@ function cache_mt:sort()
 	end)
 end
 function cache_mt:add(r)
-	local tmp = self:find(r.start_key.p, r.start_key.length)
+	local tmp = self:find(r.start_key:as_slice())
 	if not tmp then
 		table.insert(self, r)
 		self:sort()
@@ -37,7 +37,7 @@ function cache_mt:add(r)
 	return tmp
 end
 function cache_mt:remove(r)
-	local k, kl = r.start_key.p, r.start_key.length
+	local k, kl = r.start_key:as_slice()
 	for i=1,#self do
 		-- logger.info(self[i].start_key, ("%02x"):format(k:byte()), 
 		-- 	self[i].end_key:less_than_equals(k, kl), self[i].start_key:less_than_equals(k, kl))

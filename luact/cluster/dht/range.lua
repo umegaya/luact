@@ -66,9 +66,10 @@ local function make_syskey(category, key)
 	return '\0'..string.char(category)..key
 end
 -- synchorinized merge
-local function sync_merge(storage, k, kl, v, vl)
-	storage:rawmerge(k, kl, v, vl)
-	v, vl = storage:rawget(k, kl) -- resolve all logs for this key (thus it processed above merge immediately)
+local function sync_merge(storage, k, kl, v, vl, ts, txn)
+	storage:rawmerge(k, kl, v, vl, ts, txn)
+	-- resolve all logs for this key (thus it processed above merge immediately)
+	v, vl = storage:rawget(k, kl, ts, txn) 
 	memory.free(v)
 end
 
@@ -143,7 +144,7 @@ function range_mt:arbiter_id()
 	return self:metakey()
 end
 function range_mt:metakey()
-	return string.char(self.kind)..ffi.string(self.start_key.p, self.start_key.length)
+	return string.char(self.kind)..ffi.string(self.start_key:as_slice())
 end
 function range_mt:check_replica()
 	if self.replica_available < _M.NUM_REPLICA then
@@ -176,7 +177,6 @@ function range_mt:find_replica_by(node, check_thread_id)
 		end
 	end
 end
--- operation to range
 function range_mt:write(command, timeout, dictatorial)
 	if not dictatorial then
 		self:check_replica()
@@ -189,92 +189,97 @@ function range_mt:write(command, timeout, dictatorial)
 		return unpack(r, 2)
 	elseif (not retry) and r[2]:is('actor_no_body') then
 		-- invalidate and retrieve range again
-		local key = self.start_key
 		range_manager:clear_cache(self)
-		self = range_manager:find(key.p, key.length, self.kind)
+		local p, len = self.start_key:as_slice()
+		self = range_manager:find(p, len, self.kind)
 		retry = true
 		goto RETRY
 	else
 		error(r[2])
 	end
 end
-function range_mt:read(k, kl, ts, consistent, timeout)
+function range_mt:write_no_wait(command)
+	self.replicas[0]:notify_write({command})
+end
+function range_mt:read(k, kl, ts, txn, consistent, timeout)
 	if consistent then
-		return self:write(cmd.get(self.kind, k, kl, ts), timeout)
+		return self:write(cmd.get(self.kind, k, kl, ts, txn), timeout)
 	else
 		self:check_replica()
 		return self.replicas[0]:read(ffi.string(k, kl), timeout)
 	end
 end
-function range_mt:get(k, ts, consistent, timeout)
-	return self:rawget(k, #k, ts, consistent, timeout)
+-- operation to range
+function range_mt:get(k, ts, txn, consistent, timeout)
+	return self:rawget(k, #k, ts, txn, consistent, timeout)
 end
-function range_mt:rawget(k, kl, ts, consistent, timeout)
-	return self:read(k, kl, ts, consistent, timeout)
+function range_mt:rawget(k, kl, ts, txn, consistent, timeout)
+	return self:read(k, kl, ts, txn, consistent, timeout)
 end
-function range_mt:put(k, v, ts, timeout)
-	return self:rawput(k, #k, v, #v, ts, timeout)
+function range_mt:put(k, v, ts, txn, timeout)
+	return self:rawput(k, #k, v, #v, ts, txn, timeout)
 end
-function range_mt:rawput(k, kl, v, vl, ts, timeout, dictatorial)
-	return self:write(cmd.put(self.kind, k, kl, v, vl, ts), timeout, dictatorial)
+function range_mt:rawput(k, kl, v, vl, ts, txn, timeout, dictatorial)
+	return self:write(cmd.put(self.kind, k, kl, v, vl, ts, txn), timeout, dictatorial)
 end
-function range_mt:merge(k, v, ts, timeout)
-	return self:rawmerge(k, #k, v, #v, ts, timeout)
+function range_mt:merge(k, v, ts, txn, timeout)
+	return self:rawmerge(k, #k, v, #v, ts, txn, timeout)
 end
-function range_mt:rawmerge(k, kl, v, vl, ts, timeout)
-	return self:write(cmd.merge(self.kind, k, kl, v, vl, ts), timeout)
+function range_mt:rawmerge(k, kl, v, vl, ts, txn, timeout)
+	return self:write(cmd.merge(self.kind, k, kl, v, vl, ts, txn), timeout)
 end
-function range_mt:cas(k, ov, nv, ts, timeout)
+function range_mt:cas(k, ov, nv, ts, txn, timeout)
 	local oval, ol = ov or nil, ov and #ov or 0
 	local nval, nl = nv or nil, nv and #nv or 0
 	local cas = range_manager.storage_module.op_cas(ov, nv, nil, ovl, nvl)
-	return self:rawcas(k, #k, oval, ol, nval, nl, ts, timeout)
+	return self:rawcas(k, #k, oval, ol, nval, nl, ts, txn, timeout)
 end
-function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, ts, timeout)
-	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, ts), timeout)
+function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, ts, txn, timeout)
+	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, ts, txn), timeout)
 end
-function range_mt:watch(k, kl, watcher, method, ts, timeout)
-	return self:write(cmd.watch(self.kind, k, kl, watcher, method, ts), timeout)
+function range_mt:watch(k, kl, watcher, method, ts, txn, timeout)
+	return self:write(cmd.watch(self.kind, k, kl, watcher, method, ts, txn), timeout)
 end
-function range_mt:split(range_key, ts, timeout)
-	return self:write(cmd.split(self.kind, range_key, ts), timeout)
+function range_mt:split(range_key, ts, txn, timeout)
+	return self:write(cmd.split(self.kind, range_key, ts, txn), timeout)
 end
-function range_mt:scan(k, kl, ts, timeout)
-	logger.info('scan', k, kl, ts, timeout)
-	local r = self:write(cmd.scan(self.kind, k, kl, ts), timeout)
-	logger.info('scan result', r)
-	return ffi.cast('luact_dht_range_t *', r)
+function range_mt:scan(k, kl, ts, txn, timeout)
+	return ffi.cast('luact_dht_range_t *', self:write(cmd.scan(self.kind, k, kl, ts, txn), timeout))
+end
+function range_mt:end_txn(sk, skl, txn, commit)
+	-- does not wait for reply
+	return self:write_no_wait(cmd.end_txn(sk, skl, txn, commit))
 end
 function range_mt:split_at(at)
 	assert(false, "TBD")
 end
 -- actual processing on replica node of range
-function range_mt:exec_get(storage, k, kl)
+function range_mt:exec_get(storage, k, kl, ts, txn)
 	-- logger.warn('exec_get', storage, tostring(k), kl)
-	local v, vl = storage:rawget(k, kl)
+	local v, vl = storage:rawget(k, kl, ts, txn)
 	if v ~= ffi.NULL then
 		local p = ffi.string(v, vl)
 		memory.free(v)
 		return p
 	end
 end
-function range_mt:exec_put(storage, k, kl, v, vl, timestamp)
-	return storage:rawput(k, kl, v, vl)
+function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
+	return storage:rawput(k, kl, v, vl, ts, txn)
 end
-function range_mt:exec_merge(storage, k, kl, v, vl, timestamp)
-	return storage:rawmerge(k, kl, v, vl)
+function range_mt:exec_merge(storage, k, kl, v, vl, ts, txn)
+	return storage:rawmerge(k, kl, v, vl, ts, txn)
 end
 range_mt.cas_result = memory.alloc_typed('bool')
-local function sync_cas(storage, k, kl, o, ol, n, nl, timestamp)
+local function sync_cas(storage, k, kl, o, ol, n, nl, ts, txn)
 	range_mt.cas_result[0] = false
 	local cas = range_manager.storage_module.op_cas(o, n, range_mt.cas_result, ol, nl)
-	sync_merge(storage, k, kl, cas, #cas)
+	sync_merge(storage, k, kl, cas, #cas, ts, txn)
 	return range_mt.cas_result[0]
 end
-function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, timestamp)
-	return sync_cas(storage, k, kl, o, ol, n, nl)
+function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
+	return sync_cas(storage, k, kl, o, ol, n, nl, ts, txn)
 end
-function range_mt:exec_scan(storage, k, kl, timestamp)
+function range_mt:exec_scan(storage, k, kl, ts, txn)
 	local it = storage:iterator()
 	it:seek(k, kl) --> seek to the smallest of bigger key
 	if it:valid() then
@@ -295,10 +300,13 @@ function range_mt:exec_scan(storage, k, kl, timestamp)
 		it:next()
 	end
 end
-function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, timestamp)
+function range_mt:exec_end_txn(storage, k, kl, txn, commit)
+	return storage:end_txn(k, kl, txn, commit)
+end
+function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts, txn)
 	assert(false, "TBD")
 end
-function range_mt:exec_split(storage, k, kl, timestamp)
+function range_mt:exec_split(storage, k, kl, ts, txn)
 	assert(false, "TBD")
 end
 function range_mt:kv_group()
@@ -491,7 +499,7 @@ function range_manager_mt:create_fsm_for_arbiter(rng)
 	if not self.ranges[kind] then
 		exception.raise('fatal', 'range manager not initialized', kind)
 	end
-	local r = self.ranges[kind]:find(rng.start_key.p, rng.start_key.length)
+	local r = self.ranges[kind]:find(rng.start_key:as_slice())
 	if not r then
 		r = range_mt.alloc(rng.n_replica)
 		ffi.copy(r, rng, range_mt.size(rng.n_replica))
@@ -530,7 +538,7 @@ function range_manager_mt:new_kv_group(kind, name, cluster_bootstrap)
 	end
 	if cluster_bootstrap then
 		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(kind))
-		if not sync_cas(c, syskey, #syskey, nil, 0, name, #name) then
+		if not sync_cas(c, syskey, #syskey, nil, 0, name, #name, self.clock:issue()) then
 			exception.raise('fatal', 'initial kind of dht cannot registered', kind, name)
 		end
 	end
@@ -626,7 +634,8 @@ function range_manager_mt:process_user_event(subkind, p, len)
 		--	logger.report('luact_dht_gossip_replica_change_t', i, p.replicas[i])
 		--end
 		-- only when this node own or cache corresponding range, need to follow the change
-		local r = self:find_on_memory(p.key.p, p.key.length, p.kind) 
+		local ptr, len = p.key:as_slice()
+		local r = self:find_on_memory(ptr, len, p.kind) 
 		if r then
 			if p.n_replica > r.n_replica then
 				exception.raise('fatal', 'invalid replica set size', p.n_replica, r.n_replica)
@@ -637,7 +646,8 @@ function range_manager_mt:process_user_event(subkind, p, len)
 		end
 	elseif subkind == cmd.GOSSIP_RANGE_SPLIT then
 		-- only when this node own or cache corresponding range, need to follow the change
-		local r = self:find_on_memory(p.key.p, p.key.length, p.kind) 
+		local ptr, len = p.key:as_slice()
+		local r = self:find_on_memory(ptr, len, p.kind) 
 		if r then
 			r:split_at(p.split_at)
 		end
