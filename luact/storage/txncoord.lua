@@ -67,6 +67,7 @@ function txn_mt:init(coord, isolation, debug_opts)
 	self.n_retry = 0
 	if debug_opts then
 		for k,v in pairs(debug_opts) do
+			--print('debug_opts', self, k, v)
 			self[k] = v
 		end
 	end
@@ -81,6 +82,15 @@ end
 function txn_mt:__len()
 	return ffi.sizeof('luact_dht_txn_t')
 end
+function txn_mt:__tostring()
+	return ("txn:%s:%s,ts(%s),max_ts(%s),st(%d),n(%d)"):format(
+		tostring(self.coord),
+		tostring(self.start_at),
+		tostring(self.timestamp),
+		tostring(self.max_ts),
+		self.status, self.n_retry
+	)
+end
 function txn_mt:clone(debug_opts)
 	return txn_mt.new(self.coord, self.isolation, debug_opts)
 end
@@ -91,6 +101,7 @@ function txn_mt:max_timestamp()
 	return self.max_ts
 end
 function txn_mt:valid()
+	--print('txn:valid', self, self.coord)
 	return uuid.valid(self.coord)
 end
 function txn_mt:invalidate()
@@ -163,7 +174,7 @@ function _M.fin_txn(txn, commit)
 	txn:fin()
 end
 function _M.debug_make_txn(debug_opts)
-	return txn_mt.new(_M.coord_actor, nil, debug_opts)
+	return txn_mt.new(_M.coord_actor, nil, debug_opts)[0]
 end
 
 return _M

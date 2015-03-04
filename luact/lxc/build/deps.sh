@@ -10,6 +10,7 @@ apt-get -y install autotools-dev
 apt-get -y install libtool
 apt-get -y install pkg-config
 apt-get -y install python3.4-dev
+apt-get -y install wget
 
 # install dependency modules
 # -- jemalloc
@@ -38,6 +39,9 @@ objcopy -S /usr/local/lib/libnghttp2.so
 popd
 rm -rf nghttp2
 popd
+# -- docker machine
+DOCKER_MACHINE_URL=https://github.com/docker/machine/releases/download/$DOCKER_MACHINE_VERSION/docker-machine_linux-amd64
+wget $DOCKER_MACHINE_URL -O /usr/local/bin/docker-machine && chmod 755 /usr/local/bin/docker-machine
 
 # cleanup unnecessary modules
 apt-get -y remove gcc
@@ -50,3 +54,4 @@ apt-get -y remove libtool
 apt-get -y remove pkg-config
 apt-get -y remove libxml2-dev
 apt-get -y remove python3.4-dev
+apt-get -y remove wget

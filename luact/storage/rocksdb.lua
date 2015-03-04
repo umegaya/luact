@@ -46,7 +46,7 @@ local LIB = ffi.load('rocksdb')
 local vsz_work = ffi.new('size_t[1]')
 local errptr = ffi.new('char*[1]')
 local function callapi(fn, ...)
-	-- I really wanna append errptr, but it causes only first element of ... is passed to fn.
+	-- I really wanna just append errptr like ..., errptr, but it causes only first element of ... is passed to fn.
 	-- so errptr is given at the caller of callapi :< its really bad.
 	-- TODO : if this is critical for execution speed, give errptr at the caller side of callapi.
 	local alen = select('#', ...)
@@ -586,7 +586,7 @@ function _M.new_write_opts(opts_table)
 	return opts
 end
 function _M.close(db)
-	db:fin()
+	db:close()
 end
 -- add application specific merger
 function _M.register_merger(name, merger)

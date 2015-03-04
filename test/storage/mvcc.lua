@@ -25,42 +25,42 @@ local test_key1     = "db1"
 local test_key2     = "db2"
 local test_key3     = "db3"
 local test_key4     = "db4"
-local txn1         	= txncoord.debug_make_txn(nil, {
+local txn1         	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 })
-local txn1_commit  	= txncoord.debug_make_txn(nil, {
+local txn1_commit  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_COMMITTED,
 })
-local txn1_abort  	= txncoord.debug_make_txn(nil, {
+local txn1_abort  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_ABORTED,
 })
-local txn1_1		= txncoord.debug_make_txn(nil, {
+local txn1_1		= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	n_retry = 1
 })
-local txn1_1_commit	= txncoord.debug_make_txn(nil, {
+local txn1_1_commit	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_COMMITTED,
 	n_retry = 1
 })
-local txn1         	= txncoord.debug_make_txn(nil, {
+local txn2         	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 2),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 })
-local txn1_commit  	= txncoord.debug_make_txn(nil, {
+local txn2_commit  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 2),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
@@ -87,6 +87,9 @@ local function maketxn(txn, ts)
 	return txn:clone({
 		timestamp = ts,
 	})
+end
+local function new_txn(opts)
+	return txncoord.debug_make_txn(opts)
 end
 
 -- makeTS creates a new hybrid logical timestamp.
@@ -128,6 +131,7 @@ local function test(name, proc, ctor, dtor)
 	logger.notice(name, 'success')
 end
 
+-- [[
 -- Verify the sort ordering of successive keys with metadata and
 -- versioned values. In particular, the following sequence of keys /
 -- versions:
@@ -141,9 +145,15 @@ end
 -- a\x00<t=1>
 -- a\x00<t=max>
 test("TestMVCCKeys", function ()
+	local z = "\0"
 	local a = "a"
 	local a0 = "a\0"
 	local keys = {
+		mvcc.make_key(z, #z),
+		mvcc.make_key(z, #z, makets(0, 0)),
+		mvcc.make_key(z, #z, makets(1, 0)),
+		mvcc.make_key(z, #z, makets(0, 1)),
+		mvcc.make_key(z, #z, makets(0, lamport.MAX_HLC_WALLTIME)),
 		mvcc.make_key(a, #a),
 		mvcc.make_key(a, #a, makets(0, 0)),
 		mvcc.make_key(a, #a, makets(1, 0)),
@@ -157,12 +167,12 @@ test("TestMVCCKeys", function ()
 	}
 	local copied = util.copy_table(keys)
 	for k,v in pairs(copied) do
-		mvcc.dump_key(v)
+		-- mvcc.dump_key(v)
 	end
 	table.sort(copied)
-	print('--- after sorted')
+	-- print('--- after sorted')
 	for k,v in pairs(copied) do
-		mvcc.dump_key(v)
+		-- mvcc.dump_key(v)
 	end
 	assert(util.table_equals(keys, copied, true), "sorting order is wrong")
 end)
@@ -173,278 +183,159 @@ test("TestMVCCEmptyKey", function (db)
 	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
 	ok, r = pcall(db.get, db, "", makets(0, 1))
 	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
-	db:scan("", test_key1, function (self, k, kl, v, vl)
+	db:scan("", 0, test_key1, #test_key1, function (self, k, kl, v, vl)
 	end)
-	db:scan(test_key1, "", function (self, k, kl, v, vl)
+	db:scan(test_key1, #test_key1, "", 0, function (self, k, kl, v, vl)
 		assert(false, "nothing should be scanned")
 	end)
 	ok, r = pcall(db.resolve_txn, db, "", 0, makets(0, 1), txn1)
 	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
 end, create_db, destroy_db)
 
+test("TestMVCCGetNotExist", function (db)
+	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
+	assert(ok and (not r), "get for non-existent key should returns nil")
+end, create_db, destroy_db)
+
+test("TestMVCCPutWithTxn", function (db)
+	db:put(test_key1, value1, makets(1, 0), txn1)
+	for _, ts in ipairs({makets(1, 0), makets(0, 1), makets(2, 0)}) do
+		local v = db:get(test_key1, ts, txn1)
+		assert(v == value1, 
+			"put value in transaction should be seen for read which has greater-equals timestamp and same transaction")			
+	end
+end, create_db, destroy_db)
+
+test("TestMVCCPutWithoutTxn", function (db)
+	db:put(test_key1, value1, makets(1, 0))
+	for _, ts in ipairs({makets(1, 0), makets(0, 1), makets(2, 0)}) do
+		local v = db:get(test_key1, ts)
+		assert(v == value1, 
+			"put value in transaction should be seen for read which has greater-equals timestamp and same transaction")			
+	end
+end, create_db, destroy_db)
+
+test("TestMVCCUpdateExistingKey", function (db)
+	db:put(test_key1, value1, makets(1, 0))	
+	local v = db:get(test_key1, makets(0, 1))
+	assert(v == value1, "get with latest ts should return last put value")
+	
+	db:put(test_key1, value2, makets(0, 2))
+	-- Read the latest version.
+	local v = db:get(test_key1, makets(0, 3))
+	assert(v == value2, "after multiple version created, get with latest ts should return last put value")
+	-- Read the old version.
+	local v = db:get(test_key1, makets(0, 1))
+	assert(v == value1, "get with specified ts should return last put value before ts")
+end, create_db, destroy_db)
+
+test("TestMVCCUpdateExistingKeyOldVersion", function (db)
+	db:put(test_key1, value1, makets(1, 1))
+	-- Earlier walltime.
+	local ok, r = pcall(db.put, db, test_key1, value2, makets(1, 0))
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+	-- Earlier logical time.
+	local ok, r = pcall(db.put, db, test_key1, value2, makets(0, 1))
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+end, create_db, destroy_db)
+
+
+test("TestMVCCUpdateExistingKeyInTxn", function (db)
+	db:put(test_key1, value1, makets(1, 0), txn1)
+	db:put(test_key1, value1, makets(0, 1), txn1)
+end, create_db, destroy_db)
+
+test("TestMVCCUpdateExistingKeyDiffTxn", function (db)
+	db:put(test_key1, value1, makets(1, 0), txn1)
+	local ok, r = pcall(db.put, db, test_key1, value2, makets(0, 1), txn2)
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+end, create_db, destroy_db)
+
+test("TestMVCCGetNoMoreOldVersion", function (db)
+	-- Need to handle the case here where the scan takes us to the
+	-- next key, which may not match the key we're looking for. In
+	-- other words, if we're looking for a<T=2>, and we have the
+	-- following keys:
+	--
+	-- a: MVCCMetadata(a)
+	-- a<T=3>
+	-- b: MVCCMetadata(b)
+	-- b<T=1>
+	--
+	-- If we search for a<T=2>, the scan should not return "b".
+	-- and if we search for a<T=4>, scan should return "a"
+
+	db:put(test_key1, value1, makets(0, 3))
+	db:put(test_key2, value2, makets(0, 1))
+	
+	local v = db:get(test_key1, makets(0, 2))
+	assert(not v)
+	local v2 = db:get(test_key1, makets(0, 4))
+	assert(v2 == value1)
+end, create_db, destroy_db)
+-- ]]
+
+-- TestMVCCGetUncertainty verifies that the appropriate error results when
+-- a transaction reads a key at a timestamp that has versions newer than that
+-- timestamp, but older than the transaction's MaxTimestamp.
+test("TestMVCCGetUncertainty", function (db)
+	local ok, r
+	local ubk, ubkl
+	local txn = new_txn({
+		coord = actor.root_of(nil, 100),
+		timestamp = makets(0, 5),
+		max_ts = makets(0, 10),
+	})
+	-- Put a value from the past.
+	db:put(test_key1, value1, makets(0, 1))
+	-- Put a value that is ahead of MaxTimestamp, it should not interfere.
+	db:put(test_key1, value2, makets(0, 12))
+	-- Read with transaction, should get a value back.
+	local v = db:get(test_key1, makets(0, 7), txn)
+	assert(v == value1)
+	-- Now using testKey2.
+	-- Put a value that conflicts with MaxTimestamp.
+	db:put(test_key2, value2, makets(0, 9))
+	-- Read with transaction, should get error back.
+	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key2)
+
+	ok, r = pcall(db.get, db, test_key2, makets(0, 7), txn)
+	assert((not ok) and r:is('mvcc') and 
+		r.args[1] == 'txn_ts_uncertainty' and 
+		r.args[3] == makets(0, 9) and r.args[4] == txn:max_timestamp())
+
+	ok, r = pcall(db.scan, db, test_key2, #test_key2, ubk, ubkl, 10, makets(0, 7), txn)
+	assert((not ok) and r:is('mvcc') and 
+		r.args[1] == 'txn_ts_uncertainty' and 
+		r.args[3] == makets(0, 9) and r.args[4] == txn:max_timestamp())
+
+	-- Adjust MaxTimestamp and retry.
+	txn.max_ts = makets(0, 7)
+	assert(not db:get(test_key2, makets(0, 7), txn))
+	r = db:scan(test_key2, #test_key2, ubk, ubkl, 10, makets(0, 7), txn)
+	assert(#r == 0)
+	-- restore max_timestamp
+	txn.max_ts = makets(0, 10)
+
+	-- Now using testKey3.
+	-- Put a value that conflicts with MaxTimestamp and another write further
+	-- ahead and not conflicting any longer. The first write should still ruin
+	-- it.
+	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key3)
+	db:put(test_key3, value2, makets(0, 9))
+	db:put(test_key3, value2, makets(0, 99))
+	ok, r = pcall(db.scan, db, test_key3, #test_key3, ubk, ubkl, 10, makets(0, 7), txn)
+	assert((not ok) and r:is('mvcc') and 
+		r.args[1] == 'txn_ts_uncertainty' and 
+		r.args[3] == makets(0, 9) and r.args[4] == makets(0, 7))
+
+	ok, r = pcall(db.get, db, test_key3, makets(0, 7), txn)
+	assert((not ok) and r:is('mvcc') and 
+		r.args[1] == 'txn_ts_uncertainty' and 
+		r.args[3] == makets(0, 9) and r.args[4] == makets(0, 7))
+
+end, create_db, destroy_db)
 --[[
-func TestMVCCGetNotExist(t *testing.T) {
-	engine := createTestEngine()
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value != nil {
-		t.Fatal("the value should be empty")
-	}
-}
-
-func TestMVCCPutWithBadValue(t *testing.T) {
-	engine := createTestEngine()
-	badValue := proto.Value{Bytes: []byte("a"), Integer: gogoproto.Int64(1)}
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), badValue, nil)
-	if err == nil {
-		t.Fatal("expected an error putting a value with both byte slice and integer components")
-	}
-}
-
-func TestMVCCPutWithTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, ts := range []proto.Timestamp{makeTS(0, 1), makeTS(0, 2), makeTS(1, 0)} {
-		value, err := MVCCGet(engine, testKey1, ts, txn1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(value1.Bytes, value.Bytes) {
-			t.Fatalf("the value %s in get result does not match the value %s in request",
-				value1.Bytes, value.Bytes)
-		}
-	}
-}
-
-func TestMVCCPutWithoutTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, ts := range []proto.Timestamp{makeTS(0, 1), makeTS(0, 2), makeTS(1, 0)} {
-		value, err := MVCCGet(engine, testKey1, ts, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(value1.Bytes, value.Bytes) {
-			t.Fatalf("the value %s in get result does not match the value %s in request",
-				value1.Bytes, value.Bytes)
-		}
-	}
-}
-
-// TestMVCCIncrement verifies increment behavior. In particular,
-// incrementing a non-existent key by 0 will create the value.
-func TestMVCCIncrement(t *testing.T) {
-	engine := createTestEngine()
-	newVal, err := MVCCIncrement(engine, nil, testKey1, makeTS(0, 1), nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newVal != 0 {
-		t.Errorf("expected new value of 0; got %d", newVal)
-	}
-	val, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val == nil {
-		t.Errorf("expected increment of 0 to create key/value")
-	}
-
-	newVal, err = MVCCIncrement(engine, nil, testKey1, makeTS(0, 2), nil, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newVal != 2 {
-		t.Errorf("expected new value of 2; got %d", newVal)
-	}
-}
-
-func TestMVCCUpdateExistingKey(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	value, err := MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-
-	err = MVCCPut(engine, nil, testKey1, makeTS(2, 0), value2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Read the latest version.
-	value, err = MVCCGet(engine, testKey1, makeTS(3, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(value2.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value2.Bytes, value.Bytes)
-	}
-
-	// Read the old version.
-	value, err = MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-}
-
-func TestMVCCUpdateExistingKeyOldVersion(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 1), value1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Earlier walltime.
-	err = MVCCPut(engine, nil, testKey1, makeTS(0, 1), value2, nil)
-	if err == nil {
-		t.Fatal("expected error on old version")
-	}
-	// Earlier logical time.
-	err = MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, nil)
-	if err == nil {
-		t.Fatal("expected error on old version")
-	}
-}
-
-func TestMVCCUpdateExistingKeyInTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestMVCCUpdateExistingKeyDiffTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, txn2)
-	if err == nil {
-		t.Fatal("expected error on uncommitted write intent")
-	}
-}
-
-func TestMVCCGetNoMoreOldVersion(t *testing.T) {
-	// Need to handle the case here where the scan takes us to the
-	// next key, which may not match the key we're looking for. In
-	// other words, if we're looking for a<T=2>, and we have the
-	// following keys:
-	//
-	// a: MVCCMetadata(a)
-	// a<T=3>
-	// b: MVCCMetadata(b)
-	// b<T=1>
-	//
-	// If we search for a<T=2>, the scan should not return "b".
-
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(3, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, nil)
-
-	value, err := MVCCGet(engine, testKey1, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value != nil {
-		t.Fatal("the value should be empty")
-	}
-}
-
-// TestMVCCGetUncertainty verifies that the appropriate error results when
-// a transaction reads a key at a timestamp that has versions newer than that
-// timestamp, but older than the transaction's MaxTimestamp.
-func TestMVCCGetUncertainty(t *testing.T) {
-	engine := createTestEngine()
-	txn := &proto.Transaction{ID: []byte("txn"), Timestamp: makeTS(5, 0), MaxTimestamp: makeTS(10, 0)}
-	// Put a value from the past.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Put a value that is ahead of MaxTimestamp, it should not interfere.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(12, 0), value2, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Read with transaction, should get a value back.
-	val, err := MVCCGet(engine, testKey1, makeTS(7, 0), txn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val == nil || !bytes.Equal(val.Bytes, value1.Bytes) {
-		t.Fatalf("wanted %q, got %v", value1.Bytes, val)
-	}
-
-	// Now using testKey2.
-	// Put a value that conflicts with MaxTimestamp.
-	if err := MVCCPut(engine, nil, testKey2, makeTS(9, 0), value2, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Read with transaction, should get error back.
-	if _, err := MVCCGet(engine, testKey2, makeTS(7, 0), txn); err == nil {
-		t.Fatal("wanted an error")
-	} else if e, ok := err.(*proto.ReadWithinUncertaintyIntervalError); !ok {
-		t.Fatalf("wanted a ReadWithinUncertaintyIntervalError, got %+v", e)
-	}
-	if _, err := MVCCScan(engine, testKey2, testKey2.PrefixEnd(), 10, makeTS(7, 0), txn); err == nil {
-		t.Fatal("wanted an error")
-	}
-	// Adjust MaxTimestamp and retry.
-	txn.MaxTimestamp = makeTS(7, 0)
-	if _, err := MVCCGet(engine, testKey2, makeTS(7, 0), txn); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := MVCCScan(engine, testKey2, testKey2.PrefixEnd(), 10, makeTS(7, 0), txn); err != nil {
-		t.Fatal(err)
-	}
-
-	txn.MaxTimestamp = makeTS(10, 0)
-	// Now using testKey3.
-	// Put a value that conflicts with MaxTimestamp and another write further
-	// ahead and not conflicting any longer. The first write should still ruin
-	// it.
-	if err := MVCCPut(engine, nil, testKey3, makeTS(9, 0), value2, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := MVCCPut(engine, nil, testKey3, makeTS(99, 0), value2, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := MVCCScan(engine, testKey3, testKey3.PrefixEnd(), 10, makeTS(7, 0), txn); err == nil {
-		t.Fatal("wanted an error")
-	}
-	if _, err := MVCCGet(engine, testKey3, makeTS(7, 0), txn); err == nil {
-		t.Fatalf("wanted an error")
-	}
-}
 
 func TestMVCCGetAndDelete(t *testing.T) {
 	engine := createTestEngine()

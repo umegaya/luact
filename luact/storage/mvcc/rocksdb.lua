@@ -34,6 +34,9 @@ end
 
 -- mvcc rocksdb
 local mvcc_rocksdb_mt = mvcc.new_mt()
+function mvcc_rocksdb_mt:fin()
+	rocksdb.close(self.db)
+end
 function mvcc_rocksdb_mt:column_family(name, opts)
 	return new_mvcc_cf(self.db:column_family(name, opts))
 end
@@ -70,12 +73,13 @@ function _M.open(name, opts, debug_conf)
 	return new_mvcc(rocksdb.open(name, opts, debug_conf))
 end
 function _M.close(mvcc)
-	mvcc:close()
+	mvcc:fin()
 end
 function _M.make_key(k, kl, ts) 
 	local key = mvcc.make_key(k, kl, ts)
 	return key
 end
+_M.upper_bound_of_prefix = mvcc.upper_bound_of_prefix
 _M.dump_key = mvcc.dump_key
 
 return _M
