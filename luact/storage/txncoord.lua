@@ -32,11 +32,11 @@ typedef struct luact_dht_txn {
 } luact_dht_txn_t;
 ]]
 local TXN_STATUS_PENDING = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_PENDING')
-local TXN_STATUS_ABORT = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_ABORTED')
+local TXN_STATUS_ABORTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_ABORTED')
 local TXN_STATUS_COMMITTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_COMMITTED')
 _M.STATUS_PENDING = TXN_STATUS_PENDING
 _M.STATUS_ABORTED = TXN_STATUS_ABORTED
-_M.TXN_STATUS_COMMITTED = TXN_STATUS_COMMITTED
+_M.STATUS_COMMITTED = TXN_STATUS_COMMITTED
 
 local SERIALIZED_SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SERIALIZED_SNAPSHOT_ISOLATION')
 local SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SNAPSHOT_ISOLATION')
@@ -67,7 +67,7 @@ function txn_mt:init(coord, isolation, debug_opts)
 	self.n_retry = 0
 	if debug_opts then
 		for k,v in pairs(debug_opts) do
-			--print('debug_opts', self, k, v)
+			-- print('debug_opts', self, k, v)
 			self[k] = v
 		end
 	end
@@ -92,6 +92,11 @@ function txn_mt:__tostring()
 	)
 end
 function txn_mt:clone(debug_opts)
+	for _, key in ipairs({"start_at", "timestamp", "status", "max_ts", "n_retry"}) do
+		if not debug_opts[key] then
+			debug_opts[key] = self[key]
+		end
+	end
 	return txn_mt.new(self.coord, self.isolation, debug_opts)
 end
 function txn_mt:same_origin(txn)

@@ -5,6 +5,7 @@ local fs = require 'pulpo.fs'
 tools.start_luact(1, nil, function ()
 
 local mvcc = require 'luact.storage.mvcc.rocksdb'
+local key = require 'luact.cluster.dht.key'
 local txncoord = require 'luact.storage.txncoord'
 local actor = require 'luact.actor'
 local lamport = require 'pulpo.lamport'
@@ -86,6 +87,7 @@ end
 local function maketxn(txn, ts)
 	return txn:clone({
 		timestamp = ts,
+		max_ts = ts,
 	})
 end
 local function new_txn(opts)
@@ -148,6 +150,8 @@ test("TestMVCCKeys", function ()
 	local z = "\0"
 	local a = "a"
 	local a0 = "a\0"
+	local aa = "aa"
+	local b = "b"
 	local keys = {
 		mvcc.make_key(z, #z),
 		mvcc.make_key(z, #z, makets(0, 0)),
@@ -156,40 +160,39 @@ test("TestMVCCKeys", function ()
 		mvcc.make_key(z, #z, makets(0, lamport.MAX_HLC_WALLTIME)),
 		mvcc.make_key(a, #a),
 		mvcc.make_key(a, #a, makets(0, 0)),
-		mvcc.make_key(a, #a, makets(1, 0)),
 		mvcc.make_key(a, #a, makets(0, 1)),
 		mvcc.make_key(a, #a, makets(0, lamport.MAX_HLC_WALLTIME)),
 		mvcc.make_key(a0, #a0),
 		mvcc.make_key(a0, #a0, makets(0, 0)),
-		mvcc.make_key(a0, #a0, makets(1, 0)),
-		mvcc.make_key(a0, #a0, makets(0, 1)),
 		mvcc.make_key(a0, #a0, makets(0, lamport.MAX_HLC_WALLTIME)),
+		mvcc.make_key(aa, #aa),
+		mvcc.make_key(b, #b),
 	}
 	local copied = util.copy_table(keys)
 	for k,v in pairs(copied) do
-		-- mvcc.dump_key(v)
+	--	mvcc.dump_key(v)
 	end
 	table.sort(copied)
-	-- print('--- after sorted')
+	--print('--- after sorted')
 	for k,v in pairs(copied) do
-		-- mvcc.dump_key(v)
+	--	mvcc.dump_key(v)
 	end
 	assert(util.table_equals(keys, copied, true), "sorting order is wrong")
 end)
 
-test("TestMVCCEmptyKey", function (db)
+test("TestMVCCEmptyKeyValue", function (db)
 	local ok, r
-	ok, r = pcall(db.put, db, "", "empty", makets(0, 1), nil)
-	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
-	ok, r = pcall(db.get, db, "", makets(0, 1))
-	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
-	db:scan("", 0, test_key1, #test_key1, function (self, k, kl, v, vl)
+	ok, r = pcall(db.put, db, "", "", makets(0, 1), nil)
+	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_value')
+	db:put("", value1, makets(0, 1))
+	local v = db:get("", makets(0, 1))
+	assert(v == value1)
+	db:rawscan("", 0, test_key1, #test_key1, nil, function (self, k, kl, v, vl)
 	end)
-	db:scan(test_key1, #test_key1, "", 0, function (self, k, kl, v, vl)
+	db:rawscan(test_key1, #test_key1, "", 0, nil, function (self, k, kl, v, vl)
 		assert(false, "nothing should be scanned")
 	end)
-	ok, r = pcall(db.resolve_txn, db, "", 0, makets(0, 1), txn1)
-	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_key')
+	db:resolve_txn("", 0, nil, nil, nil, makets(0, 1), txn1)
 end, create_db, destroy_db)
 
 test("TestMVCCGetNotExist", function (db)
@@ -273,7 +276,6 @@ test("TestMVCCGetNoMoreOldVersion", function (db)
 	local v2 = db:get(test_key1, makets(0, 4))
 	assert(v2 == value1)
 end, create_db, destroy_db)
--- ]]
 
 -- TestMVCCGetUncertainty verifies that the appropriate error results when
 -- a transaction reads a key at a timestamp that has versions newer than that
@@ -335,789 +337,517 @@ test("TestMVCCGetUncertainty", function (db)
 		r.args[3] == makets(0, 9) and r.args[4] == makets(0, 7))
 
 end, create_db, destroy_db)
---[[
 
-func TestMVCCGetAndDelete(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	value, err := MVCCGet(engine, testKey1, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value == nil {
-		t.Fatal("the value should not be empty")
-	}
+test("TestMVCCGetAndDelete", function (db)
+	db:put(test_key1, value1, makets(0, 1))
+	local v = db:get(test_key1, makets(0, 2))
+	assert(v == value1)
+	-- delete value for test_key1
+	db:delete(test_key1, makets(0, 3))
 
-	err = MVCCDelete(engine, nil, testKey1, makeTS(3, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- Read the latest version which should be deleted.
+	assert(not db:get(test_key1, makets(0, 4)))	
+	-- Read the old version which should still exist.
+	local v = db:get(test_key1, makets(0, 2))
+	assert(v == value1)
+	local v = db:get(test_key1, makets(lamport.MAX_HLC_LOGICAL_CLOCK, 2))
+	assert(v == value1)
+end, create_db, destroy_db)
 
-	// Read the latest version which should be deleted.
-	value, err = MVCCGet(engine, testKey1, makeTS(4, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value != nil {
-		t.Fatal("the value should be empty")
-	}
+test("TestMVCCDeleteMissingKey", function (db)
+	db:delete(test_key1, makets(1, 0))
+	-- Verify nothing is written to the engine.
+	assert(not db.db:get(test_key1))
+end, create_db, destroy_db)
 
-	// Read the old version which should still exist.
-	for _, logical := range []int32{0, math.MaxInt32} {
-		value, err = MVCCGet(engine, testKey1, makeTS(2, logical), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if value == nil {
-			t.Fatal("the value should not be empty")
-		}
-	}
-}
+test("TestMVCCGetAndDeleteInTxn", function (db)
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	local v = db:get(test_key1, makets(0, 2), txn1)
+	assert(v == value1)
+	-- delete value
+	db:delete(test_key1, makets(0, 3), txn1)
+	-- Read the latest version which should be deleted.
+	assert(not db:get(test_key1, makets(0, 4), txn1))
+	-- Read the old version which shouldn't exist, as within a
+	-- transaction, we delete previous values.
+	assert(not db:get(test_key1, makets(0, 2)))
+end, create_db, destroy_db)
 
-func TestMVCCDeleteMissingKey(t *testing.T) {
-	engine := NewInMem(proto.Attributes{}, 1<<20)
-	if err := MVCCDelete(engine, nil, testKey1, makeTS(1, 0), nil); err != nil {
-		t.Fatal(err)
-	}
-	// Verify nothing is written to the engine.
-	if val, err := engine.Get(MVCCEncodeKey(testKey1)); err != nil || val != nil {
-		t.Fatalf("expected no mvcc metadata after delete of a missing key; got %q: %s", val, err)
-	}
-}
+test("TestMVCCGetWriteIntentError", function (db)
+	local ok, r 
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	ok, r = pcall(db.get, db, test_key1, makets(0, 1))
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists', 
+		"cannot read the value of a write intent without TxnID")
+	ok, r = pcall(db.get, db, test_key1, makets(0, 1), txn2)
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists', 
+		"cannot read the value of a write intent from a different TxnID")
+	local v = db:get(test_key1, makets(0, 2), txn1)
+	assert(v == value1, "in same txn, should get correct value")
+end, create_db, destroy_db)
 
-func TestMVCCGetAndDeleteInTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, txn1)
-	value, err := MVCCGet(engine, testKey1, makeTS(2, 0), txn1)
-	if err != nil {
-		t.Fatal(err)
+test("TestMVCCScan", function (db)
+	local fixtures, results, p, len = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key1, value4, makets(0, 2)},
+		{test_key2, value2, makets(0, 1)},
+		{test_key2, value3, makets(0, 3)},
+		{test_key3, value3, makets(0, 1)},
+		{test_key3, value2, makets(0, 4)},
+		{test_key4, value4, makets(0, 1)},
+		{test_key4, value1, makets(0, 5)},
 	}
-	if value == nil {
-		t.Fatal("the value should not be empty")
-	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	err = MVCCDelete(engine, nil, testKey1, makeTS(3, 0), txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1))
+	assert(#results == 2 and 
+		ffi.string(unpack(results[1])) == test_key2 and
+		ffi.string(unpack(results[2])) == test_key3 and
+		ffi.string(unpack(results[1], 3)) == value2 and
+		ffi.string(unpack(results[2], 3)) == value3)
 
-	// Read the latest version which should be deleted.
-	value, err = MVCCGet(engine, testKey1, makeTS(4, 0), txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value != nil {
-		t.Fatal("the value should be empty")
-	}
+	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 4))
+	assert(#results == 2 and 
+		ffi.string(unpack(results[1])) == test_key2 and
+		ffi.string(unpack(results[2])) == test_key3 and
+		ffi.string(unpack(results[1], 3)) == value3 and
+		ffi.string(unpack(results[2], 3)) == value2)
 
-	// Read the old version which shouldn't exist, as within a
-	// transaction, we delete previous values.
-	value, err = MVCCGet(engine, testKey1, makeTS(2, 0), nil)
-	if value != nil || err != nil {
-		t.Fatalf("expected value and err to be nil: %+v, %v", value, err)
-	}
-}
+	p, len = key.MAX:as_slice()
+	results = db:scan(test_key4, #test_key4, p, len, 0, makets(0, 1))
+	assert(#results == 1 and 
+		ffi.string(unpack(results[1])) == test_key4 and
+		ffi.string(unpack(results[1], 3)) == value4, "the value should not be empty")
 
-func TestMVCCGetWriteIntentError(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- why original cockroach test do this?
+	db:get(test_key1, makets(0, 1), maketxn(txn2, makets(0, 1)))
 
-	_, err = MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if err == nil {
-		t.Fatal("cannot read the value of a write intent without TxnID")
-	}
+	p, len = key.MIN:as_slice()
+	results = db:scan(p, len, test_key2, #test_key2, 0, makets(0, 1))
+	assert(#results == 1 and 
+		ffi.string(unpack(results[1])) == test_key1 and
+		ffi.string(unpack(results[1], 3)) == value1, "the value should not be empty")
 
-	_, err = MVCCGet(engine, testKey1, makeTS(1, 0), txn2)
-	if err == nil {
-		t.Fatal("cannot read the value of a write intent from a different TxnID")
-	}
-}
+end, create_db, destroy_db)
 
-func TestMVCCScan(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey1, makeTS(2, 0), value4, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(3, 0), value3, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(1, 0), value3, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(4, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
-	err = MVCCPut(engine, nil, testKey4, makeTS(5, 0), value1, nil)
+test("TestMVCCScanMaxNum", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key2, value2, makets(0, 1)},
+		{test_key3, value3, makets(0, 1)},
+		{test_key4, value4, makets(0, 1)},
+	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	kvs, err := MVCCScan(engine, testKey2, testKey4, 0, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kvs) != 2 ||
-		!bytes.Equal(kvs[0].Key, testKey2) ||
-		!bytes.Equal(kvs[1].Key, testKey3) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value2.Bytes) ||
-		!bytes.Equal(kvs[1].Value.Bytes, value3.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 1, makets(0, 1))
+	assert(#results == 1 and 
+		ffi.string(unpack(results[1])) == test_key2 and
+		ffi.string(unpack(results[1], 3)) == value2, "the value should not be empty")
 
-	kvs, err = MVCCScan(engine, testKey2, testKey4, 0, makeTS(4, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kvs) != 2 ||
-		!bytes.Equal(kvs[0].Key, testKey2) ||
-		!bytes.Equal(kvs[1].Key, testKey3) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value3.Bytes) ||
-		!bytes.Equal(kvs[1].Value.Bytes, value2.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+end, create_db, destroy_db)
 
-	kvs, err = MVCCScan(engine, testKey4, KeyMax, 0, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
+test("TestMVCCScanWithKeyPrefix", function (db)
+	-- Let's say you have:
+	-- a
+	-- a<T=2>
+	-- a<T=1>
+	-- aa
+	-- aa<T=3>
+	-- aa<T=2>
+	-- b
+	-- b<T=1>
+	-- In this case, if we scan from "a"-"b", we wish to skip
+	-- a<T=2> and a<T=1> and find "aa'.
+	local fixtures, results = {
+		{"/a", value1, makets(0, 1)},
+		{"/a", value2, makets(0, 2)},
+		{"/aa", value2, makets(0, 2)},
+		{"/aa", value3, makets(0, 3)},
+		{"/b", value3, makets(0, 1)},
 	}
-	if len(kvs) != 1 ||
-		!bytes.Equal(kvs[0].Key, testKey4) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value4.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
+	results = db:scan("/a", 2, "/b", 2, 0, makets(0, 2))
 
-	_, err = MVCCGet(engine, testKey1, makeTS(1, 0), txn2)
-	kvs, err = MVCCScan(engine, KeyMin, testKey2, 0, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kvs) != 1 ||
-		!bytes.Equal(kvs[0].Key, testKey1) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value1.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
-}
+	assert(#results == 2 and 
+		ffi.string(unpack(results[1])) == "/a" and
+		ffi.string(unpack(results[2])) == "/aa" and
+		ffi.string(unpack(results[1], 3)) == value2 and
+		ffi.string(unpack(results[2], 3)) == value2)
 
-func TestMVCCScanMaxNum(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(1, 0), value3, nil)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
+end, create_db, destroy_db)
 
-	kvs, err := MVCCScan(engine, testKey2, testKey4, 1, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
+test("TestMVCCScanInTxn", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key2, value2, makets(0, 1)},
+		{test_key3, value3, makets(0, 1), txn1},
+		{test_key4, value4, makets(0, 1)},
 	}
-	if len(kvs) != 1 ||
-		!bytes.Equal(kvs[0].Key, testKey2) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value2.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
-}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-func TestMVCCScanWithKeyPrefix(t *testing.T) {
-	engine := createTestEngine()
-	// Let's say you have:
-	// a
-	// a<T=2>
-	// a<T=1>
-	// aa
-	// aa<T=3>
-	// aa<T=2>
-	// b
-	// b<T=5>
-	// In this case, if we scan from "a"-"b", we wish to skip
-	// a<T=2> and a<T=1> and find "aa'.
-	err := MVCCPut(engine, nil, proto.Key("/a"), makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, proto.Key("/a"), makeTS(2, 0), value2, nil)
-	err = MVCCPut(engine, nil, proto.Key("/aa"), makeTS(2, 0), value2, nil)
-	err = MVCCPut(engine, nil, proto.Key("/aa"), makeTS(3, 0), value3, nil)
-	err = MVCCPut(engine, nil, proto.Key("/b"), makeTS(1, 0), value3, nil)
+	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1), txn1)
+	assert(#results == 2 and 
+		ffi.string(unpack(results[1])) == test_key2 and
+		ffi.string(unpack(results[2])) == test_key3 and
+		ffi.string(unpack(results[1], 3)) == value2 and
+		ffi.string(unpack(results[2], 3)) == value3, 
+		"the value should not be empty")
 
-	kvs, err := MVCCScan(engine, proto.Key("/a"), proto.Key("/b"), 0, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kvs) != 2 ||
-		!bytes.Equal(kvs[0].Key, proto.Key("/a")) ||
-		!bytes.Equal(kvs[1].Key, proto.Key("/aa")) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value2.Bytes) ||
-		!bytes.Equal(kvs[1].Value.Bytes, value2.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
-}
+	local ok, r = pcall(db.scan, db, test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1))
+	assert(not ok and r:is('mvcc') and r.args[1] == 'txn_exists')
+end, create_db, destroy_db)
 
-func TestMVCCScanInTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(1, 0), value3, txn1)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
+-- TestMVCCIterateCommitted writes several values, some as intents
+-- and verifies that IterateCommitted sees only the committed versions.
+test("TestMVCCIterateCommitted", function (db)
+	local ts1 = makets(0, 1)
+	local ts2 = makets(0, 2)
+	local ts3 = makets(0, 3)
+	local ts4 = makets(0, 4)
+	local ts5 = makets(0, 5)
+	local ts6 = makets(0, 6)
 
-	kvs, err := MVCCScan(engine, testKey2, testKey4, 0, makeTS(1, 0), txn1)
-	if err != nil {
-		t.Fatal(err)
+	local fixtures, results = {
+		{test_key1, value1, ts1},
+		{test_key1, value2, ts2, txn2},
+		{test_key2, value1, ts3},
+		{test_key2, value2, ts4},
+		{test_key3, value3, ts5, txn2},
+		{test_key4, value4, ts6},
 	}
-	if len(kvs) != 2 ||
-		!bytes.Equal(kvs[0].Key, testKey2) ||
-		!bytes.Equal(kvs[1].Key, testKey3) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value2.Bytes) ||
-		!bytes.Equal(kvs[1].Value.Bytes, value3.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+	local test_key4_next = test_key4..string.char(0)
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	kvs, err = MVCCScan(engine, testKey2, testKey4, 0, makeTS(1, 0), nil)
-	if err == nil {
-		t.Fatal("expected error on uncommitted write intent")
-	}
-}
+	local expects, count = {
+		{test_key1, value1, ts1},
+		{test_key2, value2, ts4},
+		{test_key4, value4, ts6},
+	}, 0
+	db:scan_committed(test_key1, #test_key1, test_key4_next, #test_key4_next, function (k, kl, v, vl, ts)
+		count = count + 1
+		-- print(count, ffi.string(k, kl), ffi.string(v, vl), ts)
+		assert(util.table_equals(expects[count], {ffi.string(k, kl), ffi.string(v, vl), ts}))
+	end)
+	assert(count == #expects)
+end, create_db, destroy_db)
 
-// TestMVCCIterateCommitted writes several values, some as intents
-// and verifies that IterateCommitted sees only the committed versions.
-func TestMVCCIterateCommitted(t *testing.T) {
-	engine := createTestEngine()
-	ts1 := makeTS(1, 0)
-	ts2 := makeTS(2, 0)
-	ts3 := makeTS(3, 0)
-	ts4 := makeTS(4, 0)
-	ts5 := makeTS(5, 0)
-	ts6 := makeTS(6, 0)
-	if err := MVCCPut(engine, nil, testKey1, ts1, value1, nil); err != nil {
-		t.Fatal(err)
+test("TestMVCCDeleteRange", function (db) 
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key2, value2, makets(0, 1)},
+		{test_key3, value3, makets(0, 1)},
+		{test_key4, value4, makets(0, 1)},
 	}
-	if err := MVCCPut(engine, nil, testKey1, ts2, value2, txn1); err != nil {
-		t.Fatal(err)
-	}
-	if err := MVCCPut(engine, nil, testKey2, ts3, value1, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := MVCCPut(engine, nil, testKey2, ts4, value2, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := MVCCPut(engine, nil, testKey3, ts5, value3, txn2); err != nil {
-		t.Fatal(err)
-	}
-	if err := MVCCPut(engine, nil, testKey4, ts6, value4, nil); err != nil {
-		t.Fatal(err)
-	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	kvs := []proto.KeyValue(nil)
-	if err := MVCCIterateCommitted(engine, testKey1, testKey4.Next(), func(kv proto.KeyValue) (bool, error) {
-		kvs = append(kvs, kv)
-		return false, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	local n
+	n = db:delete_range(test_key2, test_key4, 0, makets(0, 2))
+	assert(n == 2)
 
-	expKVs := []proto.KeyValue{
-		{Key: testKey1, Value: proto.Value{Bytes: value1.Bytes, Timestamp: &ts1}},
-		{Key: testKey2, Value: proto.Value{Bytes: value2.Bytes, Timestamp: &ts4}},
-		{Key: testKey4, Value: proto.Value{Bytes: value4.Bytes, Timestamp: &ts6}},
-	}
-	if !reflect.DeepEqual(kvs, expKVs) {
-		t.Errorf("expected key values equal %v != %v", kvs, expKVs)
-	}
-}
+	local mink, minkl = key.MIN:as_slice()
+	local maxk, maxkl = key.MAX:as_slice()
+	results = db:scan(mink, minkl, maxk, maxkl, 0, makets(0, 2))
+	assert(#results == 2 and 
+		ffi.string(unpack(results[1])) == test_key1 and
+		ffi.string(unpack(results[2])) == test_key4 and
+		ffi.string(unpack(results[1], 3)) == value1 and
+		ffi.string(unpack(results[2], 3)) == value4, 
+		"unremoved value should appear")
 
-func TestMVCCDeleteRange(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(1, 0), value3, nil)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
+	n = db:rawdelete_range(test_key4, #test_key4, maxk, maxkl, 0, makets(0, 2))
+	assert(n == 1)
 
-	num, err := MVCCDeleteRange(engine, nil, testKey2, testKey4, 0, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if num != 2 {
-		t.Fatal("the value should not be empty")
-	}
-	kvs, _ := MVCCScan(engine, KeyMin, KeyMax, 0, makeTS(2, 0), nil)
-	if len(kvs) != 2 ||
-		!bytes.Equal(kvs[0].Key, testKey1) ||
-		!bytes.Equal(kvs[1].Key, testKey4) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value1.Bytes) ||
-		!bytes.Equal(kvs[1].Value.Bytes, value4.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+	results = db:scan(mink, minkl, maxk, maxkl, 0, makets(0, 2))
+	assert(#results == 1 and 
+		ffi.string(unpack(results[1])) == test_key1 and
+		ffi.string(unpack(results[1], 3)) == value1 and
+		"unremoved value should appear")
 
-	num, err = MVCCDeleteRange(engine, nil, testKey4, KeyMax, 0, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if num != 1 {
-		t.Fatal("the value should not be empty")
-	}
-	kvs, _ = MVCCScan(engine, KeyMin, KeyMax, 0, makeTS(2, 0), nil)
-	if len(kvs) != 1 ||
-		!bytes.Equal(kvs[0].Key, testKey1) ||
-		!bytes.Equal(kvs[0].Value.Bytes, value1.Bytes) {
-		t.Fatal("the value should not be empty")
-	}
+	n = db:rawdelete_range(mink, minkl, test_key2, #test_key2, 0, makets(0, 2))
+	results = db:scan(mink, minkl, maxk, maxkl, 0, makets(0, 2))
+	assert(#results == 0, "value should not appear")
+end, create_db, destroy_db)
 
-	num, err = MVCCDeleteRange(engine, nil, KeyMin, testKey2, 0, makeTS(2, 0), nil)
-	if err != nil {
-		t.Fatal(err)
+test("TestMVCCDeleteRangeFailed", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key2, value2, makets(0, 1), txn1},
+		{test_key3, value3, makets(0, 1), txn1},
+		{test_key4, value4, makets(0, 1)},
 	}
-	if num != 1 {
-		t.Fatal("the value should not be empty")
-	}
-	kvs, _ = MVCCScan(engine, KeyMin, KeyMax, 0, makeTS(2, 0), nil)
-	if len(kvs) != 0 {
-		t.Fatal("the value should be empty")
-	}
-}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-func TestMVCCDeleteRangeFailed(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, txn1)
-	err = MVCCPut(engine, nil, testKey3, makeTS(1, 0), value3, txn1)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
+	local ok, r
+	ok, r = pcall(db.delete_range, db, test_key2, test_key4, 0, makets(0, 1))
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	
+	db:delete_range(test_key2, test_key4, 0, makets(0, 1), txn1)
+end, create_db, destroy_db)
 
-	_, err = MVCCDeleteRange(engine, nil, testKey2, testKey4, 0, makeTS(1, 0), nil)
-	if err == nil {
-		t.Fatal("expected error on uncommitted write intent")
+test("TestMVCCDeleteRangeConcurrentTxn", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1)},
+		{test_key2, value2, makets(0, 1), txn1},
+		{test_key3, value3, makets(0, 2), txn2}, -- it works for makets(0, 1). why cockroach test uses 0,2 ?
+		{test_key4, value4, makets(0, 1)},
 	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	_, err = MVCCDeleteRange(engine, nil, testKey2, testKey4, 0, makeTS(1, 0), txn1)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
+	local ok, r
+	ok, r = pcall(db.delete_range, db, test_key2, test_key4, 0, makets(0, 1), txn1)
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+end, create_db, destroy_db)
 
-func TestMVCCDeleteRangeConcurrentTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, nil)
-	err = MVCCPut(engine, nil, testKey2, makeTS(1, 0), value2, txn1)
-	err = MVCCPut(engine, nil, testKey3, makeTS(2, 0), value3, txn2)
-	err = MVCCPut(engine, nil, testKey4, makeTS(1, 0), value4, nil)
+test("TestMVCCConditionalPut", function (db)
+	local ok, r, v
+	ok, r = db:cas(test_key1, "", value1, makets(1, 0))
+	assert(ok and (not r))
+	v = db:get(test_key1, makets(1, 0))
+	assert(v == value1)
+	-- Conditional put expecting wrong value2, will fail.
+	ok, r = db:cas(test_key1, value2, value3, makets(0, 1))
+	assert((not ok) and r == value1)
+	-- move to empty value will success
+	ok, r = db:cas(test_key1, value1, "", makets(0, 1))
+	assert(ok and r == value1)
+end, create_db, destroy_db)
 
-	_, err = MVCCDeleteRange(engine, nil, testKey2, testKey4, 0, makeTS(1, 0), txn1)
-	if err == nil {
-		t.Fatal("expected error on uncommitted write intent")
-	}
-}
+test("TestMVCCResolveTxn", function (db)
+	local v
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	v = db:get(test_key1, makets(0, 1), txn1)
+	assert(v == value1)
+	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	-- Resolve will write with txn1's timestamp which is 1, 0
+	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn1_commit)
+	-- now non-transactional get can see the value put at 1, 0
+	v = db:get(test_key1, makets(0, 1))
+	assert(v == value1)
+end, create_db, destroy_db)
 
-func TestMVCCConditionalPut(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value1, &value2, nil)
-	if err == nil {
-		t.Fatal("expected error on key not exists")
-	}
-	switch e := err.(type) {
-	default:
-		t.Fatalf("unexpected error %T", e)
-	case *proto.ConditionFailedError:
-		if e.ActualValue != nil {
-			t.Fatalf("expected missing actual value: %v", e.ActualValue)
-		}
-	}
+test("TestMVCCAbortTxn", function (db)
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn1_abort)
 
-	// Verify the difference between missing value and empty value.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value1, &valueEmpty, nil)
-	if err == nil {
-		t.Fatal("expected error on key not exists")
-	}
-	switch e := err.(type) {
-	default:
-		t.Fatalf("unexpected error %T", e)
-	case *proto.ConditionFailedError:
-		if e.ActualValue != nil {
-			t.Fatalf("expected missing actual value: %v", e.ActualValue)
-		}
-	}
+	assert(not db:get(test_key1, makets(1, 0)), "value should be empty")
+	local meta_key = mvcc.make_key(test_key1, #test_key1)
+	local v, vl = db.db:rawget(meta_key, #meta_key)
+	assert(not db.db:get(meta_key), "expected no more metadata")
+end, create_db, destroy_db)
 
-	// Do a conditional put with expectation that the value is completely missing; will succeed.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value1, nil, nil)
-	if err != nil {
-		t.Fatalf("expected success with condition that key doesn't yet exist: %v", err)
+test("TestMVCCAbortTxnWithPreviousVersion", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(1, 0)},
+		{test_key1, value2, makets(0, 1)},
+		{test_key1, value3, makets(0, 2), txn1},
 	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	// Another conditional put expecting value missing will fail, now that value1 is written.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value1, nil, nil)
-	if err == nil {
-		t.Fatal("expected error on key already exists")
-	}
-	switch e := err.(type) {
-	default:
-		t.Fatalf("unexpected error %T", e)
-	case *proto.ConditionFailedError:
-		if !bytes.Equal(e.ActualValue.Bytes, value1.Bytes) {
-			t.Fatalf("the value %s in get result does not match the value %s in request",
-				e.ActualValue.Bytes, value1.Bytes)
-		}
-	}
+	db:resolve_txn(test_key1, #test_key1, makets(0, 2), txn1_abort)
 
-	// Conditional put expecting wrong value2, will fail.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value1, &value2, nil)
-	if err == nil {
-		t.Fatal("expected error on key does not match")
-	}
-	switch e := err.(type) {
-	default:
-		t.Fatalf("unexpected error %T", e)
-	case *proto.ConditionFailedError:
-		if !bytes.Equal(e.ActualValue.Bytes, value1.Bytes) {
-			t.Fatalf("the value %s in get result does not match the value %s in request",
-				e.ActualValue.Bytes, value1.Bytes)
-		}
-	}
+	local meta_key = mvcc.make_key(test_key1, #test_key1)
+	local meta, ml = db.db:rawget(meta_key, #meta_key)
+	assert(meta ~= ffi.NULL and ml == ffi.sizeof('luact_mvcc_metadata_t'))
 
-	// Move to a empty value. Will succeed.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), valueEmpty, &value1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Now move to value2 from expected empty value.
-	err = MVCCConditionalPut(engine, nil, testKey1, makeTS(0, 1), value2, &valueEmpty, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Verify we get value2 as expected.
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if !bytes.Equal(value2.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-}
+	local v, ts = db:get(test_key1, makets(0, 3))
+	assert(v == value2 and ts == makets(0, 1))
+end, create_db, destroy_db)
 
-func TestMVCCResolveTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), txn1)
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
+test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(1, 0), txn1}, -- ok. initial write
+		{test_key1, value2, makets(0, 1), txn1_1}, -- ok, greater ts and n_retry
+		{test_key1, value1, makets(1, 0), txn1_1}, -- should ignore. smaller ts
+		{test_key1, value1, makets(0, 1), txn1}, -- should ignore. smaller n_retry
+		{test_key1, value3, makets(0, 1), txn1_1}, -- ok. greater n_retry, same ts
 	}
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-	// Resolve will write with txn1's timestamp which is 0,1.
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(0, 1), txn1Commit)
-	if err != nil {
-		t.Fatal(err)
-	}
+	local ok, r, v, ts
+	-- Resolve the txn.
+	db:resolve_txn(test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
+	-- Now try writing an earlier intent--should get write too old error.
+	ok, r = pcall(db.put, db, test_key1, value2, makets(1, 0), txn2)
+	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+	-- Attempt to read older timestamp; should fail.
+	v = db:get(test_key1, makets(0, 0))
+	assert(not v)
+	-- Read at correct timestamp.
+	v, ts = db:get(test_key1, makets(0, 2))
+	assert(v == value3 and ts == makets(0, 2))
+end, create_db, destroy_db)
 
-	value, err = MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-}
-
-func TestMVCCAbortTxn(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(0, 1), txn1Abort)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	value, err := MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if err != nil || value != nil {
-		t.Fatalf("the value should be empty: %s", err)
-	}
-	meta, err := engine.Get(MVCCEncodeKey(testKey1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(meta) != 0 {
-		t.Fatalf("expected no more MVCCMetadata")
-	}
-}
-
-func TestMVCCAbortTxnWithPreviousVersion(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, nil)
-	err = MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, nil)
-	err = MVCCPut(engine, nil, testKey1, makeTS(2, 0), value3, txn1)
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(2, 0), txn1Abort)
-	if err := engine.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	meta, err := engine.Get(MVCCEncodeKey(testKey1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(meta) == 0 {
-		t.Fatalf("expected the MVCCMetadata")
-	}
-
-	value, err := MVCCGet(engine, testKey1, makeTS(3, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !value.Timestamp.Equal(makeTS(1, 0)) {
-		t.Fatalf("expected timestamp %+v == %+v", value.Timestamp, makeTS(1, 0))
-	}
-	if !bytes.Equal(value2.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value.Bytes, value2.Bytes)
-	}
-}
-
-func TestMVCCWriteWithDiffTimestampsAndEpochs(t *testing.T) {
-	engine := createTestEngine()
-	// Start with epoch 1.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
-		t.Fatal(err)
-	}
-	// Now write with greater timestamp and epoch 2.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, txn1e2); err != nil {
-		t.Fatal(err)
-	}
-	// Try a write with an earlier timestamp; this is just ignored.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1e2); err != nil {
-		t.Fatal(err)
-	}
-	// Try a write with an earlier epoch; again ignored.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value1, txn1); err != nil {
-		t.Fatal(err)
-	}
-	// Try a write with different value using both later timestamp and epoch.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value3, txn1e2); err != nil {
-		t.Fatal(err)
-	}
-	// Resolve the intent.
-	if err := MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(1, 0), makeTxn(txn1e2Commit, makeTS(1, 0))); err != nil {
-		t.Fatal(err)
-	}
-	// Now try writing an earlier intent--should get write too old error.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value2, txn2); err == nil {
-		t.Fatal("expected write too old error")
-	}
-	// Attempt to read older timestamp; should fail.
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 0), nil)
-	if value != nil || err != nil {
-		t.Errorf("expected value nil, err nil; got %+v, %v", value, err)
-	}
-	// Read at correct timestamp.
-	value, err = MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !value.Timestamp.Equal(makeTS(1, 0)) {
-		t.Fatalf("expected timestamp %+v == %+v", value.Timestamp, makeTS(1, 0))
-	}
-	if !bytes.Equal(value3.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value3.Bytes, value.Bytes)
-	}
-}
-
-// TestMVCCReadWithDiffEpochs writes a value first using epoch 1, then
-// reads using epoch 2 to verify that values written during different
-// transaction epochs are not visible.
-func TestMVCCReadWithDiffEpochs(t *testing.T) {
-	engine := createTestEngine()
-	// Write initial value wihtout a txn.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Now write using txn1, epoch 1.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, txn1); err != nil {
-		t.Fatal(err)
-	}
-	// Try reading using different txns & epochs.
-	testCases := []struct {
-		txn      *proto.Transaction
-		expValue *proto.Value
-		expErr   bool
-	}{
-		// No transaction; should see error.
+-- TestMVCCReadWithDiffEpochs writes a value first using epoch 1, then
+-- reads using epoch 2 to verify that values written during different
+-- transaction epochs are not visible.
+test("TestMVCCReadWithDiffEpochs", function (db)
+	-- Write initial value wihtout a txn.
+	db:put(test_key1, value1, makets(1, 0))
+	db:put(test_key1, value2, makets(0, 1), txn1)
+	-- Try reading using different txns & epochs.
+	local fixtures = {
+		-- No transaction; should see error.
 		{nil, nil, true},
-		// Txn1, epoch 1; should see new value2.
-		{txn1, &value2, false},
-		// Txn1, epoch 2; should see original value1.
-		{txn1e2, &value1, false},
-		// Txn2; should see error.
+		-- Txn1, no retry; should see new value2.
+		{txn1, value2, false},
+		-- Txn1, retry = 1; should see original value1.
+		{txn1_1, value1, false},
+		-- Txn2; should see error.
 		{txn2, nil, true},
 	}
-	for i, test := range testCases {
-		value, err := MVCCGet(engine, testKey1, makeTS(2, 0), test.txn)
-		if test.expErr {
-			if err == nil {
-				t.Errorf("test %d: unexpected success", i)
-			} else if _, ok := err.(*proto.WriteIntentError); !ok {
-				t.Errorf("test %d: expected write intent error; got %v", i, err)
-			}
-		} else if err != nil || value == nil || !bytes.Equal(test.expValue.Bytes, value.Bytes) {
-			t.Errorf("test %d: expected value %q, err nil; got %+v, %v", i, test.expValue.Bytes, value, err)
-		}
-	}
-}
+	for _, test in ipairs(fixtures) do
+		local ok, v = pcall(db.get, db, test_key1, makets(0, 2), test[1])
+		if test[3] then
+			assert((not ok) and v:is('mvcc') and v.args[1] == 'txn_exists')
+		else
+			assert(v == test[2])
+		end
+	end
+end, create_db, destroy_db)
 
-// TestMVCCReadWithPushedTimestamp verifies that a read for a value
-// written by the transaction, but then subsequently pushed, can still
-// be read by the txn at the later timestamp, even if an earlier
-// timestamp is specified. This happens when a txn's intents are
-// resolved by other actors; the intents shouldn't become invisible
-// to pushed txn.
-func TestMVCCReadWithPushedTimestamp(t *testing.T) {
-	engine := createTestEngine()
-	// Start with epoch 1.
-	if err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
-		t.Fatal(err)
-	}
-	// Resolve the intent, pushing its timestamp forward.
-	if err := MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(0, 1), makeTxn(txn1, makeTS(1, 0))); err != nil {
-		t.Fatal(err)
-	}
-	// Attempt to read using naive txn's previous timestamp.
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), txn1)
-	if err != nil || value == nil || !bytes.Equal(value.Bytes, value1.Bytes) {
-		t.Errorf("expected value %q, err nil; got %+v, %v", value1.Bytes, value, err)
-	}
-}
+-- TestMVCCReadWithPushedTimestamp verifies that a read for a value
+-- written by the transaction, but then subsequently pushed, can still
+-- be read by the txn at the later timestamp, even if an earlier
+-- timestamp is specified. This happens when a txn's intents are
+-- resolved by other actors; the intents shouldn't become invisible
+-- to pushed txn.
+test("TestMVCCReadWithPushedTimestamp", function(db)
+	-- Start with epoch 1.
+	db:put(test_key1, value1, makets(1, 0), txn1)
+	db:resolve_txn(test_key1, #test_key1, makets(1, 0), maketxn(txn1, makets(0, 1)))
+	-- Attempt to read using naive txn's previous timestamp.
+	local v = db:get(test_key1, makets(1, 0), txn1)
+	assert(v == value1)
+end, create_db, destroy_db)
 
-func TestMVCCResolveWithDiffEpochs(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	err = MVCCPut(engine, nil, testKey2, makeTS(0, 1), value2, txn1e2)
-	num, err := MVCCResolveWriteIntentRange(engine, nil, testKey1, testKey2.Next(), 2, makeTS(0, 1), txn1e2Commit)
-	if num != 2 {
-		t.Errorf("expected 2 rows resolved; got %d", num)
-	}
+test("TestMVCCResolveWithDiffEpochs", function (db)
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:put(test_key2, value2, makets(0, 1), txn1_1)
+	local test_key2_next = test_key2..string.char(0)
+	local num = db:end_txn(test_key1, #test_key1, test_key2_next, #test_key2_next, 2, makets(0, 1), txn1_1_commit)
+	assert(num == 2)
 
-	// Verify key1 is empty, as resolution with epoch 2 would have
-	// aborted the epoch 1 intent.
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if value != nil || err != nil {
-		t.Errorf("expected value nil, err nil; got %+v, %v", value, err)
-	}
+	-- Verify key1 is empty, as resolution with epoch 2 would have
+	-- aborted the epoch 1 intent.
+	assert(not db:get(test_key1, makets(0, 1)))
 
-	// Key2 should be committed.
-	value, err = MVCCGet(engine, testKey2, makeTS(0, 1), nil)
-	if !bytes.Equal(value2.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value2.Bytes, value.Bytes)
-	}
-}
+	-- Key2 should be committed.
+	local v = db:get(test_key2, makets(0, 1))
+	assert(v == value2)
+end, create_db, destroy_db)
 
-func TestMVCCResolveWithUpdatedTimestamp(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	value, err := MVCCGet(engine, testKey1, makeTS(1, 0), txn1)
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
+test("TestMVCCResolveWithUpdatedTimestamp", function (db)
+	local v
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	v = db:get(test_key1, makets(1, 1), txn1)
+	assert(v == value1)
 
-	// Resolve with a higher commit timestamp -- this should rewrite the
-	// intent when making it permanent.
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(1, 0), makeTxn(txn1Commit, makeTS(1, 0)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- Resolve with a higher commit timestamp -- this should rewrite the
+	-- intent when making it permanent.
+	db:resolve_txn(test_key1, #test_key1, makets(1, 1), maketxn(txn1_commit, makets(1, 1)))
 
-	if value, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil); value != nil || err != nil {
-		t.Fatalf("expected both value and err to be nil: %+v, %v", value, err)
-	}
+	v = db:get(test_key1, makets(0, 1))
+	assert(not v)
 
-	value, err = MVCCGet(engine, testKey1, makeTS(1, 0), nil)
-	if !value.Timestamp.Equal(makeTS(1, 0)) {
-		t.Fatalf("expected timestamp %+v == %+v", value.Timestamp, makeTS(1, 0))
-	}
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-}
+	v = db:get(test_key1, makets(1, 1))	
+	assert(v == value1)
+end, create_db, destroy_db)
 
-func TestMVCCResolveWithPushedTimestamp(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	value, err := MVCCGet(engine, testKey1, makeTS(1, 0), txn1)
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
+test("TestMVCCResolveWithPushedTimestamp", function (db)
+	local ok, v
+	db:put(test_key1, value1, makets(0, 1), txn1)
+	v = db:get(test_key1, makets(0, 1), txn1)
+	assert(v == value1)
 
-	// Resolve with a higher commit timestamp, but with still-pending transaction.
-	// This represents a straightforward push (i.e. from a read/write conflict).
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(1, 0), makeTxn(txn1, makeTS(1, 0)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- Resolve with a higher commit timestamp, but with still-pending transaction.
+	-- This represents a straightforward push (i.e. from a read/write conflict).
+	db:resolve_txn(test_key1, #test_key1, makets(1, 1), maketxn(txn1, makets(1, 1))[0])
 
-	if value, err := MVCCGet(engine, testKey1, makeTS(1, 0), nil); value != nil || err == nil {
-		t.Fatalf("expected both value nil and err to be a writeIntentError: %+v", value)
-	}
+	ok, v = pcall(db.get, db, test_key1, makets(1, 1))
+	-- because test_key1 is not committed, just pushed, so read latest version without txn will be failure
+	assert((not ok) and v:is('mvcc') and v.args[1] == 'txn_exists') 
 
-	// Can still fetch the value using txn1.
-	value, err = MVCCGet(engine, testKey1, makeTS(1, 0), txn1)
-	if !value.Timestamp.Equal(makeTS(1, 0)) {
-		t.Fatalf("expected timestamp %+v == %+v", value.Timestamp, makeTS(1, 0))
-	}
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
-}
+	-- Can still fetch the value using txn1.
+	v = db:get(test_key1, makets(1, 1), txn1)	
+	assert(v == value1)
+end, create_db, destroy_db)
 
-func TestMVCCResolveTxnNoOps(t *testing.T) {
-	engine := createTestEngine()
+test("TestMVCCResolveTxnNoOps", function (db)
+	-- Resolve a non existent key; noop.
+	local ok, r = pcall(db.resolve_txn, db, test_key1, #test_key1, makets(0, 1), txn1_commit)
+	assert((not ok) and r:is('invalid'))
 
-	// Resolve a non existent key; noop.
-	err := MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(0, 1), txn1Commit)
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- Add key and resolve despite there being no intent.
+	db:put(test_key1, value1, makets(0, 1))
+	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn2_commit)
 
-	// Add key and resolve despite there being no intent.
-	err = MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, nil)
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(0, 1), txn2Commit)
-	if err != nil {
-		t.Fatal(err)
-	}
+	-- Write intent and resolve with different txn.
+	db:put(test_key1, value2, makets(0, 1), txn1)
+	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn2_commit)
+end, create_db, destroy_db)
 
-	// Write intent and resolve with different txn.
-	err = MVCCPut(engine, nil, testKey1, makeTS(1, 0), value2, txn1)
-	err = MVCCResolveWriteIntent(engine, nil, testKey1, makeTS(1, 0), txn2Commit)
-	if err != nil {
-		t.Fatal(err)
+test("TestMVCCResolveTxnRange", function (db)
+	local fixtures, results = {
+		{test_key1, value1, makets(0, 1), txn1},
+		{test_key2, value2, makets(0, 1), nil},
+		{test_key3, value3, makets(0, 1), txn2},
+		{test_key4, value4, makets(0, 1), txn1},
 	}
-}
+	local test_key4_next = test_key4..string.char(0)
+	for _, data in ipairs(fixtures) do
+		db:put(unpack(data))
+	end
 
-func TestMVCCResolveTxnRange(t *testing.T) {
-	engine := createTestEngine()
-	err := MVCCPut(engine, nil, testKey1, makeTS(0, 1), value1, txn1)
-	err = MVCCPut(engine, nil, testKey2, makeTS(0, 1), value2, nil)
-	err = MVCCPut(engine, nil, testKey3, makeTS(0, 1), value3, txn2)
-	err = MVCCPut(engine, nil, testKey4, makeTS(0, 1), value4, txn1)
+	local num = db:end_txn(test_key1, #test_key1, test_key4_next, #test_key4_next, 0, makets(0, 1), txn1_commit)
+	assert(num == 4)
 
-	num, err := MVCCResolveWriteIntentRange(engine, nil, testKey1, testKey4.Next(), 0, makeTS(0, 1), txn1Commit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if num != 4 {
-		t.Fatalf("expected all keys to process for resolution, even though 2 are noops; got %d", num)
-	}
+	local v
+	v = db:get(test_key1, makets(0, 1))
+	assert(v == value1)
 
-	value, err := MVCCGet(engine, testKey1, makeTS(0, 1), nil)
-	if !bytes.Equal(value1.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value1.Bytes, value.Bytes)
-	}
+	v = db:get(test_key2, makets(0, 1))
+	assert(v == value2)
 
-	value, err = MVCCGet(engine, testKey2, makeTS(0, 1), nil)
-	if !bytes.Equal(value2.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value2.Bytes, value.Bytes)
-	}
+	v = db:get(test_key3, makets(0, 1), txn2)
+	assert(v == value3)
 
-	value, err = MVCCGet(engine, testKey3, makeTS(0, 1), txn2)
-	if !bytes.Equal(value3.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value3.Bytes, value.Bytes)
-	}
+	v = db:get(test_key4, makets(0, 1))
+	assert(v == value4)
+end, create_db, destroy_db)
 
-	value, err = MVCCGet(engine, testKey4, makeTS(0, 1), nil)
-	if !bytes.Equal(value4.Bytes, value.Bytes) {
-		t.Fatalf("the value %s in get result does not match the value %s in request",
-			value4.Bytes, value.Bytes)
-	}
-}
+-- ]] --
+
+
+
+
+
+
+
+
+
+
+--[[
 
 func TestValidSplitKeys(t *testing.T) {
 	testCases := []struct {
