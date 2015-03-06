@@ -76,7 +76,7 @@ local valueEmpty   = ""
 -- create/destroy test database
 local function create_db()
 	fs.rmdir('/tmp/luact/txntest')
-	return mvcc.open('/tmp/luact/txntest')
+	return mvcc.open('/tmp/luact/txntest'), ffi.new('luact_mvcc_stats_t')
 end
 local function destroy_db(db)
 	mvcc.close(db)
@@ -133,7 +133,7 @@ local function test(name, proc, ctor, dtor)
 	logger.notice(name, 'success')
 end
 
--- [[
+--　[[
 -- Verify the sort ordering of successive keys with metadata and
 -- versioned values. In particular, the following sequence of keys /
 -- versions:
@@ -180,11 +180,13 @@ test("TestMVCCKeys", function ()
 	assert(util.table_equals(keys, copied, true), "sorting order is wrong")
 end)
 
-test("TestMVCCEmptyKeyValue", function (db)
+test("TestMVCCEmptyKeyValue", function (db, stats)
 	local ok, r
-	ok, r = pcall(db.put, db, "", "", makets(0, 1), nil)
+	ok, r = pcall(db.put, db, stats, "", "", makets(0, 1), nil)
 	assert(not ok and r:is('mvcc') and r.args[1] == 'empty_value')
-	db:put("", value1, makets(0, 1))
+	db:put(stats, "", value1, makets(0, 1))
+	local encvk = mvcc.make_key("", 0, makets(0, 1))
+	assert(stats.bytes_key == (1 + #encvk) and stats.bytes_val == (#value1 + ffi.sizeof('luact_mvcc_metadata_t')))
 	local v = db:get("", makets(0, 1))
 	assert(v == value1)
 	db:rawscan("", 0, test_key1, #test_key1, nil, function (self, k, kl, v, vl)
@@ -192,16 +194,16 @@ test("TestMVCCEmptyKeyValue", function (db)
 	db:rawscan(test_key1, #test_key1, "", 0, nil, function (self, k, kl, v, vl)
 		assert(false, "nothing should be scanned")
 	end)
-	db:resolve_txn("", 0, nil, nil, nil, makets(0, 1), txn1)
+	db:resolve_txn(stats, "", 0, nil, nil, nil, makets(0, 1), txn1)
 end, create_db, destroy_db)
 
-test("TestMVCCGetNotExist", function (db)
+test("TestMVCCGetNotExist", function (db, stats)
 	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
 	assert(ok and (not r), "get for non-existent key should returns nil")
 end, create_db, destroy_db)
 
-test("TestMVCCPutWithTxn", function (db)
-	db:put(test_key1, value1, makets(1, 0), txn1)
+test("TestMVCCPutWithTxn", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 0), txn1)
 	for _, ts in ipairs({makets(1, 0), makets(0, 1), makets(2, 0)}) do
 		local v = db:get(test_key1, ts, txn1)
 		assert(v == value1, 
@@ -209,8 +211,8 @@ test("TestMVCCPutWithTxn", function (db)
 	end
 end, create_db, destroy_db)
 
-test("TestMVCCPutWithoutTxn", function (db)
-	db:put(test_key1, value1, makets(1, 0))
+test("TestMVCCPutWithoutTxn", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 0))
 	for _, ts in ipairs({makets(1, 0), makets(0, 1), makets(2, 0)}) do
 		local v = db:get(test_key1, ts)
 		assert(v == value1, 
@@ -218,12 +220,12 @@ test("TestMVCCPutWithoutTxn", function (db)
 	end
 end, create_db, destroy_db)
 
-test("TestMVCCUpdateExistingKey", function (db)
-	db:put(test_key1, value1, makets(1, 0))	
+test("TestMVCCUpdateExistingKey", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 0))	
 	local v = db:get(test_key1, makets(0, 1))
 	assert(v == value1, "get with latest ts should return last put value")
 	
-	db:put(test_key1, value2, makets(0, 2))
+	db:put(stats, test_key1, value2, makets(0, 2))
 	-- Read the latest version.
 	local v = db:get(test_key1, makets(0, 3))
 	assert(v == value2, "after multiple version created, get with latest ts should return last put value")
@@ -232,29 +234,29 @@ test("TestMVCCUpdateExistingKey", function (db)
 	assert(v == value1, "get with specified ts should return last put value before ts")
 end, create_db, destroy_db)
 
-test("TestMVCCUpdateExistingKeyOldVersion", function (db)
-	db:put(test_key1, value1, makets(1, 1))
+test("TestMVCCUpdateExistingKeyOldVersion", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 1))
 	-- Earlier walltime.
-	local ok, r = pcall(db.put, db, test_key1, value2, makets(1, 0))
+	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(1, 0))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
 	-- Earlier logical time.
-	local ok, r = pcall(db.put, db, test_key1, value2, makets(0, 1))
+	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(0, 1))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
 end, create_db, destroy_db)
 
 
-test("TestMVCCUpdateExistingKeyInTxn", function (db)
-	db:put(test_key1, value1, makets(1, 0), txn1)
-	db:put(test_key1, value1, makets(0, 1), txn1)
+test("TestMVCCUpdateExistingKeyInTxn", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 0), txn1)
+	db:put(stats, test_key1, value1, makets(0, 1), txn1)
 end, create_db, destroy_db)
 
-test("TestMVCCUpdateExistingKeyDiffTxn", function (db)
-	db:put(test_key1, value1, makets(1, 0), txn1)
-	local ok, r = pcall(db.put, db, test_key1, value2, makets(0, 1), txn2)
+test("TestMVCCUpdateExistingKeyDiffTxn", function (db, stats)
+	db:put(stats, test_key1, value1, makets(1, 0), txn1)
+	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(0, 1), txn2)
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
 end, create_db, destroy_db)
 
-test("TestMVCCGetNoMoreOldVersion", function (db)
+test("TestMVCCGetNoMoreOldVersion", function (db, stats)
 	-- Need to handle the case here where the scan takes us to the
 	-- next key, which may not match the key we're looking for. In
 	-- other words, if we're looking for a<T=2>, and we have the
@@ -268,8 +270,8 @@ test("TestMVCCGetNoMoreOldVersion", function (db)
 	-- If we search for a<T=2>, the scan should not return "b".
 	-- and if we search for a<T=4>, scan should return "a"
 
-	db:put(test_key1, value1, makets(0, 3))
-	db:put(test_key2, value2, makets(0, 1))
+	db:put(stats, test_key1, value1, makets(0, 3))
+	db:put(stats, test_key2, value2, makets(0, 1))
 	
 	local v = db:get(test_key1, makets(0, 2))
 	assert(not v)
@@ -280,7 +282,7 @@ end, create_db, destroy_db)
 -- TestMVCCGetUncertainty verifies that the appropriate error results when
 -- a transaction reads a key at a timestamp that has versions newer than that
 -- timestamp, but older than the transaction's MaxTimestamp.
-test("TestMVCCGetUncertainty", function (db)
+test("TestMVCCGetUncertainty", function (db, st)
 	local ok, r
 	local ubk, ubkl
 	local txn = new_txn({
@@ -289,15 +291,15 @@ test("TestMVCCGetUncertainty", function (db)
 		max_ts = makets(0, 10),
 	})
 	-- Put a value from the past.
-	db:put(test_key1, value1, makets(0, 1))
+	db:put(st, test_key1, value1, makets(0, 1))
 	-- Put a value that is ahead of MaxTimestamp, it should not interfere.
-	db:put(test_key1, value2, makets(0, 12))
+	db:put(st, test_key1, value2, makets(0, 12))
 	-- Read with transaction, should get a value back.
 	local v = db:get(test_key1, makets(0, 7), txn)
 	assert(v == value1)
 	-- Now using testKey2.
 	-- Put a value that conflicts with MaxTimestamp.
-	db:put(test_key2, value2, makets(0, 9))
+	db:put(st, test_key2, value2, makets(0, 9))
 	-- Read with transaction, should get error back.
 	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key2)
 
@@ -324,8 +326,8 @@ test("TestMVCCGetUncertainty", function (db)
 	-- ahead and not conflicting any longer. The first write should still ruin
 	-- it.
 	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key3)
-	db:put(test_key3, value2, makets(0, 9))
-	db:put(test_key3, value2, makets(0, 99))
+	db:put(st, test_key3, value2, makets(0, 9))
+	db:put(st, test_key3, value2, makets(0, 99))
 	ok, r = pcall(db.scan, db, test_key3, #test_key3, ubk, ubkl, 10, makets(0, 7), txn)
 	assert((not ok) and r:is('mvcc') and 
 		r.args[1] == 'txn_ts_uncertainty' and 
@@ -338,12 +340,17 @@ test("TestMVCCGetUncertainty", function (db)
 
 end, create_db, destroy_db)
 
-test("TestMVCCGetAndDelete", function (db)
-	db:put(test_key1, value1, makets(0, 1))
+test("TestMVCCGetAndDelete", function (db, st)
+	local ek1 = mvcc.make_key(test_key1, #test_key1) 
+	local ek2 = mvcc.make_key(test_key1, #test_key1, makets(0, 1))
+	db:put(st, test_key1, value1, makets(0, 1))
+	assert(st.bytes_key == (#ek1 + #ek2) and st.bytes_val == (#value1 + ffi.sizeof('luact_mvcc_metadata_t')))
 	local v = db:get(test_key1, makets(0, 2))
 	assert(v == value1)
 	-- delete value for test_key1
-	db:delete(test_key1, makets(0, 3))
+	db:delete(st, test_key1, makets(0, 3))
+	-- new versioned key which value is "" (empty string) is created, so stats will be below
+	assert(st.bytes_key == (#ek1 + #ek2 + #ek2) and st.bytes_val == (#value1 + ffi.sizeof('luact_mvcc_metadata_t')))
 
 	-- Read the latest version which should be deleted.
 	assert(not db:get(test_key1, makets(0, 4)))	
@@ -354,18 +361,18 @@ test("TestMVCCGetAndDelete", function (db)
 	assert(v == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCDeleteMissingKey", function (db)
-	db:delete(test_key1, makets(1, 0))
+test("TestMVCCDeleteMissingKey", function (db, st)
+	db:delete(st, test_key1, makets(1, 0))
 	-- Verify nothing is written to the engine.
 	assert(not db.db:get(test_key1))
 end, create_db, destroy_db)
 
-test("TestMVCCGetAndDeleteInTxn", function (db)
-	db:put(test_key1, value1, makets(0, 1), txn1)
+test("TestMVCCGetAndDeleteInTxn", function (db, st)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	local v = db:get(test_key1, makets(0, 2), txn1)
 	assert(v == value1)
 	-- delete value
-	db:delete(test_key1, makets(0, 3), txn1)
+	db:delete(st, test_key1, makets(0, 3), txn1)
 	-- Read the latest version which should be deleted.
 	assert(not db:get(test_key1, makets(0, 4), txn1))
 	-- Read the old version which shouldn't exist, as within a
@@ -373,9 +380,9 @@ test("TestMVCCGetAndDeleteInTxn", function (db)
 	assert(not db:get(test_key1, makets(0, 2)))
 end, create_db, destroy_db)
 
-test("TestMVCCGetWriteIntentError", function (db)
+test("TestMVCCGetWriteIntentError", function (db, st)
 	local ok, r 
-	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	ok, r = pcall(db.get, db, test_key1, makets(0, 1))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists', 
 		"cannot read the value of a write intent without TxnID")
@@ -386,7 +393,7 @@ test("TestMVCCGetWriteIntentError", function (db)
 	assert(v == value1, "in same txn, should get correct value")
 end, create_db, destroy_db)
 
-test("TestMVCCScan", function (db)
+test("TestMVCCScan", function (db, st)
 	local fixtures, results, p, len = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key1, value4, makets(0, 2)},
@@ -398,7 +405,7 @@ test("TestMVCCScan", function (db)
 		{test_key4, value1, makets(0, 5)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1))
@@ -432,7 +439,7 @@ test("TestMVCCScan", function (db)
 
 end, create_db, destroy_db)
 
-test("TestMVCCScanMaxNum", function (db)
+test("TestMVCCScanMaxNum", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key2, value2, makets(0, 1)},
@@ -440,7 +447,7 @@ test("TestMVCCScanMaxNum", function (db)
 		{test_key4, value4, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 1, makets(0, 1))
@@ -450,7 +457,7 @@ test("TestMVCCScanMaxNum", function (db)
 
 end, create_db, destroy_db)
 
-test("TestMVCCScanWithKeyPrefix", function (db)
+test("TestMVCCScanWithKeyPrefix", function (db, st)
 	-- Let's say you have:
 	-- a
 	-- a<T=2>
@@ -470,7 +477,7 @@ test("TestMVCCScanWithKeyPrefix", function (db)
 		{"/b", value3, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 	results = db:scan("/a", 2, "/b", 2, 0, makets(0, 2))
 
@@ -482,7 +489,7 @@ test("TestMVCCScanWithKeyPrefix", function (db)
 
 end, create_db, destroy_db)
 
-test("TestMVCCScanInTxn", function (db)
+test("TestMVCCScanInTxn", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key2, value2, makets(0, 1)},
@@ -490,7 +497,7 @@ test("TestMVCCScanInTxn", function (db)
 		{test_key4, value4, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	results = db:scan(test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1), txn1)
@@ -507,7 +514,7 @@ end, create_db, destroy_db)
 
 -- TestMVCCIterateCommitted writes several values, some as intents
 -- and verifies that IterateCommitted sees only the committed versions.
-test("TestMVCCIterateCommitted", function (db)
+test("TestMVCCIterateCommitted", function (db, st)
 	local ts1 = makets(0, 1)
 	local ts2 = makets(0, 2)
 	local ts3 = makets(0, 3)
@@ -525,7 +532,7 @@ test("TestMVCCIterateCommitted", function (db)
 	}
 	local test_key4_next = test_key4..string.char(0)
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	local expects, count = {
@@ -541,7 +548,7 @@ test("TestMVCCIterateCommitted", function (db)
 	assert(count == #expects)
 end, create_db, destroy_db)
 
-test("TestMVCCDeleteRange", function (db) 
+test("TestMVCCDeleteRange", function (db, st) 
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key2, value2, makets(0, 1)},
@@ -549,11 +556,11 @@ test("TestMVCCDeleteRange", function (db)
 		{test_key4, value4, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	local n
-	n = db:delete_range(test_key2, test_key4, 0, makets(0, 2))
+	n = db:delete_range(st, test_key2, test_key4, 0, makets(0, 2))
 	assert(n == 2)
 
 	local mink, minkl = key.MIN:as_slice()
@@ -566,7 +573,7 @@ test("TestMVCCDeleteRange", function (db)
 		ffi.string(unpack(results[2], 3)) == value4, 
 		"unremoved value should appear")
 
-	n = db:rawdelete_range(test_key4, #test_key4, maxk, maxkl, 0, makets(0, 2))
+	n = db:rawdelete_range(st, test_key4, #test_key4, maxk, maxkl, 0, makets(0, 2))
 	assert(n == 1)
 
 	results = db:scan(mink, minkl, maxk, maxkl, 0, makets(0, 2))
@@ -575,12 +582,12 @@ test("TestMVCCDeleteRange", function (db)
 		ffi.string(unpack(results[1], 3)) == value1 and
 		"unremoved value should appear")
 
-	n = db:rawdelete_range(mink, minkl, test_key2, #test_key2, 0, makets(0, 2))
+	n = db:rawdelete_range(st, mink, minkl, test_key2, #test_key2, 0, makets(0, 2))
 	results = db:scan(mink, minkl, maxk, maxkl, 0, makets(0, 2))
 	assert(#results == 0, "value should not appear")
 end, create_db, destroy_db)
 
-test("TestMVCCDeleteRangeFailed", function (db)
+test("TestMVCCDeleteRangeFailed", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key2, value2, makets(0, 1), txn1},
@@ -588,17 +595,17 @@ test("TestMVCCDeleteRangeFailed", function (db)
 		{test_key4, value4, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	local ok, r
-	ok, r = pcall(db.delete_range, db, test_key2, test_key4, 0, makets(0, 1))
+	ok, r = pcall(db.delete_range, db, st, test_key2, test_key4, 0, makets(0, 1))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
 	
-	db:delete_range(test_key2, test_key4, 0, makets(0, 1), txn1)
+	db:delete_range(st, test_key2, test_key4, 0, makets(0, 1), txn1)
 end, create_db, destroy_db)
 
-test("TestMVCCDeleteRangeConcurrentTxn", function (db)
+test("TestMVCCDeleteRangeConcurrentTxn", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1)},
 		{test_key2, value2, makets(0, 1), txn1},
@@ -606,45 +613,45 @@ test("TestMVCCDeleteRangeConcurrentTxn", function (db)
 		{test_key4, value4, makets(0, 1)},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	local ok, r
-	ok, r = pcall(db.delete_range, db, test_key2, test_key4, 0, makets(0, 1), txn1)
+	ok, r = pcall(db.delete_range, db, st, test_key2, test_key4, 0, makets(0, 1), txn1)
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
 end, create_db, destroy_db)
 
-test("TestMVCCConditionalPut", function (db)
+test("TestMVCCConditionalPut", function (db, st)
 	local ok, r, v
-	ok, r = db:cas(test_key1, "", value1, makets(1, 0))
+	ok, r = db:cas(st, test_key1, "", value1, makets(1, 0))
 	assert(ok and (not r))
 	v = db:get(test_key1, makets(1, 0))
 	assert(v == value1)
 	-- Conditional put expecting wrong value2, will fail.
-	ok, r = db:cas(test_key1, value2, value3, makets(0, 1))
+	ok, r = db:cas(st, test_key1, value2, value3, makets(0, 1))
 	assert((not ok) and r == value1)
 	-- move to empty value will success
-	ok, r = db:cas(test_key1, value1, "", makets(0, 1))
+	ok, r = db:cas(st, test_key1, value1, "", makets(0, 1))
 	assert(ok and r == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveTxn", function (db)
+test("TestMVCCResolveTxn", function (db, st)
 	local v
-	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	v = db:get(test_key1, makets(0, 1), txn1)
 	assert(v == value1)
 	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
 	-- Resolve will write with txn1's timestamp which is 1, 0
-	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn1_commit)
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn1_commit)
 	-- now non-transactional get can see the value put at 1, 0
 	v = db:get(test_key1, makets(0, 1))
 	assert(v == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCAbortTxn", function (db)
-	db:put(test_key1, value1, makets(0, 1), txn1)
-	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn1_abort)
+test("TestMVCCAbortTxn", function (db, st)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn1_abort)
 
 	assert(not db:get(test_key1, makets(1, 0)), "value should be empty")
 	local meta_key = mvcc.make_key(test_key1, #test_key1)
@@ -652,17 +659,17 @@ test("TestMVCCAbortTxn", function (db)
 	assert(not db.db:get(meta_key), "expected no more metadata")
 end, create_db, destroy_db)
 
-test("TestMVCCAbortTxnWithPreviousVersion", function (db)
+test("TestMVCCAbortTxnWithPreviousVersion", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(1, 0)},
 		{test_key1, value2, makets(0, 1)},
 		{test_key1, value3, makets(0, 2), txn1},
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
-	db:resolve_txn(test_key1, #test_key1, makets(0, 2), txn1_abort)
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 2), txn1_abort)
 
 	local meta_key = mvcc.make_key(test_key1, #test_key1)
 	local meta, ml = db.db:rawget(meta_key, #meta_key)
@@ -672,7 +679,7 @@ test("TestMVCCAbortTxnWithPreviousVersion", function (db)
 	assert(v == value2 and ts == makets(0, 1))
 end, create_db, destroy_db)
 
-test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db)
+test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(1, 0), txn1}, -- ok. initial write
 		{test_key1, value2, makets(0, 1), txn1_1}, -- ok, greater ts and n_retry
@@ -681,14 +688,14 @@ test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db)
 		{test_key1, value3, makets(0, 1), txn1_1}, -- ok. greater n_retry, same ts
 	}
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
 	local ok, r, v, ts
 	-- Resolve the txn.
-	db:resolve_txn(test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
 	-- Now try writing an earlier intent--should get write too old error.
-	ok, r = pcall(db.put, db, test_key1, value2, makets(1, 0), txn2)
+	ok, r = pcall(db.put, db, st, test_key1, value2, makets(1, 0), txn2)
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
 	-- Attempt to read older timestamp; should fail.
 	v = db:get(test_key1, makets(0, 0))
@@ -701,10 +708,10 @@ end, create_db, destroy_db)
 -- TestMVCCReadWithDiffEpochs writes a value first using epoch 1, then
 -- reads using epoch 2 to verify that values written during different
 -- transaction epochs are not visible.
-test("TestMVCCReadWithDiffEpochs", function (db)
+test("TestMVCCReadWithDiffEpochs", function (db, st)
 	-- Write initial value wihtout a txn.
-	db:put(test_key1, value1, makets(1, 0))
-	db:put(test_key1, value2, makets(0, 1), txn1)
+	db:put(st, test_key1, value1, makets(1, 0))
+	db:put(st, test_key1, value2, makets(0, 1), txn1)
 	-- Try reading using different txns & epochs.
 	local fixtures = {
 		-- No transaction; should see error.
@@ -732,20 +739,20 @@ end, create_db, destroy_db)
 -- timestamp is specified. This happens when a txn's intents are
 -- resolved by other actors; the intents shouldn't become invisible
 -- to pushed txn.
-test("TestMVCCReadWithPushedTimestamp", function(db)
+test("TestMVCCReadWithPushedTimestamp", function(db, st)
 	-- Start with epoch 1.
-	db:put(test_key1, value1, makets(1, 0), txn1)
-	db:resolve_txn(test_key1, #test_key1, makets(1, 0), maketxn(txn1, makets(0, 1)))
+	db:put(st, test_key1, value1, makets(1, 0), txn1)
+	db:resolve_txn(st, test_key1, #test_key1, makets(1, 0), maketxn(txn1, makets(0, 1)))
 	-- Attempt to read using naive txn's previous timestamp.
 	local v = db:get(test_key1, makets(1, 0), txn1)
 	assert(v == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveWithDiffEpochs", function (db)
-	db:put(test_key1, value1, makets(0, 1), txn1)
-	db:put(test_key2, value2, makets(0, 1), txn1_1)
+test("TestMVCCResolveWithDiffEpochs", function (db, st)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
+	db:put(st, test_key2, value2, makets(0, 1), txn1_1)
 	local test_key2_next = test_key2..string.char(0)
-	local num = db:end_txn(test_key1, #test_key1, test_key2_next, #test_key2_next, 2, makets(0, 1), txn1_1_commit)
+	local num = db:end_txn(st, test_key1, #test_key1, test_key2_next, #test_key2_next, 2, makets(0, 1), txn1_1_commit)
 	assert(num == 2)
 
 	-- Verify key1 is empty, as resolution with epoch 2 would have
@@ -757,15 +764,15 @@ test("TestMVCCResolveWithDiffEpochs", function (db)
 	assert(v == value2)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveWithUpdatedTimestamp", function (db)
+test("TestMVCCResolveWithUpdatedTimestamp", function (db, st)
 	local v
-	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	v = db:get(test_key1, makets(1, 1), txn1)
 	assert(v == value1)
 
 	-- Resolve with a higher commit timestamp -- this should rewrite the
 	-- intent when making it permanent.
-	db:resolve_txn(test_key1, #test_key1, makets(1, 1), maketxn(txn1_commit, makets(1, 1)))
+	db:resolve_txn(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1_commit, makets(1, 1)))
 
 	v = db:get(test_key1, makets(0, 1))
 	assert(not v)
@@ -774,15 +781,15 @@ test("TestMVCCResolveWithUpdatedTimestamp", function (db)
 	assert(v == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveWithPushedTimestamp", function (db)
+test("TestMVCCResolveWithPushedTimestamp", function (db, st)
 	local ok, v
-	db:put(test_key1, value1, makets(0, 1), txn1)
+	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	v = db:get(test_key1, makets(0, 1), txn1)
 	assert(v == value1)
 
 	-- Resolve with a higher commit timestamp, but with still-pending transaction.
 	-- This represents a straightforward push (i.e. from a read/write conflict).
-	db:resolve_txn(test_key1, #test_key1, makets(1, 1), maketxn(txn1, makets(1, 1))[0])
+	db:resolve_txn(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1, makets(1, 1))[0])
 
 	ok, v = pcall(db.get, db, test_key1, makets(1, 1))
 	-- because test_key1 is not committed, just pushed, so read latest version without txn will be failure
@@ -793,21 +800,21 @@ test("TestMVCCResolveWithPushedTimestamp", function (db)
 	assert(v == value1)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveTxnNoOps", function (db)
+test("TestMVCCResolveTxnNoOps", function (db, st)
 	-- Resolve a non existent key; noop.
-	local ok, r = pcall(db.resolve_txn, db, test_key1, #test_key1, makets(0, 1), txn1_commit)
+	local ok, r = pcall(db.resolve_txn, db, st, test_key1, #test_key1, makets(0, 1), txn1_commit)
 	assert((not ok) and r:is('invalid'))
 
 	-- Add key and resolve despite there being no intent.
-	db:put(test_key1, value1, makets(0, 1))
-	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn2_commit)
+	db:put(st, test_key1, value1, makets(0, 1))
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
 
 	-- Write intent and resolve with different txn.
-	db:put(test_key1, value2, makets(0, 1), txn1)
-	db:resolve_txn(test_key1, #test_key1, makets(0, 1), txn2_commit)
+	db:put(st, test_key1, value2, makets(0, 1), txn1)
+	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
 end, create_db, destroy_db)
 
-test("TestMVCCResolveTxnRange", function (db)
+test("TestMVCCResolveTxnRange", function (db, st)
 	local fixtures, results = {
 		{test_key1, value1, makets(0, 1), txn1},
 		{test_key2, value2, makets(0, 1), nil},
@@ -816,10 +823,10 @@ test("TestMVCCResolveTxnRange", function (db)
 	}
 	local test_key4_next = test_key4..string.char(0)
 	for _, data in ipairs(fixtures) do
-		db:put(unpack(data))
+		db:put(st, unpack(data))
 	end
 
-	local num = db:end_txn(test_key1, #test_key1, test_key4_next, #test_key4_next, 0, makets(0, 1), txn1_commit)
+	local num = db:end_txn(st, test_key1, #test_key1, test_key4_next, #test_key4_next, 0, makets(0, 1), txn1_commit)
 	assert(num == 4)
 
 	local v
@@ -846,52 +853,10 @@ end, create_db, destroy_db)
 
 
 
-
 --[[
 
-func TestValidSplitKeys(t *testing.T) {
-	testCases := []struct {
-		key   proto.Key
-		valid bool
-	}{
-		{proto.Key("\x00"), false},
-		{proto.Key("\x00\x00"), false},
-		{proto.Key("\x00\x00meta1"), false},
-		{proto.Key("\x00\x00meta1\x00"), false},
-		{proto.Key("\x00\x00meta1\xff"), false},
-		{proto.Key("\x00\x00meta2"), true},
-		{proto.Key("\x00\x00meta2\x00"), true},
-		{proto.Key("\x00\x00meta2\xff"), true},
-		{proto.Key("\x00\x00meta3"), true},
-		{proto.Key("\x00\x01"), true},
-		{proto.Key("\x00accs\xff"), true},
-		{proto.Key("\x00acct"), true},
-		{proto.Key("\x00acct\x00"), false},
-		{proto.Key("\x00acct\xff"), false},
-		{proto.Key("\x00accu"), true},
-		{proto.Key("\x00perl"), true},
-		{proto.Key("\x00perm"), true},
-		{proto.Key("\x00perm\x00"), false},
-		{proto.Key("\x00perm\xff"), false},
-		{proto.Key("\x00pern"), true},
-		{proto.Key("\x00zond"), true},
-		{proto.Key("\x00zone"), true},
-		{proto.Key("\x00zone\x00"), false},
-		{proto.Key("\x00zone\xff"), false},
-		{proto.Key("\x00zonf"), true},
-		{proto.Key("\x01"), true},
-		{proto.Key("a"), true},
-		{proto.Key("\xff"), true},
-	}
 
-	for i, test := range testCases {
-		if valid := IsValidSplitKey(test.key); valid != test.valid {
-			t.Errorf("%d: expected %q valid %t; got %t", i, test.key, test.valid, valid)
-		}
-	}
-}
-
-func TestFindSplitKey(t *testing.T) {
+test("TestFindSplitKey", function (db)
 	raftID := int64(1)
 	engine := NewInMem(proto.Attributes{}, 1<<20)
 	ms := &MVCCStats{}
@@ -920,7 +885,7 @@ func TestFindSplitKey(t *testing.T) {
 	if diff := splitReservoirSize/2 - ind; diff > 1 || diff < -1 {
 		t.Fatalf("wanted key #%d+-1, but got %d (diff %d)", ind+diff, ind, diff)
 	}
-}
+end, create_db, destroy_db)
 
 // TestFindValidSplitKeys verifies split keys are located such that
 // they avoid splits through invalid key ranges.

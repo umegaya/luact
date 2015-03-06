@@ -27,8 +27,14 @@ typedef struct luact_mvcc_bytes_codec {
 	char **buffers;
 } luact_mvcc_bytes_codec_t;
 
+typedef struct luact_mvcc_stats {
+	size_t bytes_key, bytes_val;
+	uint64_t last_update;
+} luact_mvcc_stats_t;
+
 typedef struct luact_mvcc_metadata {
-	pulpo_hlc_t timestamp, max_timestamp;
+	pulpo_hlc_t timestamp;
+	uint32_t key_len, val_len;
 	luact_dht_txn_t txn;
 	uint8_t delete_flag, reserved[3];
 } luact_mvcc_metadata_t;
@@ -184,7 +190,71 @@ function mvcc_meta_mt:set_txn(txn)
 		self.txn:invalidate()
 	end
 end
+function mvcc_meta_mt:set_current_kv_len(kl, vl)
+	self.key_len, self.val_len = kl, vl
+end
 ffi.metatype('luact_mvcc_metadata_t', mvcc_meta_mt)
+
+
+
+-- mvcc stat
+local mvcc_stats_mt = {}
+mvcc_stats_mt.__index = mvcc_stats_mt
+function mvcc_stats_mt:init()
+	self.bytes_key = 0
+	self.bytes_val = 0
+	self.last_update = 0
+end
+function mvcc_stats_mt:updated()
+	local s,us = util.clock_pair()
+	self.last_update = s * 1000 * 1000 + us
+end
+function mvcc_stats_mt:inline(kl, prev_meta, meta, already_exists)
+	if already_exists then
+		-- kl already added, so ignore
+		self.bytes_key = self.bytes_key - prev_meta.key_len + meta.key_len
+		self.bytes_val = self.bytes_val - prev_meta.val_len + meta.val_len
+	else
+		self.bytes_key = self.bytes_key + meta.key_len + kl
+		self.bytes_val = self.bytes_val + meta.val_len + ffi.sizeof(prev_meta)
+	end
+	self:updated()
+end
+function mvcc_stats_mt:put(kl, prev_meta, meta, already_exists)
+	if already_exists then
+		if prev_meta.txn:valid() then
+			-- data which is written when prev_meta is created, has removed.
+			self.bytes_key = self.bytes_key - prev_meta.key_len + meta.key_len
+			self.bytes_val = self.bytes_val - prev_meta.val_len + meta.val_len			
+		else
+			-- new uncommitted value is written. just add value
+			self.bytes_key = self.bytes_key + meta.key_len
+			self.bytes_val = self.bytes_val + meta.val_len			
+		end
+	else
+		assert(not prev_meta.txn:valid())
+		self.bytes_key = self.bytes_key + meta.key_len + kl
+		self.bytes_val = self.bytes_val + meta.val_len + ffi.sizeof(prev_meta)	
+	end
+	self:updated()
+end
+function mvcc_stats_mt:committed(kl, prev_meta, meta)
+	-- committed just update metadata and move versioned key/value to another key/value (not length change)
+	-- so do nothing.
+	self:updated()
+end
+function mvcc_stats_mt:aborted(kl, prev_meta, meta, prev_key_iter)
+	-- uncommitted value has removed
+	self.bytes_key = self.bytes_key - prev_meta.key_len
+	self.bytes_val = self.bytes_val - prev_meta.val_len
+	if not prev_key_iter then
+		-- no committed value for this key, so metadata itself has removed
+		self.bytes_key = self.bytes_key - kl
+		self.bytes_val = self.bytes_val - ffi.sizeof(prev_meta)
+	end
+	self:updated()
+end
+ffi.metatype('luact_mvcc_stats_t', mvcc_stats_mt)
 
 
 
@@ -540,8 +610,8 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 		return nil
 	end
 end
-function mvcc_mt:put(k, v, ts, txn, opts)
-	return self:rawput(k, #k, v, #v, ts, txn, opts)
+function mvcc_mt:put(stats, k, v, ts, txn, opts)
+	return self:rawput(stats, k, #k, v, #v, ts, txn, opts)
 end
 --[[
 put
@@ -558,7 +628,8 @@ put
  a. 削除したい場合はすでに削除されているので何もしない
  b. それ以外の場合、metadataに現在のtransactionとtimestampを書き込む。versioned keyを作ってそこに値を書く
 ]]
-function mvcc_mt:rawput(k, kl, v, vl, ts, txn, opts, deleted)
+local prev_meta_work = memory.alloc_typed('luact_mvcc_metadata_t')
+function mvcc_mt:rawput(stats, k, kl, v, vl, ts, txn, opts, deleted)
 	if (not deleted) and (vl <= 0) then
 		exception.raise('mvcc', 'empty_value')
 	end
@@ -572,10 +643,12 @@ function mvcc_mt:rawput(k, kl, v, vl, ts, txn, opts, deleted)
 
 	if meta == ffi.NULL then
 		meta = ffi.new('luact_mvcc_metadata_t')
+		ml = 0
 		exists = false
 	else
 		meta = ffi.cast('luact_mvcc_metadata_t*', meta)
 	end
+	ffi.copy(prev_meta_work, meta, ffi.sizeof('luact_mvcc_metadata_t'))
 	-- Verify we are not mixing inline and non-inline values.
 	-- TODO : support inline read/write?
 	local inline = (ts == lamport.ZERO_HLC)
@@ -583,12 +656,14 @@ function mvcc_mt:rawput(k, kl, v, vl, ts, txn, opts, deleted)
 		exception.raise('mvcc', 'key_op', 'mixing inline and non-inline operation')
 	end
 	if inline then
+		-- TODO : also we consider stats update on inline mode
 		if deleted then
 			self.db:rawdelete(mk, mkl, opts)
 		else
-			meta:set_inline_value(v, vl)
+			meta:set_current_kv_len(mkl, vl)
 			self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
 		end
+		stats:inline(mkl, prev_meta_work[0], meta, exists)
 		return
 	end
 
@@ -641,22 +716,24 @@ function mvcc_mt:rawput(k, kl, v, vl, ts, txn, opts, deleted)
 
 	-- TODO : better to use transaction?
 	local new_key, new_key_len = _M.bytes_codec:encode(k, kl, ts)
+	meta:set_current_kv_len(new_key_len, vl)
 	-- _M.dump_key(new_key, new_key_len)
 	self.db:rawput(new_key, new_key_len, v, vl)
 	-- Write the mvcc metadata now that we have sizes for the latest versioned value.
 	self.db:rawput(mk, mkl, ffi.cast("char *", meta), #meta, opts)
+	stats:put(mkl, prev_meta_work[0], meta, exists)
 end
-function mvcc_mt:delete(k, ts, txn, opts)
-	return self:rawdelete(k, #k, ts, txn, opts)
+function mvcc_mt:delete(stats, k, ts, txn, opts)
+	return self:rawdelete(stats, k, #k, ts, txn, opts)
 end
-function mvcc_mt:rawdelete(k, kl, ts, txn, opts)
-	return self:rawput(k, kl, "", 0, ts, txn, opts, true)
+function mvcc_mt:rawdelete(stats, k, kl, ts, txn, opts)
+	return self:rawput(stats, k, kl, "", 0, ts, txn, opts, true)
 end
-function mvcc_mt:delete_range(s, e, ts, txn, opts)
-	return self:rawdelete_range(s, #s, e, #e, ts, txn, opts)
+function mvcc_mt:delete_range(stats, s, e, ts, txn, opts)
+	return self:rawdelete_range(stats, s, #s, e, #e, ts, txn, opts)
 end
-function mvcc_mt:delete_filter(k, kl, v, vl, ctx, ts, txn, opts)
-	self:rawdelete(k, kl, ts, txn, opts)
+function mvcc_mt:delete_filter(k, kl, v, vl, ctx, stats, ts, txn, opts)
+	self:rawdelete(stats, k, kl, ts, txn, opts)
 	if ctx.count > 0 then
 		ctx.count = ctx.count - 1
 		return ctx.count <= 0
@@ -664,16 +741,16 @@ function mvcc_mt:delete_filter(k, kl, v, vl, ctx, ts, txn, opts)
 		ctx.count = ctx.count - 1 -- count delete num as negative value
 	end
 end
-function mvcc_mt:rawdelete_range(s, sl, e, el, n, ts, txn, opts)
+function mvcc_mt:rawdelete_range(stats, s, sl, e, el, n, ts, txn, opts)
 	local ctx = { count = n }
-	self:rawscan(s, sl, e, el, opts, self.delete_filter, ctx, ts, txn, opts)
+	self:rawscan(s, sl, e, el, opts, self.delete_filter, ctx, stats, ts, txn, opts)
 	return n - ctx.count
 end
-function mvcc_mt:merge(k, v, merge_op, ts, txn, opts)
-	return self:rawmerge(k, #k, v, #v, merge_op, ts, txn, opts)
+function mvcc_mt:merge(stats, k, v, merge_op, ts, txn, opts)
+	return self:rawmerge(stats, k, #k, v, #v, merge_op, ts, txn, opts)
 end
 local pvl_work = memory.alloc_typed('size_t')
-function mvcc_mt:rawmerge(k, kl, v, vl, merge_op, ts, txn, opts)
+function mvcc_mt:rawmerge(stats, k, kl, v, vl, merge_op, ts, txn, opts)
 	if not mergers[merge_op] then
 		exception.raise('not_found', 'no merger', merge_op)
 	end
@@ -682,31 +759,31 @@ function mvcc_mt:rawmerge(k, kl, v, vl, merge_op, ts, txn, opts)
 	v, changed = mergers[merge_op](k, kl, cv, cvl, v, vl, pvl_work)
 	if changed then
 		if pvl_work[0] > 0 then
-			self:rawput(k, kl, v, pvl_work[0], ts, txn, opts)
+			self:rawput(stats, k, kl, v, pvl_work[0], ts, txn, opts)
 		else
-			self:rawdelete(k, kl, ts, txn, opts)
+			self:rawdelete(stats, k, kl, ts, txn, opts)
 		end
 	end
 	return changed
 end
-function mvcc_mt:cas(k, ov, nv, ts, txn, opts)
-	return self:rawcas(k, #k, ov, #ov, nv, #nv, ts, txn, opts)
+function mvcc_mt:cas(stats, k, ov, nv, ts, txn, opts)
+	return self:rawcas(stats, k, #k, ov, #ov, nv, #nv, ts, txn, opts)
 end
-function mvcc_mt:rawcas(k, kl, ov, ovl, nv, nvl, ts, txn, opts)
+function mvcc_mt:rawcas(stats, k, kl, ov, ovl, nv, nvl, ts, txn, opts)
 	local op = _M.op_cas(ov, nv, ovl, nvl)
-	self:rawmerge(k, kl, ffi.cast('char *', op), #op, 'cas', ts, txn, opts)
+	self:rawmerge(stats, k, kl, ffi.cast('char *', op), #op, 'cas', ts, txn, opts)
 	return op:result()
 end
 function mvcc_mt:new_txn(ts)
 	return txncoord.new_txn(ts)
 end	
-function mvcc_mt:resolve_txn(k, kl, ts, txn, opts)
+function mvcc_mt:resolve_txn(stats, k, kl, ts, txn, opts)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local v, vl = self.db:rawget(mk, mkl, opts)
-	return self:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
+	return self:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
 end
 local orig_timestamp_work = ffi.new('pulpo_hlc_t')
-function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
+function mvcc_mt:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
 	if not txn then
 		logger.warn('resolve_txn', 'no txn specified')
 		return
@@ -716,7 +793,7 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 		exception.raise('invalid', 'metadata size', vl, ffi.sizeof('luact_mvcc_metadata_t'))
 	end
 	local meta = ffi.cast('luact_mvcc_metadata_t*', v)
-	
+	ffi.copy(prev_meta_work, meta, ffi.sizeof('luact_mvcc_metadata_t'))
 	-- For cases where there's no write intent to resolve, or one exists
 	-- which we can't resolve, this is a noop.
 	if meta == ffi.NULL or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
@@ -743,8 +820,7 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 		else
 			meta.txn:invalidate()
 		end
-		self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
-		
+		self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)		
 		-- If timestamp of value changed, need to rewrite versioned value.
 		-- TODO(spencer,tobias): think about a new merge operator for
 		-- updating key of intent value to new timestamp instead of
@@ -759,6 +835,7 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 			self.db:rawdelete(orig_key, orig_key_len, opts)
 			self.db:rawput(new_key, new_key_len, v, vl, opts)
 		end
+		stats:committed(mkl, prev_meta_work[0], meta)
 		return
 	end
 
@@ -790,7 +867,9 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 		self.db:rawdelete(mk, mkl, opts)
 	else
 	-- print('possible key exists', _M.dump_key(iter:key()))
-		local _, _, timestamp = _M.bytes_codec:decode(iter:key())
+		local prev_k, prev_kl = iter:key()
+		local prev_v, prev_vl = iter:val()
+		local _k, _kl, timestamp = _M.bytes_codec:decode(prev_k, prev_kl)
 		if not timestamp then
 			exception.raise('mvcc', 'invalid_key', 'expected an MVCC value key', pstr(iter:key()))
 		end
@@ -804,6 +883,7 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 		-- Update the keyMetadata with the next version.
 		meta.timestamp = timestamp[0]
 		meta.txn:invalidate()
+		meta:set_current_kv_len(prev_kl, prev_vl)
 		-- meta:set_deleted()
 		self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
 		local restoredAgeSeconds = math.floor((ts:walltime() - timestamp:walltime())/1000)
@@ -811,9 +891,10 @@ function mvcc_mt:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
 		-- Update stat counters with older version.
 		-- ms.updateStatsOnAbort(key, origMetaKeySize, origMetaValSize, metaKeySize, metaValSize, meta, newMeta, origAgeSeconds, restoredAgeSeconds)
 	end
+	stats:aborted(mkl, prev_meta_work[0], meta, iter)
 end
-function mvcc_mt:end_txn_filter(k, kl, v, vl, ctx, ts, txn, opts)
-	self:resolve_txn_internal(k, kl, v, vl, ts, txn, opts)
+function mvcc_mt:end_txn_filter(k, kl, v, vl, ctx, stats, ts, txn, opts)
+	self:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
 	if ctx.count > 0 then
 		ctx.count = ctx.count - 1
 		return ctx.count <= 0
@@ -821,10 +902,13 @@ function mvcc_mt:end_txn_filter(k, kl, v, vl, ctx, ts, txn, opts)
 		ctx.count = ctx.count - 1 -- count delete num as negative value
 	end	
 end
-function mvcc_mt:end_txn(s, sl, e, el, n, ts, txn, opts)
+function mvcc_mt:end_txn(stats, s, sl, e, el, n, ts, txn, opts)
 	local ctx = { count = n }
-	self:rawscan(s, sl, e, el, opts, self.end_txn_filter, ctx, ts, txn, opts)
+	self:rawscan(s, sl, e, el, opts, self.end_txn_filter, ctx, stats, ts, txn, opts)
 	return n - ctx.count
+end
+function mvcc_mt:gc(stats)
+	assert(false, "TBD")
 end
 
 
