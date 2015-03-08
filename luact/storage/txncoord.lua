@@ -48,11 +48,14 @@ _M.SI = SNAPSHOT_ISOLATION
 local txn_mt = {}
 txn_mt.__index = txn_mt
 txn_mt.cache = {}
-function txn_mt.new(coord, isolation, debug_opts)
+function txn_mt.alloc()
 	if #txn_mt.cache > 0 then
 		return table.remove(txn_mt.cache)
 	end
-	local p = memory.alloc_typed('luact_dht_txn_t')
+	return memory.alloc_typed('luact_dht_txn_t')
+end
+function txn_mt.new(coord, isolation, debug_opts)
+	local p = txn_mt.alloc()
 	p:init(coord, isolation, debug_opts)
 	return p
 end
@@ -76,6 +79,7 @@ function txn_mt:fin()
 	self:invalidate()
 	table.insert(txn_mt.cache, self)
 end
+txn_mt.__gc = txn_mt.fin
 function txn_mt:__eq(txn)
 	return memory.cmp(self, txn, ffi.sizeof('luact_dht_txn_t'))
 end
@@ -83,7 +87,8 @@ function txn_mt:__len()
 	return ffi.sizeof('luact_dht_txn_t')
 end
 function txn_mt:__tostring()
-	return ("txn:%s:%s,ts(%s),max_ts(%s),st(%d),n(%d)"):format(
+	return ("txn(%s):%s:%s,ts(%s),max_ts(%s),st(%d),n(%d)"):format(
+		tostring(ffi.cast('void *', self)),
 		tostring(self.coord),
 		tostring(self.start_at),
 		tostring(self.timestamp),
@@ -92,12 +97,18 @@ function txn_mt:__tostring()
 	)
 end
 function txn_mt:clone(debug_opts)
-	for _, key in ipairs({"start_at", "timestamp", "status", "max_ts", "n_retry"}) do
-		if not debug_opts[key] then
-			debug_opts[key] = self[key]
+	if not debug_opts then
+		local p = txn_mt.alloc()
+		ffi.copy(p, self, ffi.sizeof(self))
+		return p
+	else
+		for _, key in ipairs({"start_at", "timestamp", "status", "max_ts", "n_retry"}) do
+			if not debug_opts[key] then
+				debug_opts[key] = self[key]
+			end
 		end
+		return txn_mt.new(self.coord, self.isolation, debug_opts)
 	end
-	return txn_mt.new(self.coord, self.isolation, debug_opts)
 end
 function txn_mt:same_origin(txn)
 	return uuid.equals(self.coord, txn.coord) and (self.start_at == txn.start_at)
