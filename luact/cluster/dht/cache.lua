@@ -12,23 +12,20 @@ cache_mt.__index = cache_mt
 function cache_mt:find(k, kl)
 	kl = kl or #k
 	for i=1,#self do
-		-- logger.info(self[i].start_key, ("%02x"):format(k:byte()), 
-		-- 	self[i].end_key:less_than_equals(k, kl), self[i].start_key:less_than_equals(k, kl))
-		if not self[i].end_key:less_than_equals(k, kl) then
-			if self[i].start_key:less_than_equals(k, kl) then
-				return self[i]
-			end
+		-- logger.info(self[i].start_key, self[i]:include(k, kl))
+		if self[i]:include(k, kl) then
+			return self[i]
 		end
 	end
 	return nil
 end
 function cache_mt:sort()
 	table.sort(self, function (a, b)
-		return a.start_key < b.start_key
+		return a.end_key < b.end_key
 	end)
 end
 function cache_mt:add(r)
-	local tmp = self:find(r.start_key:as_slice())
+	local tmp = self:find(r.end_key:as_slice())
 	if not tmp then
 		table.insert(self, r)
 		self:sort()
@@ -37,15 +34,13 @@ function cache_mt:add(r)
 	return tmp
 end
 function cache_mt:remove(r)
-	local k, kl = r.start_key:as_slice()
+	local k, kl = r.end_key:as_slice()
 	for i=1,#self do
 		-- logger.info(self[i].start_key, ("%02x"):format(k:byte()), 
 		-- 	self[i].end_key:less_than_equals(k, kl), self[i].start_key:less_than_equals(k, kl))
-		if not self[i].end_key:less_than_equals(k, kl) then
-			if self[i].start_key:less_than_equals(k, kl) then
-				table.remove(self, i)
-				break
-			end
+		if self[i]:include(k, kl) then
+			table.remove(self, i)
+			break
 		end
 	end
 end

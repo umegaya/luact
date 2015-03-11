@@ -5,6 +5,9 @@ local function dummy_range(start_key, end_key)
 	return {
 		start_key = start_key,
 		end_key = end_key,
+		include = function (self, k, kl)
+			return self.start_key:less_than(k, kl) and (not self.end_key:less_than(k, kl))
+		end,
 	}
 end
 
@@ -51,7 +54,7 @@ for i=("a"):byte(),("z"):byte() do
 	local k = (string.char(i)):rep(512)
 	local r = c:find(k)
 	c:remove(r)
-	-- print(r, r.start_key.p[0], i, ffi.string(r.start_key.p, r.start_key.length))
+	-- print(r, r.start_key.p[0], i, ffi.string(r.start_key.p, r.start_key:length()))
 	assert(not c:find(k))
 end
 

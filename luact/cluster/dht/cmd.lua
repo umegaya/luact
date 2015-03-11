@@ -284,7 +284,7 @@ function scan_mt:__len()
 	return scan_mt.size(self.kl, self:has_txn())
 end
 function scan_mt:apply_to(storage, range)
-	return range:exec_scan(storage, self:key(), self.kl, self.timestamp, self:get_txn())
+	return range:exec_scan(storage, self:key(), self.kl, self.n_process, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 

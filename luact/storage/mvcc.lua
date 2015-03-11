@@ -438,18 +438,27 @@ function mvcc_mt:committed_filter(k, kl, v, vl, fn, options, it)
 		end
 	end
 end
-function mvcc_mt:scan(s, sl, e, el, n, ts, txn, opts)
+function mvcc_mt:scan_internal(s, sl, e, el, n, boundary, ts, txn, opts)
 	local results = {}
-	-- hold iterator to retain memory block from it
-	results[0] = self:rawscan(s, sl, e, el, opts, self.default_filter, ts, txn, opts, n, results)
+	local it = self:rawscan_internal(s, sl, e, el, opts, self.default_filter, boundary, ts, txn, opts, n, results)
+	if #results > 0 then 
+		-- hold iterator to retain memory block from it
+		results[0] = it
+	end
 	return results -- after results gc'ed, it will be freed.
+end
+function mvcc_mt:scan(s, sl, e, el, n, ts, txn, opts)
+	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_ge, ts, txn, opts)
+end
+function mvcc_mt:scan_inclusive(s, sl, e, el, n, ts, txn, opts)
+	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_gt, ts, txn, opts)
 end
 function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
 	local iter = self.db:iterator(opts)
 	self:rawscan(s, sl, e, el, opts, self.committed_filter, cb, opts, iter)
 end
 -- scan and apply iterator for the meta key in {(s, sl) <= {key} < {e, el}} and its value.
-function mvcc_mt:rawscan(s, sl, e, el, opts, cb, ...)
+function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
 	local it = self.db:iterator(opts)
 	it:seek(_M.bytes_codec:encode(s, sl)) --> seek to the smallest of bigger key
 	while it:valid() do
@@ -458,7 +467,8 @@ function mvcc_mt:rawscan(s, sl, e, el, opts, cb, ...)
 		if ts then
 			exception.raise('mvcc', 'invalid_key', 'start key should not be versioned key', pstr(s, sl), ts)
 		end
-		if memory.rawcmp_ex(e, el, k, kl) <= 0 then
+		-- break if exceed end boundary
+		if boundary(e, el, k, kl) then
 			break
 		end
 		local v, vl = it:val()
@@ -469,6 +479,15 @@ function mvcc_mt:rawscan(s, sl, e, el, opts, cb, ...)
 		it:seek(_M.bytes_codec:encode(k, kl)) -- effectively skip all versioned key
 	end
 	return it
+end
+function mvcc_mt.break_if_ge(e, el, k, kl)
+	return memory.rawcmp_ex(e, el, k, kl) <= 0
+end
+function mvcc_mt.break_if_gt(e, el, k, kl)
+	return memory.rawcmp_ex(e, el, k, kl) < 0
+end
+function mvcc_mt:rawscan(s, sl, e, el, opts, cb, ...)
+	return self:rawscan_internal(s, sl, e, el, opts, cb, mvcc_mt.break_if_ge, ...)
 end
 function mvcc_mt:read_kv_filter(k, kl, v, vl, n, results)
 	if type(n) == 'number' then
@@ -484,8 +503,11 @@ function mvcc_mt:read_kv_filter(k, kl, v, vl, n, results)
 end
 function mvcc_mt:scan_all(s, e, n, opts)
 	local results = {}
-	-- holds iterator to retain memory block from it
-	results[0] = self:rawscan_all(s, #s, e, #e, opts, self.read_kv_filter, n, results)
+	local it = self:rawscan_all(s, #s, e, #e, opts, self.read_kv_filter, n, results)
+	if #results > 0 then
+		-- holds iterator to retain memory block from it
+		results[0] = it
+	end
 	return results
 end
 -- scan and apply iterator for all key in {(s, sl) <= {key} < {e, el}} and its value.
@@ -496,6 +518,7 @@ function mvcc_mt:rawscan_all(s, sl, e, el, opts, cb, ...)
 	while it:valid() do
 		local k, kl = it:key()
 		local ek, ekl, ts = _M.bytes_codec:decode(k, kl)
+		-- break if exceed end boundary
 		if memory.rawcmp_ex(e, el, ek, ekl) <= 0 then
 			break
 		end

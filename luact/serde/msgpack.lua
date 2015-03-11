@@ -155,6 +155,11 @@ function serde_mt.packer.table(buf, obj)
 		return serde_mt.packer["error"](buf, obj)
 	end	
 	local len, ofs, p = #obj
+	if obj[0] then
+		for k,v in pairs(obj) do
+			print(k, v)
+		end
+	end
 	if len > 0 and (not obj.__not_array__) then
 		serde_mt.pack_vararg(buf, obj, len)
 	else

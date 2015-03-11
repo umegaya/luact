@@ -57,9 +57,12 @@ typedef struct luact_dht_range {
 
 
 -- common helper
+local function make_unique(kind, key)
+	return string.char(kind)..key
+end
 local function make_metakey(kind, key)
 	if kind >= _M.KIND_VID then
-		return string.char(kind)..key
+		return make_unique(kind, key)
 	else
 		return key
 	end
@@ -149,10 +152,13 @@ function range_mt:fin()
 	assert(false, "TBD")
 end
 function range_mt:arbiter_id()
-	return self:metakey()
+	return make_unique(self.kind, ffi.string(self.end_key:as_slice()))
 end
 function range_mt:metakey()
-	return string.char(self.kind)..ffi.string(self.end_key:as_slice())
+	return make_metakey(self.kind, ffi.string(self.end_key:as_slice()))
+end
+function range_mt:cachekey()
+	return ffi.string(self.end_key:as_slice())
 end
 function range_mt:check_replica()
 	if self.replica_available < _M.NUM_REPLICA then
@@ -161,6 +167,10 @@ function range_mt:check_replica()
 end
 function range_mt:is_root_range()
 	return self.kind == _M.KIND_META1
+end
+-- start_key < k, kl <= end_key
+function range_mt:include(k, kl)
+	return self.start_key:less_than(k, kl) and (not self.end_key:less_than(k, kl))
 end
 function range_mt:belongs_to(node)
 	if self.replica_available <= 0 then
@@ -261,7 +271,7 @@ function range_mt:split(at, txn, timeout)
 	return self:write(cmd.split(self.kind, spk, spkl, range_manager.clock:issue(), txn), timeout)
 end
 function range_mt:scan(k, kl, n, txn, timeout)
-	return ffi.cast('luact_dht_range_t *', self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), timeout))
+	return self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), timeout)
 end
 function range_mt:end_txn(txn, n, s, sl, e, el)
 	-- does not wait for reply
@@ -294,8 +304,14 @@ end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
 	return sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 end
+local range_scan_filter_count
+function range_mt.range_scan_filter(k, kl, v, vl, ts, r)
+	table.insert(r, ffi.cast('luact_dht_range_t*', v))
+	return #r >= range_scan_filter_count
+end
 function range_mt:exec_scan(storage, k, kl, n, ts, txn)
-	return storage:scan(k, kl, self.start_key.p, self.start_key:length(), n, ts, txn)
+	range_scan_filter_count = n
+	return storage:scan_inclusive(k, kl, self.end_key.p, self.end_key:length(), range_mt.range_scan_filter, ts, txn)
 end
 function range_mt:exec_end_txn(storage, s, sl, e, el, n, ts, txn)
 	return storage:end_txn(self.stats, s, sl, e, el, n, ts, txn)
@@ -445,11 +461,11 @@ function range_manager_mt:bootstrap(nodelist)
 		-- put initial meta2 storage into root_range (with writing raft log)
 		local meta2 = self:new_range(key.MIN, key.MAX, _M.KIND_META2)
 		local meta2_key = meta2:metakey()
-		self.root_range:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), #meta2, nil, true)
+		self.root_range:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), #meta2, nil, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
 		local default = self:new_range(key.MIN, key.MAX, _M.KIND_VID)
 		local default_key = default:metakey()
-		meta2:rawput(default_key, #default_key, ffi.cast('char *', default), #default, nil, true)
+		meta2:rawput(default_key, #default_key, ffi.cast('char *', default), #default, nil, nil, true)
 	end
 end
 -- shutdown range manager.
@@ -498,10 +514,9 @@ function range_manager_mt:create_fsm_for_arbiter(rng)
 	if not self.ranges[kind] then
 		exception.raise('fatal', 'range manager not initialized', kind)
 	end
-	local r = self.ranges[kind]:find(rng.start_key:as_slice())
+	local r = self.ranges[kind]:find(rng:cachekey())
 	if not r then
-		r = range_mt.alloc(rng.n_replica)
-		ffi.copy(r, rng, range_mt.size(rng.n_replica))
+		r = rng:clone() -- rng is from packet, so volatile
 		self.ranges[kind]:add(r)
 		if kind > _M.KIND_META1 then
 			self.caches[kind]:add(r)
@@ -588,9 +603,11 @@ function range_manager_mt:find(k, kl, kind)
 			end
 			-- first one is our target.
 			r = r[1]
-		else
-			self.caches[kind]:add(r)
+		else 
+			-- if not table, it means r is from cache, so no need to re-cache
 		end
+	else
+		exception.raise('not_found', 'cannot find range for', ('%q'):format(ffi.string(k, kl)))
 	end
 	return r
 end
@@ -749,6 +766,7 @@ function _M.get_manager(nodelist, datadir, opts)
 		}, range_manager_mt)
 		-- start range manager
 		range_manager:bootstrap(nodelist)
+		logger.info('bootstrap finish')
 	end
 	return range_manager
 end

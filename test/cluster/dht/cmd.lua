@@ -26,10 +26,11 @@ assert(memory.cmp(c:key(), "fugu", 4), "argument and stored data should be same"
 assert(memory.cmp(c:oldval(), "oldbaz", 6), "argument and stored data should be same")
 assert(memory.cmp(c:newval(), "newbaz", 6), "argument and stored data should be same")
 
-local m = cmd.merge(4, "guha", 4, "cas barbaz", 10, hlc(1))
+local m = cmd.merge(4, "guha", 4, "barbaz", 10, "cas", 3, hlc(1))
 assert(m.kind == 4, "kind should be same as given to ctor")
 assert(memory.cmp(m:key(), "guha", 4), "argument and stored data should be same")
-assert(memory.cmp(m:val(), "cas barbaz", 10), "argument and stored data should be same")
+assert(memory.cmp(m:val(), "barbaz", 10), "argument and stored data should be same")
+assert(memory.cmp(m:op(), "cas", 3), "argument and stored data should be same")
 
 local s = cmd.split(5, "gyaa", 4, hlc(1))
 assert(s.kind == 5, "kind should be same as given to ctor")
