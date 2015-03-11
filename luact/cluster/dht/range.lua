@@ -23,6 +23,8 @@ local cache = require 'luact.cluster.dht.cache'
 local cmd = require 'luact.cluster.dht.cmd'
 local scanner = require 'luact.cluster.dht.scanner'
 
+local mvcc = require 'luact.storage.mvcc'
+
 
 -- module share variable
 local _M = {}
@@ -48,6 +50,7 @@ typedef struct luact_dht_range {
 	luact_dht_key_t start_key;
 	luact_dht_key_t end_key;
 	uint8_t n_replica, kind, replica_available, padd;
+	luact_mvcc_stats_t stats;
 	luact_uuid_t replicas[0];		//arbiter actors' uuid
 } luact_dht_range_t;
 ]]
@@ -66,11 +69,13 @@ local function make_syskey(category, key)
 	return '\0'..string.char(category)..key
 end
 -- synchorinized merge
-local function sync_merge(storage, k, kl, v, vl, ts, txn)
-	storage:rawmerge(k, kl, v, vl, ts, txn)
-	-- resolve all logs for this key (thus it processed above merge immediately)
-	v, vl = storage:rawget(k, kl, ts, txn) 
-	memory.free(v)
+local function sync_merge(storage, stats, k, kl, v, vl, ts, txn)
+	return storage:rawmerge(stats, k, kl, v, vl, ts, txn)
+end
+local function rawget_to_s(v, vl)
+	if v then
+		return ffi.string(v, vl)
+	end
 end
 
 
@@ -131,9 +136,12 @@ function range_mt:debug_add_replica(a)
 	self.replica_available = self.replica_available + 1
 end
 
-function range_mt:clone()
+function range_mt:clone(gc)
 	local p = ffi.cast('luact_dht_range_t*', memory.alloc(#self))
 	ffi.copy(p, self, #self)
+	if gc then
+		ffi.gc(p, memory.free)
+	end
 	return p
 end
 function range_mt:fin()
@@ -144,7 +152,7 @@ function range_mt:arbiter_id()
 	return self:metakey()
 end
 function range_mt:metakey()
-	return string.char(self.kind)..ffi.string(self.start_key:as_slice())
+	return string.char(self.kind)..ffi.string(self.end_key:as_slice())
 end
 function range_mt:check_replica()
 	if self.replica_available < _M.NUM_REPLICA then
@@ -206,108 +214,98 @@ function range_mt:read(k, kl, ts, txn, consistent, timeout)
 		return self:write(cmd.get(self.kind, k, kl, ts, txn), timeout)
 	else
 		self:check_replica()
-		return self.replicas[0]:read(ffi.string(k, kl), timeout)
+		return self.replicas[0]:read(timeout, k, kl, ts, txn)
 	end
 end
 -- operation to range
-function range_mt:get(k, ts, txn, consistent, timeout)
-	return self:rawget(k, #k, ts, txn, consistent, timeout)
+function range_mt:get(k, txn, consistent, timeout)
+	return self:rawget(k, #k, txn, consistent, timeout)
 end
-function range_mt:rawget(k, kl, ts, txn, consistent, timeout)
-	return self:read(k, kl, ts, txn, consistent, timeout)
+function range_mt:rawget(k, kl, txn, consistent, timeout)
+	return self:read(k, kl, range_manager.clock:issue(), txn, consistent, timeout)
 end
-function range_mt:put(k, v, ts, txn, timeout)
-	return self:rawput(k, #k, v, #v, ts, txn, timeout)
+function range_mt:put(k, v, txn, timeout)
+	return self:rawput(k, #k, v, #v, txn, timeout)
 end
-function range_mt:rawput(k, kl, v, vl, ts, txn, timeout, dictatorial)
-	return self:write(cmd.put(self.kind, k, kl, v, vl, ts, txn), timeout, dictatorial)
+function range_mt:rawput(k, kl, v, vl, txn, timeout, dictatorial)
+	return self:write(cmd.put(self.kind, k, kl, v, vl, range_manager.clock:issue(), txn), timeout, dictatorial)
 end
-function range_mt:merge(k, v, ts, txn, timeout)
-	return self:rawmerge(k, #k, v, #v, ts, txn, timeout)
+function range_mt:merge(k, v, op, txn, timeout)
+	return self:rawmerge(k, #k, v, #v, op, #op, txn, timeout)
 end
-function range_mt:rawmerge(k, kl, v, vl, ts, txn, timeout)
-	return self:write(cmd.merge(self.kind, k, kl, v, vl, ts, txn), timeout)
+function range_mt:rawmerge(k, kl, v, vl, op, ol, txn, timeout)
+	return self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), timeout)
 end
-function range_mt:cas(k, ov, nv, ts, txn, timeout)
+function range_mt:cas(k, ov, nv, txn, timeout)
 	local oval, ol = ov or nil, ov and #ov or 0
 	local nval, nl = nv or nil, nv and #nv or 0
 	local cas = range_manager.storage_module.op_cas(ov, nv, nil, ovl, nvl)
-	return self:rawcas(k, #k, oval, ol, nval, nl, ts, txn, timeout)
+	return self:rawcas(k, #k, oval, ol, nval, nl, txn, timeout)
 end
-function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, ts, txn, timeout)
-	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, ts, txn), timeout)
+function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, txn, timeout)
+	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), timeout)
 end
-function range_mt:watch(k, kl, watcher, method, ts, txn, timeout)
-	return self:write(cmd.watch(self.kind, k, kl, watcher, method, ts, txn), timeout)
+function range_mt:watch(k, kl, watcher, method, timeout)
+	return self:write(cmd.watch(self.kind, k, kl, watcher, method, range_manager.clock:issue()), timeout)
 end
-function range_mt:split(range_key, ts, txn, timeout)
-	return self:write(cmd.split(self.kind, range_key, ts, txn), timeout)
+function range_mt:split(at, txn, timeout)
+	local spk, spkl
+	if at then
+		spk, spkl = at, #at
+	else
+		local cf = self:kv_group()
+		spk, spkl = cf:find_split_key(self.stats, 
+			self.start_key.p, self.start_key:length(),
+			self.end_key.p, self.end_key:length())
+	end
+	return self:write(cmd.split(self.kind, spk, spkl, range_manager.clock:issue(), txn), timeout)
 end
-function range_mt:scan(k, kl, ts, txn, timeout)
-	return ffi.cast('luact_dht_range_t *', self:write(cmd.scan(self.kind, k, kl, ts, txn), timeout))
+function range_mt:scan(k, kl, n, txn, timeout)
+	return ffi.cast('luact_dht_range_t *', self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), timeout))
 end
-function range_mt:end_txn(sk, skl, txn, commit)
+function range_mt:end_txn(txn, n, s, sl, e, el)
 	-- does not wait for reply
-	return self:write_no_wait(cmd.end_txn(sk, skl, txn, commit))
+	local ts = range_manager.clock:issue()
+	if s then
+		return self:write_no_wait(cmd.end_txn(s, sl, e, el, n, ts, txn))
+	else
+		return self:write_no_wait(cmd.end_txn(self.start_key.p, self.start_key:length(),
+			self.end_key.p, self.end_key:length(), n, ts, txn))
+	end
 end
-function range_mt:split_at(at)
-	assert(false, "TBD")
+function range_mt:new_txn()
+	local cf = self:kv_group()
+	return cf:new_txn()
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn)
-	-- logger.warn('exec_get', storage, tostring(k), kl)
-	local v, vl = storage:rawget(k, kl, ts, txn)
-	if v ~= ffi.NULL then
-		local p = ffi.string(v, vl)
-		memory.free(v)
-		return p
-	end
+	return rawget_to_s(storage:rawget(k, kl, ts, txn))
 end
 function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
-	return storage:rawput(k, kl, v, vl, ts, txn)
+	return storage:rawput(self.stats, k, kl, v, vl, ts, txn)
 end
-function range_mt:exec_merge(storage, k, kl, v, vl, ts, txn)
-	return storage:rawmerge(k, kl, v, vl, ts, txn)
+function range_mt:exec_merge(storage, k, kl, v, vl, op, ts, txn)
+	return storage:rawmerge(self.stats, k, kl, v, vl, op, ts, txn)
 end
-range_mt.cas_result = memory.alloc_typed('bool')
-local function sync_cas(storage, k, kl, o, ol, n, nl, ts, txn)
-	range_mt.cas_result[0] = false
-	local cas = range_manager.storage_module.op_cas(o, n, range_mt.cas_result, ol, nl)
-	sync_merge(storage, k, kl, cas, #cas, ts, txn)
-	return range_mt.cas_result[0]
+local function sync_cas(storage, stats, k, kl, o, ol, n, nl, ts, txn)
+	local cas = range_manager.storage_module.op_cas(o, n, ol, nl)
+	return storage:rawmerge(stats, k, kl, cas, #cas, 'cas', ts, txn)
 end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
-	return sync_cas(storage, k, kl, o, ol, n, nl, ts, txn)
+	return sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 end
-function range_mt:exec_scan(storage, k, kl, ts, txn)
-	local it = storage:iterator()
-	it:seek(k, kl) --> seek to the smallest of bigger key
-	if it:valid() then
-		it:prev() --> it seeks to biggest of smallest key
-	end
-	if not it:valid() then 
-		it:first() --> search from first for safety
-	end
-	logger.info('exec_scan', ('%q'):format(ffi.string(k, kl)), it:valid(), ('%q'):format(ffi.string(it:key())))
-	while it:valid() do
-		local v, vl = it:val()	
-		v = ffi.cast('luact_dht_range_t*', v)
-		-- v.start_key <= k, kl <= v.end_key
-		if v.start_key:less_than_equals(k, kl) and (not v.end_key:less_than(k, kl)) then
-			-- logger.info('exec_scan: returns', v)
-			return v
-		end
-		it:next()
-	end
+function range_mt:exec_scan(storage, k, kl, n, ts, txn)
+	return storage:scan(k, kl, self.start_key.p, self.start_key:length(), n, ts, txn)
 end
-function range_mt:exec_end_txn(storage, k, kl, txn, commit)
-	return storage:end_txn(k, kl, txn, commit)
+function range_mt:exec_end_txn(storage, s, sl, e, el, n, ts, txn)
+	return storage:end_txn(self.stats, s, sl, e, el, n, ts, txn)
 end
-function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts, txn)
+function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts)
 	assert(false, "TBD")
 end
-function range_mt:exec_split(storage, k, kl, ts, txn)
-	assert(false, "TBD")
+function range_mt:exec_split(storage, s, sl, e, el, ts)
+	local spk, spkl = storage:find_split_key(self.stats, s, sl, e, el)
+	-- TODO : run split tentacle, instead of do split txn immediately in here.
 end
 function range_mt:kv_group()
 	return range_manager.kv_groups[self.kind]
@@ -332,9 +330,9 @@ function range_mt:metadata()
 		key = self.start_key,
 	}
 end
-function range_mt:fetch_state(key)
+function range_mt:fetch_state(k, kl, ts, txn)
 	local cf = self:kv_group()
-	return cf:get(key)
+	return rawget_to_s(cf:rawget(k, kl, ts, txn))
 end
 function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if not uuid.valid(leader) then
@@ -409,6 +407,7 @@ serde_common.register_ctype('struct', 'luact_dht_range', {
 	},
 }, serde_common.LUACT_DHT_RANGE)
 serde_common.register_ctype('struct', 'luact_dht_key', nil, serde_common.LUACT_DHT_KEY)
+serde_common.register_ctype('union', 'pulpo_hlc', nil, serde_common.LUACT_HLC)
 ffi.metatype('luact_dht_range_t', range_mt)
 
 
@@ -422,11 +421,14 @@ range_manager_mt.__index = range_manager_mt
 -- wait for initialization
 function range_manager_mt:bootstrap(nodelist)
 	local opts = self.opts
-	local cluster_bootstrap = (not nodelist)
+	local bootstrap_stats
+	if not nodelist then
+		bootstrap_stats = ffi.new('luact_mvcc_stats_t')
+	end
 	-- create storage for initial dht setting with bootstrap mode
-	local root_cf = self:new_kv_group(_M.KIND_META1, _M.META1_FAMILY, cluster_bootstrap)
-	local meta2_cf = self:new_kv_group(_M.KIND_META2, _M.META2_FAMILY, cluster_bootstrap)
-	local default_cf = self:new_kv_group(_M.KIND_VID, _M.VID_FAMILY, cluster_bootstrap)
+	local root_cf = self:new_kv_group(_M.KIND_META1, _M.META1_FAMILY, bootstrap_stats)
+	local meta2_cf = self:new_kv_group(_M.KIND_META2, _M.META2_FAMILY, bootstrap_stats)
+	local default_cf = self:new_kv_group(_M.KIND_VID, _M.VID_FAMILY, bootstrap_stats)
 	-- start dht gossiper
 	self.gossiper = luact.root_actor.gossiper(opts.gossip_port, {
 		nodelist = nodelist,
@@ -435,22 +437,19 @@ function range_manager_mt:bootstrap(nodelist)
 		end
 	})
 	-- primary thread create initial cluster data structure
-	if cluster_bootstrap then
+	if bootstrap_stats then
 		-- create root range
 		self.root_range = self:new_range(key.MIN, key.MAX, _M.KIND_META1, true)
+		self.root_range.stats = bootstrap_stats
 		self.root_range:start_replica_set()
 		-- put initial meta2 storage into root_range (with writing raft log)
 		local meta2 = self:new_range(key.MIN, key.MAX, _M.KIND_META2)
 		local meta2_key = meta2:metakey()
-		self.root_range:rawput(
-			meta2_key, #meta2_key, ffi.cast('char *', meta2), #meta2, 
-			self.clock:issue(), nil, true)
+		self.root_range:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), #meta2, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
 		local default = self:new_range(key.MIN, key.MAX, _M.KIND_VID)
 		local default_key = default:metakey()
-		meta2:rawput(
-			default_key, #default_key, ffi.cast('char *', default), #default, 
-			self.clock:issue(), nil, true)
+		meta2:rawput(default_key, #default_key, ffi.cast('char *', default), #default, nil, true)
 	end
 end
 -- shutdown range manager.
@@ -522,10 +521,11 @@ function range_manager_mt:clear_cache(rng)
 		self.caches[kind]:remove(rng)
 	end
 end
-function range_manager_mt:new_kv_group(kind, name, cluster_bootstrap)
+function range_manager_mt:new_kv_group(kind, name, bootstrap_stats)
 	if #self.kv_groups >= 255 then
 		exception.raise('invalid', 'cannot create new family: full')
 	end
+	local stats 
 	local c = self.kv_groups.lookup[name]
 	if not c then
 		c = self.storage:column_family(name)
@@ -536,9 +536,10 @@ function range_manager_mt:new_kv_group(kind, name, cluster_bootstrap)
 		end
 		self.kv_groups.lookup[name] = c
 	end
-	if cluster_bootstrap then
+	if bootstrap_stats then
+		local storage = self.kv_groups[_M.KIND_META1]
 		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(kind))
-		if not sync_cas(c, syskey, #syskey, nil, 0, name, #name, self.clock:issue()) then
+		if not sync_cas(storage, bootstrap_stats, syskey, #syskey, nil, 0, name, #name, self.clock:issue()) then
 			exception.raise('fatal', 'initial kind of dht cannot registered', kind, name)
 		end
 	end
@@ -552,6 +553,7 @@ end
 ]]
 function range_manager_mt:find(k, kl, kind)
 	local r
+	local prefetch = self.opts.range_prefetch
 	kind = kind or _M.KIND_VID
 	if kind >= _M.KIND_VID then
 		r = self.caches[kind]:find(k, kl)
@@ -563,7 +565,7 @@ function range_manager_mt:find(k, kl, kind)
 			-- find range from meta ranges
 			r = self:find(k, kl, _M.KIND_META2)
 			if r then
-				r = r:scan(k, kl, self.clock:issue())
+				r = r:scan(k, kl, prefetch)
 			end
 		end
 	elseif kind > _M.KIND_META1 then
@@ -572,14 +574,23 @@ function range_manager_mt:find(k, kl, kind)
 			-- find range from top level meta ranges
 			r = self:find(k, kl, kind - 1)
 			if r then
-				r = r:scan(k, kl, self.clock:issue())
+				r = r:scan(k, kl, prefetch)
 			end
 		end
 	else -- KIND_META1
 		return self.root_range
 	end
 	if r then
-		self.caches[kind]:add(r)
+		if type(r) == 'table' then
+			-- cache all fetched range
+			for i=1,#r do
+				self.caches[kind]:add(r[i])
+			end
+			-- first one is our target.
+			r = r[1]
+		else
+			self.caches[kind]:add(r)
+		end
 	end
 	return r
 end
@@ -718,7 +729,7 @@ function _M.get_manager(nodelist, datadir, opts)
 			exception.raise('fatal', 'range: initializing parameter not given')
 		end
 		_M.NUM_REPLICA = opts.n_replica
-		local storage_module = require ('luact.storage.'..opts.storage) 
+		local storage_module = require ('luact.storage.mvcc.'..opts.storage) 
 		-- local storage_module = require ('luact.cluster.dht.mvcc.'..opts.storage) 
 		fs.mkdir(datadir)
 		range_manager = setmetatable({

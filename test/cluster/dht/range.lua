@@ -22,15 +22,16 @@ tools.start_luact(1, nil, function ()
 		local a = range_arbiters[id]
 		if not a then
 			a = luact({
-				read = function (self, key, timeout)
+				read = function (self, timeout, ...)
+				--print('range:read', ...)
 					consistent_flag = false
-					return rng:exec_get(storage, key, #key)
+					return rng:exec_get(storage, ...)
 				end,
 				write = function (self, logs, timeout, dictatorial)
 					if ffi.typeof('luact_dht_cmd_get_t*') == ffi.typeof(logs[1]) then
 						consistent_flag = true
 					end
-					logger.info('write', logs, timeout, dictatorial)
+					--logger.info('write', logs, timeout, dictatorial)
 					return rng:apply(logs[1])
 				end,
 			})
@@ -48,18 +49,17 @@ tools.start_luact(1, nil, function ()
 	})
 	
 	local key = "hoge"
-	print('put test', rm)
-	rm:find(key):put(key, "fuga", hlc(1))
+	print('put test')
+	rm:find(key):put(key, "fuga")
 	print('get test')
-	assert(rm:find(key):get(key, hlc(1)) == "fuga" and (not consistent_flag), "same value as given to put should be returned")
+	assert(rm:find(key):get(key) == "fuga" and (not consistent_flag), "same value as given to put should be returned")
 	print('cas test1')
-	local res = rm:find(key):cas(key, "gyaa", "guha", hlc(1))
-	print('cas test1:', res)
+	local res = rm:find(key):cas(key, "gyaa", "guha")
 	assert(not res, "cas should fail if condition not met")
 	print('cas test2')
-	assert(rm:find(key):cas(key, "fuga", "guha", hlc(1)), "cas should success if condition met")
+	assert(rm:find(key):cas(key, "fuga", "guha"), "cas should success if condition met")
 	print('get test2')
-	assert(rm:find(key):get(key, hlc(1), true) == "guha" and consistent_flag, "result of get also should change")
+	assert(rm:find(key):get(key, nil, true) == "guha" and consistent_flag, "result of get also should change")
 	
 end)
 

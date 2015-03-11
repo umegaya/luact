@@ -188,7 +188,7 @@ function mvcc_meta_mt:set_inline_value(v, vl)
 end
 function mvcc_meta_mt:set_txn(txn)
 	if txn then
-		self.txn = txn
+		ffi.copy(self.txn, txn, ffi.sizeof(self.txn))
 	else
 		self.txn:invalidate()
 	end
@@ -441,7 +441,7 @@ end
 function mvcc_mt:scan(s, sl, e, el, n, ts, txn, opts)
 	local results = {}
 	-- hold iterator to retain memory block from it
-	results.it = self:rawscan(s, sl, e, el, opts, self.default_filter, ts, txn, opts, n, results)
+	results[0] = self:rawscan(s, sl, e, el, opts, self.default_filter, ts, txn, opts, n, results)
 	return results -- after results gc'ed, it will be freed.
 end
 function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
@@ -451,7 +451,6 @@ end
 -- scan and apply iterator for the meta key in {(s, sl) <= {key} < {e, el}} and its value.
 function mvcc_mt:rawscan(s, sl, e, el, opts, cb, ...)
 	local it = self.db:iterator(opts)
-	-- print('-- iterate keys'); traverse_iter(it, function (iter) _M.dump_key(iter:key()) end); print('-- end iterate keys')
 	it:seek(_M.bytes_codec:encode(s, sl)) --> seek to the smallest of bigger key
 	while it:valid() do
 		local k, kl, ts = _M.bytes_codec:decode(it:key())
@@ -486,10 +485,7 @@ end
 function mvcc_mt:scan_all(s, e, n, opts)
 	local results = {}
 	-- holds iterator to retain memory block from it
-	results.it = self:rawscan_all(s, #s, e, #e, opts, self.read_kv_filter, n, results)
-	--for i=1,#results do
-	--	print('scan_all', _M.inspect_key(ffi.cast('char *', results[i][1]), results[i][2]))
-	--end
+	results[0] = self:rawscan_all(s, #s, e, #e, opts, self.read_kv_filter, n, results)
 	return results
 end
 -- scan and apply iterator for all key in {(s, sl) <= {key} < {e, el}} and its value.

@@ -95,6 +95,7 @@ local default_opts = {
 	replica_maintain_interval = 1.0,
 	collect_garbage_interval = 60 * 60,
 	gossip_port = 8008,
+	range_prefetch = 8,
 }
 local function configure_datadir(opts)
 	if not opts.datadir then

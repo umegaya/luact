@@ -81,5 +81,6 @@ function _M.make_key(k, kl, ts)
 end
 _M.upper_bound_of_prefix = mvcc.upper_bound_of_prefix
 _M.dump_key = mvcc.dump_key
+_M.op_cas = mvcc.op_cas
 
 return _M

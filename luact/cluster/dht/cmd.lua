@@ -13,34 +13,35 @@ local _M = {}
 ffi.cdef [[
 typedef struct luact_dht_cmd_get {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
+	uint8_t kind, txn_f;
 	uint16_t kl;
-	char k[0];
+	char p[0];
 } luact_dht_cmd_get_t;
 
 typedef struct luact_dht_cmd_put {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
+	uint8_t kind, txn_f;
 	uint16_t kl;
 	uint32_t vl;
-	char kv[0];	
+	char p[0];	
 } luact_dht_cmd_put_t;
 
 typedef struct luact_dht_cmd_cas {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
+	uint8_t kind, txn_f;
 	uint16_t kl;
 	uint32_t ol;
 	uint32_t nl;
-	char kon[0];		
+	char p[0];		
 } luact_dht_cmd_cas_t;
 
 typedef struct luact_dht_cmd_merge {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
+	uint8_t kind, txn_f;
 	uint16_t kl;
 	uint32_t vl;
-	char kv[0];		
+	uint8_t ol;
+	char p[0];		
 } luact_dht_cmd_merge_t;
 
 typedef struct luact_dht_cmd_watch {
@@ -55,23 +56,25 @@ typedef struct luact_dht_cmd_watch {
 
 typedef struct luact_dht_cmd_split {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
+	uint8_t kind, txn_f;
 	uint16_t kl;
-	char k[0];
+	char p[0];
 } luact_dht_cmd_split_t;
 
 typedef struct luact_dht_cmd_scan {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, padd;
-	uint16_t kl;
-	char k[0];	
+	uint8_t kind, txn_f;
+	uint16_t kl, n_process;
+	char p[0];	
 } luact_dht_cmd_scan_t;
 
 typedef struct luact_dht_cmd_end_txn {
+	pulpo_hlc_t timestamp;
 	uint8_t kind, commit;
-	uint16_t kl;
+	uint16_t n_process;
+	uint16_t skl, ekl;
 	luact_dht_txn_t txn;
-	char k[0];
+	char p[0];
 } luact_dht_cmd_end_txn_t;
 
 typedef struct luact_dht_gossip_replica_change {
@@ -119,75 +122,106 @@ register_ctype('struct', 'luact_dht_cmd_scan', 'luact_dht_cmd_scan_t', serde_com
 register_ctype('struct', 'luact_dht_gossip_replica_change', 'luact_dht_gossip_replica_change_t', serde_common.LUACT_DHT_GOSSIP_REPLICA_CHANGE)
 register_ctype('struct', 'luact_dht_gossip_range_split', 'luact_dht_gossip_range_split_t', serde_common.LUACT_DHT_GOSSIP_RANGE_SPLIT)
 
+-- base command
+local base_mt = {}
+function base_mt:set_txn(txn)
+	if txn then
+		ffi.copy(self:txn(), txn, ffi.sizeof(txn))
+		self.txn_f = 1
+		assert(false, debug.traceback())
+	else
+		self.txn_f = 0
+	end
+end
+function base_mt:get_txn()
+	if self:has_txn() then
+		print(self.txn_f)
+		assert(false, debug.traceback())
+		return ffi.cast('luact_dht_txn_t *', self:txn())
+	end
+	return false
+end
+function base_mt:has_txn() 
+	return self.txn_f ~= 0
+end
+
 -- get command
-local get_mt = {}
+local get_mt = util.copy_table(base_mt)
 get_mt.__index = get_mt
 get_mt.__gc = memory.free
-function get_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_get_t') + kl
+function get_mt.size(kl, txn)
+	return ffi.sizeof('luact_dht_cmd_get_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function get_mt.new(kind, k, kl, timestamp)
-	local p = ffi.cast('luact_dht_cmd_get_t*', memory.alloc(get_mt.size(kl)))
+function get_mt.new(kind, k, kl, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_get_t*', memory.alloc(get_mt.size(kl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
 	ffi.copy(p:key(), k, kl)
+	p:set_txn(txn)
 	return p
 end
 _M.get = get_mt.new
 function get_mt:key()
-	return self.k
+	return self.p
+end
+function get_mt:txn()
+	return self.p + self.kl
 end
 function get_mt:__len()
-	return get_mt.size(self.kl)
+	return get_mt.size(self.kl, self:has_txn())
 end
 function get_mt:apply_to(storage, range)
-	return range:exec_get(storage, self:key(), self.kl, self.timestamp)
+	return range:exec_get(storage, self:key(), self.kl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_get_t', get_mt)
 
 -- put command
-local put_mt = {}
+local put_mt = util.copy_table(base_mt)
 put_mt.__index = put_mt
 put_mt.__gc = memory.free
-function put_mt.size(kl, vl)
-	return ffi.sizeof('luact_dht_cmd_put_t') + kl + vl
+function put_mt.size(kl, vl, txn)
+	return ffi.sizeof('luact_dht_cmd_put_t') + kl + vl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function put_mt.new(kind, k, kl, v, vl, timestamp)
-	local p = ffi.cast('luact_dht_cmd_put_t*', memory.alloc(put_mt.size(kl, vl)))
+function put_mt.new(kind, k, kl, v, vl, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_put_t*', memory.alloc(put_mt.size(kl, vl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
 	p.vl = vl
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:val(), v, vl)
+	p:set_txn(txn)
 	return p
 end
 _M.put = put_mt.new
 function put_mt:key()
-	return self.kv
+	return self.p
 end
 function put_mt:val()
-	return self.kv + self.kl
+	return self.p + self.kl
+end
+function put_mt:txn()
+	return self.p + self.kl + self.vl
 end
 function put_mt:__len()
-	return put_mt.size(self.kl, self.vl)
+	return put_mt.size(self.kl, self.vl, self:has_txn())
 end
 function put_mt:apply_to(storage, range)
-	return range:exec_put(storage, self:key(), self.kl, self:val(), self.vl, self.timestamp)
+	return range:exec_put(storage, self:key(), self.kl, self:val(), self.vl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_put_t', put_mt)
 
 
 -- cas command
-local cas_mt = {}
+local cas_mt = util.copy_table(base_mt)
 cas_mt.__index = cas_mt
 cas_mt.__gc = memory.free
-function cas_mt.size(kl, ol, nl)
-	return ffi.sizeof('luact_dht_cmd_cas_t') + kl + ol + nl
+function cas_mt.size(kl, ol, nl, txn)
+	return ffi.sizeof('luact_dht_cmd_cas_t') + kl + ol + nl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function cas_mt.new(kind, k, kl, o, ol, n, nl, timestamp)
-	local p = ffi.cast('luact_dht_cmd_cas_t*', memory.alloc(cas_mt.size(kl, ol, nl)))
+function cas_mt.new(kind, k, kl, o, ol, n, nl, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_cas_t*', memory.alloc(cas_mt.size(kl, ol, nl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
@@ -196,119 +230,143 @@ function cas_mt.new(kind, k, kl, o, ol, n, nl, timestamp)
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:oldval(), o, ol)
 	ffi.copy(p:newval(), n, nl)
+	p:set_txn(txn)
 	return p
 end
 _M.cas = cas_mt.new
 function cas_mt:key()
-	return self.kon
+	return self.p
 end
 function cas_mt:oldval()
-	return self.kon + self.kl
+	return self.p + self.kl
 end
 function cas_mt:newval()
-	return self.kon + self.kl + self.ol
+	return self.p + self.kl + self.ol
+end
+function cas_mt:txn()
+	return self.p + self.kl + self.ol + self.nl
 end
 function cas_mt:__len()
-	return cas_mt.size(self.kl, self.ol, self.nl)
+	return cas_mt.size(self.kl, self.ol, self.nl, self:has_txn())
 end
 function cas_mt:apply_to(storage, range)
-	return range:exec_cas(storage, self:key(), self.kl, self:oldval(), self.ol, self:newval(), self.nl, self.timestamp)
+	return range:exec_cas(storage, self:key(), self.kl, 
+		self:oldval(), self.ol, self:newval(), self.nl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_cas_t', cas_mt)
 
 
 -- scan command
-local scan_mt = {}
+local scan_mt = util.copy_table(base_mt)
 scan_mt.__index = scan_mt
 scan_mt.__gc = memory.free
-function scan_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_scan_t') + kl
+function scan_mt.size(kl, txn)
+	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function scan_mt.new(kind, k, kl, timestamp)
-	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl)))
+function scan_mt.new(kind, k, kl, n, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
+	p.n_process = n or 0
 	ffi.copy(p:key(), k, kl)
+	p:set_txn(txn)
 	return p
 end
 _M.scan = scan_mt.new
 function scan_mt:key()
-	return self.k
+	return self.p
+end
+function scan_mt:txn()
+	return self.k + self.kl
 end
 function scan_mt:__len()
-	return scan_mt.size(self.kl)
+	return scan_mt.size(self.kl, self:has_txn())
 end
 function scan_mt:apply_to(storage, range)
-	return range:exec_scan(storage, self:key(), self.kl, self.timestamp)
+	return range:exec_scan(storage, self:key(), self.kl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 
 
--- scan command
+-- end_txn command
 local end_txn_mt = {}
 end_txn_mt.__index = end_txn_mt
 end_txn_mt.__gc = memory.free
-function end_txn_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_end_txn_t') + kl
+function end_txn_mt.size(skl, ekl)
+	return ffi.sizeof('luact_dht_cmd_end_txn_t') + skl + ekl
 end
-function end_txn_mt.new(kind, sk, skl, txn, commit)
-	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(skl)))
+function end_txn_mt.new(kind, sk, skl, ek, ekl, n, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(skl, ekl)))
 	p.kind = kind
-	p.commit = commit and 1 or 0
+	p.timestamp = timestamp
 	p.txn = txn
-	p.kl = skl
-	ffi.copy(p:key(), sk, skl)
+	p.skl = skl
+	p.ekl = ekl
+	p.n_process = n or 0
+	ffi.copy(p:start_key(), sk, skl)
+	ffi.copy(p:end_key(), ek, ekl)
 	return p
 end
 _M.end_txn = end_txn_mt.new
 function end_txn_mt:txn()
 	return self.txn
 end
-function end_txn_mt:key()
-	return self.k
+function end_txn_mt:start_key()
+	return self.p
 end
-function end_txn_mt:commit()
-	return self.commit ~= 0
+function end_txn_mt:end_key()
+	return self.p + self.skl
 end
 function end_txn_mt:__len()
-	return end_txn_mt.size()
+	return end_txn_mt.size(self.skl, self.ekl)
 end
 function end_txn_mt:apply_to(storage, range)
-	return range:exec_end_txn(storage, self:key(), self.kl, self:txn(), self:commit())
+	return range:exec_end_txn(storage, 
+		self:start_key(), self.skl, self:end_key(), self.ekl, 
+		self.n_process, self.timestamp, self:txn())
 end
 ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
 
 
 -- merge command
-local merge_mt = {}
+local merge_mt = util.copy_table(base_mt)
 merge_mt.__index = merge_mt
 merge_mt.__gc = memory.free
-function merge_mt.size(kl, vl)
-	return ffi.sizeof('luact_dht_cmd_merge_t') + kl + vl
+function merge_mt.size(kl, vl, ol, txn)
+	return ffi.sizeof('luact_dht_cmd_merge_t') + kl + vl + ol + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function merge_mt.new(kind, k, kl, v, vl, timestamp)
-	local p = ffi.cast('luact_dht_cmd_merge_t*', memory.alloc(get_mt.size(kl, vl)))
+function merge_mt.new(kind, k, kl, v, vl, o, ol, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_merge_t*', memory.alloc(get_mt.size(kl, vl, ol, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
 	p.vl = vl
+	p.ol = ol
 	ffi.copy(p:key(), k, kl)
 	ffi.copy(p:val(), v, vl)
+	ffi.copy(p:op(), o, ol)
+	p:set_txn(txn)
 	return p
 end
 _M.merge = merge_mt.new
 function merge_mt:key()
-	return self.kv
+	return self.p
 end
 function merge_mt:val()
-	return self.kv + self.kl
+	return self.p + self.kl
+end
+function merge_mt:op()
+	return self.p + self.kl + self.vl
+end
+function merge_mt:txn()
+	return self.p + self.kl + self.vl + self.ol
 end
 function merge_mt:__len()
-	return cas_mt.size(self.kl, self.vl)
+	return cas_mt.size(self.kl, self.vl, self.ol, self:has_txn())
 end
 function merge_mt:apply_to(storage, range)
-	return range:exec_merge(storage, self:key(), self.kl, self:val(), self.vl, self.timestamp)
+	return range:exec_merge(storage, self:key(), self.kl, self:val(), self.vl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_merge_t', merge_mt)
 
@@ -362,29 +420,33 @@ ffi.metatype('luact_dht_cmd_watch_t', watch_mt)
 
 
 -- split command
-local split_mt = {}
+local split_mt = util.copy_table(base_mt)
 split_mt.__index = split_mt
 split_mt.__gc = memory.free
-function split_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_split_t') + kl
+function split_mt.size(kl, txn)
+	return ffi.sizeof('luact_dht_cmd_split_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function split_mt.new(kind, k, kl, timestamp)
+function split_mt.new(kind, k, kl, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(kl)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
 	ffi.copy(p:key(), k, kl)
+	p:set_txn(txn)
 	return p
 end
 _M.split = split_mt.new
 function split_mt:key()
-	return self.k
+	return self.p
+end
+function split_mt:txn()
+	return self.p + self.kl
 end
 function split_mt:__len()
-	return split_mt.size(self.kl)
+	return split_mt.size(self.kl, self:has_txn())
 end
 function split_mt:apply_to(storage, range)
-	return range:exec_split(storage, self:key(), self.kl, self.timestamp)
+	return range:exec_split(storage, self:key(), self.kl, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_split_t', split_mt)
 

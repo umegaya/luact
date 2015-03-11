@@ -169,10 +169,10 @@ end
 function raft_index:stop_replicator(target_actor)
 	self.state:stop_replicator(target_actor)
 end
-function raft_index:read(state_key, timeout)
+function raft_index:read(timeout, ...)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
-	if l then return l:read(state_key, timeout) end
-	return self.state.fsm:fetch_state(state_key)
+	if l then return l:read(timeout, ...) end
+	return self.state.fsm:fetch_state(...)
 end
 function raft_index:make_response(ok, r, ...)
 	if not ok then
