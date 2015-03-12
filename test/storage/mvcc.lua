@@ -309,7 +309,8 @@ test("TestMVCCGetUncertainty", function (db, st)
 	assert(v == value1)
 	-- Now using testKey2.
 	-- Put a value that conflicts with MaxTimestamp.
-	db:put(st, test_key2, value2, makets(0, 9))
+	local tmp_ts = makets(0, 9)
+	db:put(st, test_key2, value2, tmp_ts)
 	-- Read with transaction, should get error back.
 	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key2)
 

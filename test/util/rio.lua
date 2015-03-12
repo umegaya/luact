@@ -5,6 +5,7 @@ luact.start({
 	n_core = 4, exclusive = true,
 }, function ()
 local luact = require 'luact.init'
+local tools = require 'test.tools.cluster'
 if not luact.root then
 	logger.error('root not exist')
 end
@@ -20,6 +21,8 @@ local ok,r = xpcall(function ()
 
 	local thread_id = pulpo.thread_id
 
+	local l = tools.create_latch('test', 4)
+
 	-- add custom message to this node
 	function luact.root:remote_io(path)
 		return rio.open(path, bit.bor(fs.O_RDONLY))
@@ -33,7 +36,7 @@ local ok,r = xpcall(function ()
 	local buf = "this is thread"..thread_id
 	C.write(fd, buf, #buf)
 	C.close(fd)
-	clock.sleep(0.5) -- wait for all thread come here
+	l:wait(1)
 
 	local fno = (thread_id % 4) + 1
 	local rrio = actor.root_of(nil, fno).require 'luact.util.rio'
@@ -45,7 +48,7 @@ local ok,r = xpcall(function ()
 	print(s)
 	assert(s == 'this is thread'..fno)
 
-	clock.sleep(0.5)
+	l:wait(2)
 
 end, function (e)
 	logger.error(e)

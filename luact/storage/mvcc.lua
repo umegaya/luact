@@ -287,18 +287,20 @@ end
 function mvcc_bytes_codec_mt:reserve(k, kl, ts)
 	-- +1 for using in self:next_of
 	local reqlen = (util.encode_binary_length(kl + (ts and ffi.sizeof('pulpo_hlc_t') or 0)) + 1)
-	local len = self.lengths[self.idx]
+	local curidx = self.idx
+	local len = self.lengths[curidx]
 	if len >= reqlen then 
 		self.idx = (self.idx + 1) % self.size
-		return self.buffers[self.idx], len 
+		return self.buffers[curidx], len 
 	end
 	while len < reqlen do
 		len = len * 2
 	end
-	local tmp = memory.realloc_typed('char', self.buffers[self.idx], len)
+	-- print('---------------- reserve: newlen', len, kl, ffi.sizeof('pulpo_hlc_t'))
+	local tmp = memory.realloc_typed('char', self.buffers[curidx], len)
 	if tmp ~= ffi.NULL then
-		self.buffers[self.idx] = tmp
-		self.lengths[self.idx] = len
+		self.buffers[curidx] = tmp
+		self.lengths[curidx] = len
 		self.idx = (self.idx + 1) % self.size
 		return tmp, len
 	else
@@ -572,7 +574,9 @@ end
 function mvcc_mt:get(k, ts, txn, opts)
 	local v, vl, value_ts = self:rawget(k, #k, ts, txn, opts)
 	if v then
-		return ffi.string(v, vl), value_ts
+		local s = ffi.string(v, vl)
+		memory.free(v)
+		return s, value_ts
 	end
 end
 --[[
@@ -637,8 +641,8 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 			-- latest write and read in the same txn (no retry is possible). then use latest version of value.
 			-- dump_db(self.db)
 			-- _M.dump_key(latest_key, latest_key_len)
-			v, vl = self.db:rawget(latest_key, latest_key_len)
-			value_ts = meta.timestamp
+			v, vl = self.db:rawget(latest_key, latest_key_len, opts)
+			value_ts = meta.timestamp:clone(true)
 			goto RETURN_VALUE
 		end
 	elseif txn and (ts < txn:max_timestamp()) then
@@ -652,7 +656,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 			-- absolute time if the writer had a fast clock.
 			-- The reader should try again with a later timestamp than the
 			-- one given below.
-			exception.raise('mvcc', 'txn_ts_uncertainty', pstr(k, kl), meta.timestamp, txn:max_timestamp())
+			exception.raise('mvcc', 'txn_ts_uncertainty', pstr(k, kl), meta.timestamp:clone(true), txn:max_timestamp())
 		end
 
 		-- We want to know if anything has been written ahead of timestamp, but
@@ -691,7 +695,9 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 		-- print('value_ts nil')
 		return nil
 	end
-	v, vl = iter:val()
+	-- allocate own memory
+	k, kl = iter:key()
+	v, vl = self.db:rawget(k, kl, opts)
 ::RETURN_VALUE::
 	if vl > 0 then
 		return v, vl, value_ts
@@ -791,7 +797,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		elseif (meta.timestamp > ts) and (not meta.txn:valid()) then
 			-- If we receive a Put request to write before an already-
 			-- committed version, send write too old error.
-			exception.raise('mvcc', 'write_too_old', pstr(k, kl), meta.timestamp, ts)
+			exception.raise('mvcc', 'write_too_old', pstr(k, kl), meta.timestamp:clone(true), ts)
 		else
 			-- Otherwise, its an old write to the current transaction. Just ignore.
 			return
