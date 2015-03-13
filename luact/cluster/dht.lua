@@ -8,6 +8,8 @@ local actor = require 'luact.actor'
 local range = require 'luact.cluster.dht.range'
 local cmd = require 'luact.cluster.dht.cmd'
 
+local txncoord = require 'luact.storage.txncoord'
+
 local pulpo = require 'pulpo.init'
 local event = require 'pulpo.event'
 local util = require 'pulpo.util'
@@ -31,6 +33,10 @@ typedef struct luact_dht {
 ]]
 
 
+-- act as table wrapper
+
+
+
 -- dht object
 local dht_mt = {}
 dht_mt.__index = dht_mt
@@ -45,44 +51,36 @@ end
 function dht_mt:range_of(k, kl)
 	return range_manager:find(k, kl, self.kind)
 end
-function dht_mt:__index(k)
-	-- default is consistent read
-	return self:rawget(k, #k, true)
+function dht_mt:get(k, txn, consistent, timeout)
+	return self:rawget(k, #k, txn, consistent, timeout)
 end
-function dht_mt:__newindex(k, v)
-	return self:put(k, #k, v, #v)
+function dht_mt:put(k, v, txn, timeout)
+	return self:rawput(k, #k, v, #v, txn, timeout)
 end
-function dht_mt:get(k, consistent, timeout)
-	return self:rawget(k, #k, consistent, timeout)
+function dht_mt:cas(k, oldval, newval, txn, timeout)
+	return self:rawcas(k, #k, oldval, #oldval, newval, #newval, txn, timeout)
 end
-function dht_mt:rawget(k, kl, consistent, timeout)
-	return self:range_of(k, kl):rawget(k, kl, consistent, timeout or self.timeout)
+function dht_mt:merge(k, v, op, txn, timeout)
+	return self:rawmerge(k, #k, v, #v, op, #op, txn, timeout)
 end
-function dht_mt:put(k, kl, v, vl, timeout)
-	return self:range_of(k, kl):rawput(k, kl, v, vl, timeout or self.timeout)
+function dht_mt:rawget(k, kl, txn, consistent, timeout)
+	return self:range_of(k, kl):rawget(k, kl, txn, consistent, timeout or self.timeout)
 end
-function dht_mt:cas(k, oldval, newval, timeout)
-	return self:rawcas(k, #k, oldval, #oldval, newval, #newval, timeout)
+function dht_mt:rawput(k, kl, v, vl, txn, timeout)
+	return self:range_of(k, kl):rawput(k, kl, v, vl, txn, timeout or self.timeout)
 end
-function dht_mt:merge(k, v, timeout)
-	return self:rawmerge(k, #k, v, #v, timeout)
+function dht_mt:rawcas(k, kl, oldval, ovl, newval, nvl, txn, timeout)
+	return self:range_of(k, kl):cas(k, kl, oldval, ovl, newval, nvl, txn, timeout or self.timeout)
 end
-function dht_mt:watch(k, watcher, method, timeout)
-	return self:rawwatch(k, #k, watcher, method, timeout or self.timeout)
-end
-function dht_mt:rawcas(k, kl, oldval, ovl, newval, nvl, timeout)
-	return self:range_of(k, kl):cas(k, kl, oldval, ovl, newval, nvl, timeout or self.timeout)
-end
-function dht_mt:rawmerge(k, kl, v, vl, timeout)
-	return self:range_of(k, kl):rawmerge(k, kl, v, vl, timeout or self.timeout)
-end
-function dht_mt:rawwatch(k, kl, watcher, method, timeout)
-	return self:range_of(k, kl):watch(k, kl, watcher, method, timeout or self.timeout)
+function dht_mt:rawmerge(k, kl, v, vl, o, ol, txn, timeout)
+	return self:range_of(k, kl):rawmerge(k, kl, v, vl, o, ol, txn, timeout or self.timeout)
 end
 function dht_mt:new_txn()
+	return range_manager:new_txn()
+end
+function dht_mt:txn(proc)
 	assert(false, "TBD")
 end
-
 
 
 -- module functions
@@ -94,6 +92,7 @@ local default_opts = {
 	root_range_send_interval = 30,
 	replica_maintain_interval = 1.0,
 	collect_garbage_interval = 60 * 60,
+	range_size_max = 64 * 1024 * 1024,
 	gossip_port = 8008,
 	range_prefetch = 8,
 }

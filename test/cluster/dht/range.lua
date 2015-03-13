@@ -46,6 +46,7 @@ tools.start_luact(1, nil, function ()
 		n_replica = 1, -- allow single node quorum
 		storage = "rocksdb",
 		datadir = luact.DEFAULT_ROOT_DIR,
+		range_size_max = 64 * 1024 * 1024
 	})
 	
 	local key = "hoge"

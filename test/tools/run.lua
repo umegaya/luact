@@ -2,6 +2,10 @@ local data = debug.getinfo(1)
 local root = {data.source:find('@(.+)/.+$')}
 package.path = root[3]..'/../../luact/lib/?.lua;'..root[3]..'/../../../../luact/lib/?.lua;'..package.path
 local term = require 'pulpo.terminal'
+local util = require 'pulpo.util'
+
+cmdl = util.luajit_cmdline()
+print('cmdl', cmdl)
 
 function run_dir(d)
 	local dir = io.popen('ls '..d)
@@ -11,7 +15,7 @@ function run_dir(d)
 		file = (d .. '/' .. file)
 		if file:find('%.lua$') then
 			term.resetcolor(); print('test: ' .. file .. ' ==========================================')
-			local ok, r = pcall(os.execute, arg[-1].." test/tools/launch.lua "..file)
+			local ok, r = pcall(os.execute, cmdl.." test/tools/launch.lua "..file)
 			if ok and r then
 				if r ~= 0 then
 					term.red(); print('test fails:' .. file .. '|' .. r)

@@ -634,14 +634,17 @@ end, create_db, destroy_db)
 
 test("TestMVCCConditionalPut", function (db, st)
 	local ok, r, v
+	print('1')
 	ok, r = db:cas(st, test_key1, "", value1, makets(1, 0))
 	assert(ok and (not r))
 	v = db:get(test_key1, makets(1, 0))
 	assert(v == value1)
 	-- Conditional put expecting wrong value2, will fail.
+	print('2')
 	ok, r = db:cas(st, test_key1, value2, value3, makets(0, 1))
 	assert((not ok) and r == value1)
 	-- move to empty value will success
+	print('3')
 	ok, r = db:cas(st, test_key1, value1, "", makets(0, 1))
 	assert(ok and r == value1)
 end, create_db, destroy_db)

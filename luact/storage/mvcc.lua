@@ -206,6 +206,9 @@ mvcc_stats_mt.__index = mvcc_stats_mt
 function mvcc_stats_mt:init()
 	self.bytes_key = 0
 	self.bytes_val = 0
+	self.n_key = 0
+	self.n_val = 0
+	self.uncommitted_bytes = 0
 	self.last_update = 0
 end
 function mvcc_stats_mt:updated()
@@ -451,9 +454,6 @@ function mvcc_mt:scan_internal(s, sl, e, el, n, boundary, ts, txn, opts)
 end
 function mvcc_mt:scan(s, sl, e, el, n, ts, txn, opts)
 	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_ge, ts, txn, opts)
-end
-function mvcc_mt:scan_inclusive(s, sl, e, el, n, ts, txn, opts)
-	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_gt, ts, txn, opts)
 end
 function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
 	local iter = self.db:iterator(opts)
@@ -856,16 +856,15 @@ function mvcc_mt:rawmerge(stats, k, kl, v, vl, merge_op, ts, txn, opts)
 		exception.raise('not_found', 'no merger', merge_op)
 	end
 	local cv, cvl = self:rawget(k, kl, ts, txn, opts)
-	local changed
-	v, changed = mergers[merge_op](k, kl, cv, cvl, v, vl, pvl_work)
-	if changed then
+	local r = {mergers[merge_op](k, kl, cv, cvl, v, vl, pvl_work)}
+	if r[1] then
 		if pvl_work[0] > 0 then
-			self:rawput(stats, k, kl, v, pvl_work[0], ts, txn, opts)
+			self:rawput(stats, k, kl, r[1], pvl_work[0], ts, txn, opts)
 		else
 			self:rawdelete(stats, k, kl, ts, txn, opts)
 		end
 	end
-	return changed
+	return unpack(r, 2)
 end
 function mvcc_mt:cas(stats, k, ov, nv, ts, txn, opts)
 	return self:rawcas(stats, k, #k, ov, #ov, nv, #nv, ts, txn, opts)
@@ -878,6 +877,9 @@ end
 function mvcc_mt:new_txn(ts)
 	return txncoord.new_txn(ts)
 end	
+function mvcc_mt:fin_txn(txn, commit)
+	txncoord.fin_txn(txn, commit)
+end
 function mvcc_mt:resolve_txn(stats, k, kl, ts, txn, opts)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local v, vl = self.db:rawget(mk, mkl, opts)

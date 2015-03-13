@@ -1,11 +1,8 @@
 #!/bin/bash
-LJBIN="LD_PRELOAD=libpthread.so.0 $1"
-if [ $# -lt 1 ]; then
-	LJBIN="LD_PRELOAD=libpthread.so.0 luajit"
-fi
-if [ $# -ge 2 ]; then
-	echo "checkout $2"
-	git fetch && git checkout origin/$2 && git submodule update --recursive
+LJBIN="LD_PRELOAD=libpthread.so.0 luajit-2.1.0-alpha -e \"require('jit.opt').start('minstitch=10000')\""
+if [ $# -ge 1 ]; then
+	echo "checkout $1"
+	git fetch && git checkout origin/$1 && git submodule update --recursive
 fi
 echo "exec: $LJBIN test/tools/run.lua"
 bash -c "$LJBIN test/tools/run.lua"

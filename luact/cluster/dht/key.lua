@@ -59,6 +59,14 @@ end
 function key_mt:max_length()
 	return _M.MAX_LENGTH
 end
+function key_mt:make_greater_than_prefix_keys()
+	for i=tonumber(self.len)-1,0,-1 do
+		self.p[i] = self.p[i] + 1
+		if self.p[i] ~= 0 then
+			break
+		end
+	end
+end
 
 ffi.metatype('luact_dht_key_t', key_mt)
 

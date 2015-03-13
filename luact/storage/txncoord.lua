@@ -141,6 +141,7 @@ function txn_coord_mt:register(txn)
 	self.txns[k] = {txn = txn, keys = {}}
 end
 function txn_coord_mt:unregister(txn, commit)
+	txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
 	local key = txn:as_key()	
 	local txn_data = self.txns[key]
 	local ranges = {}
@@ -149,20 +150,22 @@ function txn_coord_mt:unregister(txn, commit)
 		-- commit each range.
 		local k, kind = unpack(txn_data[i])
 		local rng = _M.range_manager:find(k, #k, kind)
-		local key = ranges[rng]
-		if not key then
-			ranges[rng] = k
-		elseif memory.rawcmp_ex(key, #key, k, #k) < 0 then
-			ranges[rng] = k
+		local span = ranges[rng]
+		if not span then
+			ranges[rng] = { min = k, max = k }
+		elseif memory.rawcmp_ex(span.max, #span.max, k, #k) < 0 then
+			ranges[rng].max = k
+		elseif memory.rawcmp_ex(span.min, #span.min, k, #k) > 0 then
+			ranges[rng].min = k
 		end 
 	end
-	for rng,k in pairs(ranges) do
-		rng:end_txn(k, #k, txn, commit) -- just notify
+	for rng,span in pairs(ranges) do
+		rng:end_txn(txn, 0, span.min, #span.min, span.max, #span.max)
 	end
 end
 function txn_coord_mt:add_key(start_at, key, kind)
 	local txn_data = self.txns[start_at:as_byte_string()]
-	table.insert(txn_data.keys, {key, kind})
+	table.insert(txn_data, {key, kind})
 end
 
 
