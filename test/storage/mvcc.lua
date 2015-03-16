@@ -204,7 +204,7 @@ test("TestMVCCEmptyKeyValue", function (db, stats)
 	db:rawscan(test_key1, #test_key1, "", 0, nil, function (self, k, kl, v, vl)
 		assert(false, "nothing should be scanned")
 	end)
-	db:resolve_txn(stats, "", 0, nil, nil, nil, makets(0, 1), txn1)
+	db:resolve_version(stats, "", 0, nil, nil, nil, makets(0, 1), txn1)
 end, create_db, destroy_db)
 
 test("TestMVCCGetNotExist", function (db, stats)
@@ -657,7 +657,7 @@ test("TestMVCCResolveTxn", function (db, st)
 	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
 	-- Resolve will write with txn1's timestamp which is 1, 0
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn1_commit)
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), txn1_commit)
 	-- now non-transactional get can see the value put at 1, 0
 	v = db:get(test_key1, makets(0, 1))
 	assert(v == value1)
@@ -665,7 +665,7 @@ end, create_db, destroy_db)
 
 test("TestMVCCAbortTxn", function (db, st)
 	db:put(st, test_key1, value1, makets(0, 1), txn1)
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn1_abort)
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), txn1_abort)
 
 	assert(not db:get(test_key1, makets(1, 0)), "value should be empty")
 	local meta_key = mvcc.make_key(test_key1, #test_key1)
@@ -683,7 +683,7 @@ test("TestMVCCAbortTxnWithPreviousVersion", function (db, st)
 		db:put(st, unpack(data))
 	end
 
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 2), txn1_abort)
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 2), txn1_abort)
 
 	local meta_key = mvcc.make_key(test_key1, #test_key1)
 	local meta, ml = db.db:rawget(meta_key, #meta_key)
@@ -707,7 +707,7 @@ test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db, st)
 
 	local ok, r, v, ts
 	-- Resolve the txn.
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
 	-- Now try writing an earlier intent--should get write too old error.
 	ok, r = pcall(db.put, db, st, test_key1, value2, makets(1, 0), txn2)
 	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
@@ -756,7 +756,7 @@ end, create_db, destroy_db)
 test("TestMVCCReadWithPushedTimestamp", function(db, st)
 	-- Start with epoch 1.
 	db:put(st, test_key1, value1, makets(1, 0), txn1)
-	db:resolve_txn(st, test_key1, #test_key1, makets(1, 0), maketxn(txn1, makets(0, 1)))
+	db:resolve_version(st, test_key1, #test_key1, makets(1, 0), maketxn(txn1, makets(0, 1)))
 	-- Attempt to read using naive txn's previous timestamp.
 	local v = db:get(test_key1, makets(1, 0), txn1)
 	assert(v == value1)
@@ -766,7 +766,9 @@ test("TestMVCCResolveWithDiffEpochs", function (db, st)
 	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	db:put(st, test_key2, value2, makets(0, 1), txn1_1)
 	local test_key2_next = test_key2..string.char(0)
-	local num = db:end_txn(st, test_key1, #test_key1, test_key2_next, #test_key2_next, 2, makets(0, 1), txn1_1_commit)
+	local num = db:resolve_versions_in_range(
+		st, test_key1, #test_key1, test_key2_next, #test_key2_next, 2, makets(0, 1), txn1_1_commit
+	)
 	assert(num == 2)
 
 	-- Verify key1 is empty, as resolution with epoch 2 would have
@@ -786,7 +788,7 @@ test("TestMVCCResolveWithUpdatedTimestamp", function (db, st)
 
 	-- Resolve with a higher commit timestamp -- this should rewrite the
 	-- intent when making it permanent.
-	db:resolve_txn(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1_commit, makets(1, 1)))
+	db:resolve_version(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1_commit, makets(1, 1)))
 
 	v = db:get(test_key1, makets(0, 1))
 	assert(not v)
@@ -803,7 +805,7 @@ test("TestMVCCResolveWithPushedTimestamp", function (db, st)
 
 	-- Resolve with a higher commit timestamp, but with still-pending transaction.
 	-- This represents a straightforward push (i.e. from a read/write conflict).
-	db:resolve_txn(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1, makets(1, 1))[0])
+	db:resolve_version(st, test_key1, #test_key1, makets(1, 1), maketxn(txn1, makets(1, 1))[0])
 
 	ok, v = pcall(db.get, db, test_key1, makets(1, 1))
 	-- because test_key1 is not committed, just pushed, so read latest version without txn will be failure
@@ -816,16 +818,16 @@ end, create_db, destroy_db)
 
 test("TestMVCCResolveTxnNoOps", function (db, st)
 	-- Resolve a non existent key; noop.
-	local ok, r = pcall(db.resolve_txn, db, st, test_key1, #test_key1, makets(0, 1), txn1_commit)
+	local ok, r = pcall(db.resolve_version, db, st, test_key1, #test_key1, makets(0, 1), txn1_commit)
 	assert(ok)
 
 	-- Add key and resolve despite there being no intent.
 	db:put(st, test_key1, value1, makets(0, 1))
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
 
 	-- Write intent and resolve with different txn.
 	db:put(st, test_key1, value2, makets(0, 1), txn1)
-	db:resolve_txn(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
+	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), txn2_commit)
 end, create_db, destroy_db)
 
 test("TestMVCCResolveTxnRange", function (db, st)
@@ -840,7 +842,9 @@ test("TestMVCCResolveTxnRange", function (db, st)
 		db:put(st, unpack(data))
 	end
 
-	local num = db:end_txn(st, test_key1, #test_key1, test_key4_next, #test_key4_next, 0, makets(0, 1), txn1_commit)
+	local num = db:resolve_versions_in_range(
+		st, test_key1, #test_key1, test_key4_next, #test_key4_next, 0, makets(0, 1), txn1_commit
+	)
 	assert(num == 4)
 
 	local v
@@ -1013,7 +1017,7 @@ test("TestMVCCStatsBasic", function (db, st)
 
 	-- Resolve the deletion by aborting it.
 	txn.status = txncoord.STATUS_ABORTED
-	db:resolve_txn(st, key, #key, ts2, txn)
+	db:resolve_version(st, key, #key, ts2, txn)
 	-- Stats should equal same as before the deletion after aborting the intent.
 	assert(verify_stats(exp_stats, st), "check after txn abort fails")
 
@@ -1044,8 +1048,8 @@ test("TestMVCCStatsBasic", function (db, st)
 
 	-- Now commit both values.
 	txn.status = txncoord.STATUS_COMMITTED
-	db:resolve_txn(st, key, #key, ts4, txn)
-	db:resolve_txn(st, key2, #key2, ts4, txn)
+	db:resolve_version(st, key, #key, ts4, txn)
+	db:resolve_version(st, key2, #key2, ts4, txn)
 	local m3_val_size = ffi.sizeof('luact_mvcc_metadata_t')
 	local m2_val2_size = ffi.sizeof('luact_mvcc_metadata_t')
 	local exp_stats4 = make_stats(
@@ -1104,7 +1108,7 @@ test("TestMVCCStatsWithRandomRuns", function (db, st)
 				-- print(i, 'delete key', 'remove prev txn')
 				local exist_txn = r.args[3]
 				exist_txn.status = txncoord.STATUS_ABORTED
-				db:resolve_txn(st, keys[idx], #keys[idx], ts, exist_txn)
+				db:resolve_version(st, keys[idx], #keys[idx], ts, exist_txn)
 				db:delete(st, keys[idx], ts, txn)
 			end
 		else
@@ -1113,13 +1117,13 @@ test("TestMVCCStatsWithRandomRuns", function (db, st)
 		end
 
 		if (not delete) and txn and (math.random(1, 2) == 1) then -- resolve txn with 50% prob
-			-- print(i, 'resolve_txn', ('%q'):format(key))
+			-- print(i, 'resolve_version', ('%q'):format(key))
 			if math.random(1, 10) == 1 then
 				txn.status = txncoord.STATUS_ABORTED
 			else
 				txn.status = txncoord.STATUS_COMMITTED
 			end
-			db:resolve_txn(st, key, #key, ts, txn)
+			db:resolve_version(st, key, #key, ts, txn)
 		end
 		-- Every 10th step, verify the stats via manual engine scan.
 		if i%10 == 0 then

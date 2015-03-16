@@ -12,8 +12,9 @@ local _M = {}
 -- cdefs
 ffi.cdef [[
 typedef enum luact_dht_isolation_type {
-	SERIALIZED_SNAPSHOT_ISOLATION,
 	SNAPSHOT_ISOLATION,
+	SERIALIZED_SNAPSHOT_ISOLATION,
+	LINEARIZABILITY,
 } luact_dht_isolation_type_t;
 
 typedef enum luact_dht_txn_status {
@@ -40,8 +41,19 @@ _M.STATUS_COMMITTED = TXN_STATUS_COMMITTED
 
 local SERIALIZED_SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SERIALIZED_SNAPSHOT_ISOLATION')
 local SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SNAPSHOT_ISOLATION')
-_M.SSI = SERIALIZED_SNAPSHOT_ISOLATION
-_M.SI = SNAPSHOT_ISOLATION
+local LINEARIZABILITY = ffi.cast('luact_dht_isolation_type_t', 'LINEARIZABILITY')
+_M.SERIALIZED_SNAPSHOT_ISOLATION = SERIALIZED_SNAPSHOT_ISOLATION
+_M.SNAPSHOT_ISOLATION = SNAPSHOT_ISOLATION
+_M.LINEARIZABILITY = LINEARIZABILITY
+
+-- const
+-- TxnRetryOptions sets the retry options for handling write conflicts.
+local retry_opts = {
+	wait = 0.05,
+	max_wait = 5,
+	wait_multiplier = 2,
+	max_attempt = 0, -- infinite
+}
 
 
 -- txn
@@ -63,10 +75,9 @@ function txn_mt:init(coord, isolation, debug_opts)
 	local ts = _M.clock:issue()
 	self.coord = coord
 	self.start_at = ts
-	self.timestamp = ts
+	self:refresh_timestamp(ts)
 	self.isolation = isolation or SERIALIZED_SNAPSHOT_ISOLATION
 	self.status = TXN_STATUS_PENDING
-	self.max_ts = ts:add_walltime(_M.opts.max_clock_skew)
 	self.n_retry = 0
 	if debug_opts then
 		for k,v in pairs(debug_opts) do
@@ -116,6 +127,11 @@ end
 function txn_mt:max_timestamp()
 	return self.max_ts
 end
+function txn_mt:refresh_timestamp(at)
+	local ts = at or _M.clock:issue()
+	self.timestamp = ts
+	self.max_ts = ts:add_walltime(_M.opts.max_clock_skew)
+end
 function txn_mt:valid()
 	--print('txn:valid', self, self.coord)
 	return uuid.valid(self.coord)
@@ -126,6 +142,59 @@ end
 function txn_mt:as_key()
 	return self.start_at:as_byte_string()
 end
+--[[
+func (t *Transaction) Restart(userPriority, upgradePriority int32, timestamp Timestamp) {
+	t.Epoch++
+	if t.Timestamp.Less(timestamp) {
+		t.Timestamp = timestamp
+	}
+	// Set original timestamp to current timestamp on restart.
+	t.OrigTimestamp = t.Timestamp
+	// Potentially upgrade priority both by creating a new random
+	// priority using userPriority and considering upgradePriority.
+	t.UpgradePriority(MakePriority(userPriority))
+	t.UpgradePriority(upgradePriority)
+}
+
+// Update ratchets priority, timestamp and original timestamp values (among
+// others) for the transaction. If t.ID is empty, then the transaction is
+// copied from o.
+func (t *Transaction) Update(o *Transaction) {
+	if o == nil {
+		return
+	}
+	if len(t.ID) == 0 {
+		*t = *gogoproto.Clone(o).(*Transaction)
+		return
+	}
+	if o.Status != PENDING {
+		t.Status = o.Status
+	}
+	if t.Epoch < o.Epoch {
+		t.Epoch = o.Epoch
+	}
+	if t.Timestamp.Less(o.Timestamp) {
+		t.Timestamp = o.Timestamp
+	}
+	if t.OrigTimestamp.Less(o.OrigTimestamp) {
+		t.OrigTimestamp = o.OrigTimestamp
+	}
+	// Should not actually change at the time of writing.
+	t.MaxTimestamp = o.MaxTimestamp
+	// Copy the list of nodes without time uncertainty.
+	t.CertainNodes = NodeList{Nodes: append(Int32Slice(nil),
+		o.CertainNodes.Nodes...)}
+	t.UpgradePriority(o.Priority)
+}
+
+// UpgradePriority sets transaction priority to the maximum of current
+// priority and the specified minPriority.
+func (t *Transaction) UpgradePriority(minPriority int32) {
+	if minPriority > t.Priority {
+		t.Priority = minPriority
+	}
+}
+]]
 ffi.metatype('luact_dht_txn_t', txn_mt)
 
 
@@ -133,14 +202,16 @@ ffi.metatype('luact_dht_txn_t', txn_mt)
 -- txn coordinator
 local txn_coord_mt = {}
 txn_coord_mt.__index = txn_coord_mt
-function txn_coord_mt:register(txn)
+function txn_coord_mt:start(txn)
 	local k = txn:as_key()
 	if self.txns[k] then
 		exception.raise('fatal', 'txn already exists', txn.start_at)
 	end
 	self.txns[k] = {txn = txn, keys = {}}
 end
-function txn_coord_mt:unregister(txn, commit)
+function txn_coord_mt:heartbeat()
+end
+function txn_coord_mt:finish(txn, commit)
 	txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
 	local key = txn:as_key()	
 	local txn_data = self.txns[key]
@@ -160,7 +231,7 @@ function txn_coord_mt:unregister(txn, commit)
 		end 
 	end
 	for rng,span in pairs(ranges) do
-		rng:end_txn(txn, 0, span.min, #span.min, span.max, #span.max)
+		rng:resolve(txn, 0, span.min, #span.min, span.max, #span.max)
 	end
 end
 function txn_coord_mt:add_key(start_at, key, kind)
@@ -185,12 +256,26 @@ function _M.initialize(rm, opts)
 end
 function _M.new_txn(isolation)
 	local txn = txn_mt.new(_M.coord_actor, isolation)
-	_M.coordinator:register(txn)
+	_M.coordinator:start(txn)
 	return txn
 end
 function _M.fin_txn(txn, commit)
-	_M.coordinator:unregister(txn, commit)
+	_M.coordinator:finish(txn, commit)
 	txn:fin()
+end
+function _M.run_txn(txn, proc, ...)
+	_M.fin_txn(txn, util.retry(retry_opts, function (txn, proc, ...)
+		local ok, r = pcall(proc, txn, ...)
+		if ok then
+			return 
+		elseif r:is('mvcc') then
+			if r.args[1] == 'txn_ts_uncertainty' then
+				txn:refresh_timestamp()
+				return util.retry_pattern.RESTART
+			end
+		end
+		return util.retry_pattern.TERMINATE
+	end))
 end
 function _M.debug_make_txn(debug_opts)
 	return txn_mt.new(_M.coord_actor, nil, debug_opts)[0]

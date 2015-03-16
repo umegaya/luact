@@ -33,17 +33,30 @@ local range_manager
 
 
 -- constant
-_M.MAX_BYTE = 64 * 1024 * 1024
-_M.INITIAL_BYTE = 1 * 1024 * 1024
 _M.DEFAULT_REPLICA = 3
-_M.META1_FAMILY = '__dht.meta1__'
-_M.META2_FAMILY = '__dht.meta2__'
-_M.VID_FAMILY = '__dht.vid__'
+_M.META1_FAMILY_NAME = '__dht.meta1__'
+_M.META2_FAMILY_NAME = '__dht.meta2__'
+_M.DATA_FAMILY_NAME = '__dht.data__'
+_M.META2_MAX_KEY = memory.alloc_typed('luact_dht_key_t')[0]
+_M.META2_MAX_KEY:init(string.char(0xFF), 1)
+_M.META2_SCAN_END_KEYSTR = string.char(0xFF, 0xFF)
+-- data category
 _M.KIND_META1 = 1
+_M.ROOT_METADATA_KIND = _M.KIND_META1
 _M.KIND_META2 = 2
-_M.KIND_VID = 3
-
+_M.NON_METADATA_KIND_START = _M.KIND_META2 + 1
+_M.KIND_TXN = 3
+_M.KIND_VID = 4
+_M.KIND_STATE = 5
+_M.BUILTIN_KIND_START = 1
+_M.BUILTIN_KIND_END = 5
+-- user kind
+_M.USER_KIND_PREFIX_MIN = 0x40
+_M.USER_KIND_PREFIX_MAX = 0xfe
+_M.NUM_USER_KIND = _M.USER_KIND_PREFIX_MAX - _M.USER_KIND_PREFIX_MIN
+-- syskey prefix
 _M.SYSKEY_CATEGORY_KIND = 0
+
 
 -- cdefs
 ffi.cdef [[
@@ -54,23 +67,81 @@ typedef struct luact_dht_range {
 	luact_mvcc_stats_t stats;
 	luact_uuid_t replicas[0];		//arbiter actors' uuid
 } luact_dht_range_t;
+typedef struct luact_dht_kind {
+	char prefix[2];
+	uint8_t txnl, padd;
+} luact_dht_kind_t;
 ]]
 
 
--- common helper
-local function make_unique(kind, key)
-	return string.char(kind)..key
+-- kind data
+--[[
+### [min]    : unused
+
+### [\0, \1) : un-splittable system keys (configuration) => つまり全てroot rangeのノードに保持される
+```
+[\0\0, \0\1) : kind (独立したdhtを管理する単位)の名前   \0\0 + numerical id => kind name これによってnumerical id (within 1byte)が予約される
+[\0\1, \1  ) : reserved
+```
+
+### [\1, \40) : splittable system keys => 数の多いconfiguration, あるいはtxnのいらないユーザーデータ 
+```
+[\1, \2 ) : txn (分散トランザクションの管理情報) のmeta2 ranges \1\0 + key, non-transactional
+[\2, \3 ) : vid (仮想アクターのidと物理アドレスのマッピング) のmeta2 ranges \1\1 + key, non-transactional
+[\3, \4 ) : vid state (仮想アクターの永続化される状態,{vid+key}と{value}のマッピング) のmeta2 ranges \1\2 + key, transactional
+[\4, \40) : reserved
+```
+
+### [\40,\ff) : splittable user keys (max 180)
+```
+[\40,\41) : user data : category 1のmeta2 ranges \40 + key
+[\41,\42) : user data : category 2のmeta2 ranges \41 + key
+...
+[\fe,\ff) : user data : category 180のmeta2 ranges \fe + key
+```
+
+### [\3,max] : reserved
+]]
+local function new_kind(prefix, txnl)
+	local p = memory.alloc_typed('luact_dht_kind_t')
+	ffi.copy(p.prefix, prefix, #prefix)
+	p.txnl = txnl
+	return p
 end
-local function make_metakey(kind, key)
-	if kind > _M.KIND_META1 then
-		return make_unique(kind, key)
+local kind_map = {
+	-- system category (built in)
+	[_M.KIND_META1] = new_kind("", true),
+	[_M.KIND_META2] = new_kind("", true),
+	[_M.KIND_TXN] = new_kind(string.char(1), false),
+	[_M.KIND_VID] = new_kind(string.char(2), false),
+	[_M.KIND_STATE] = new_kind(string.char(3), true),
+}
+local n_data_kind = 0
+-- txnl : use transactional operation? 
+-- *caution* txnl==false does not means split does not need transaction. 
+-- range data of txnl == false still need txn to split. 
+local function create_kind(id, txnl)
+	kind_map[id] = new_kind(string.char(2, id), _M.DATA_FAMILY, txnl)
+end
+
+
+-- common helper
+local function make_arbiter_id(kind, k, kl)
+	return string.char(kind)..ffi.string(k, kl)
+end
+local function make_metakey(kind, k, kl)
+	if kind > _M.KIND_META2 then
+		local kind = kind_map[kind]
+		local p = memory.managed_alloc_typed('char', kl + 1)
+		ffi.copy(p, kind.prefix, 1)
+		ffi.copy(p + 1, k, kl)
+		return p, kl + 1
 	else
-		return key
+		return k, kl
 	end
 end
--- sys key is stored in root range
-local function make_syskey(category, key)
-	return '\0'..string.char(category)..key
+local function make_syskey(category, k, kl)
+	return string.char(0, category)..ffi.string(k, kl)
 end
 -- synchorinized merge
 local function sync_merge(storage, stats, k, kl, v, vl, ts, txn)
@@ -81,6 +152,8 @@ local function rawget_to_s(v, vl)
 		return ffi.string(v, vl)
 	end
 end
+
+
 
 
 -- range
@@ -98,7 +171,7 @@ function range_mt.alloc(n_replica)
 	p.replica_available = 0
 	return p
 end
-function range_mt:init(start_key, end_key, kind)
+function range_mt:init(start_key, end_key, kind, category)
 	self.start_key = start_key
 	self.end_key = end_key
 	self.kind = kind
@@ -137,6 +210,7 @@ function range_mt:start_replica_set(remote)
 	logger.notice('start_replica_set',self)
 end
 function range_mt:debug_add_replica(a)
+	-- print('debug_add_replica', a, self.replica_available, self)
 	self.replicas[self.replica_available] = a
 	self.replica_available = self.replica_available + 1
 end
@@ -154,21 +228,30 @@ function range_mt:fin()
 	assert(false, "TBD")
 end
 function range_mt:arbiter_id()
-	return make_unique(self.kind, ffi.string(self.end_key:as_slice()))
+	return make_arbiter_id(self.kind, self.end_key:as_slice())
 end
 function range_mt:metakey()
-	return make_metakey(self.kind, ffi.string(self.end_key:as_slice()))
+	return make_metakey(self.kind, self.end_key:as_slice())
 end
 function range_mt:cachekey()
-	return ffi.string(self.end_key:as_slice())
+	return self.end_key:as_slice()
 end
 function range_mt:check_replica()
 	if self.replica_available < _M.NUM_REPLICA then
 		exception.raise('invalid', 'dht', 'not enough replica', self.replica_available, self.n_replica)
 	end
 end
+function range_mt:compute_stats()
+	local p = self:partition()
+	p:compute_stats(self.stats, 
+		self.start_key.p, self.start_key:length(), self.end_key.p, self.end_key:length(), 
+		range_manager.clock:issue())
+end
 function range_mt:is_root_range()
 	return self.kind == _M.KIND_META1
+end
+function range_mt:is_mvcc()
+	return kind_map[self.kind].txnl
 end
 -- true if start_key <= k, kl < end_key, false otherwise
 function range_mt:include(k, kl)
@@ -241,12 +324,22 @@ function range_mt:put(k, v, txn, timeout)
 end
 function range_mt:rawput(k, kl, v, vl, txn, timeout, dictatorial)
 	self:write(cmd.put(self.kind, k, kl, v, vl, range_manager.clock:issue(), txn), timeout, dictatorial)
+	self:on_writer_finished(txn, k, kl)
+end
+function range_mt:delete(k, txn, timeout)
+	return self:rawdelete(k, #k, txn, timeout)
+end
+function range_mt:rawdelete(k, kl, txn, timeout)
+	self:write(cmd.delete(self.kind, k, kl, range_manager.clock:issue(), txn), timeout)
+	self:on_writer_finished(txn, k, kl)
 end
 function range_mt:merge(k, v, op, txn, timeout)
 	return self:rawmerge(k, #k, v, #v, op, #op, txn, timeout)
 end
 function range_mt:rawmerge(k, kl, v, vl, op, ol, txn, timeout)
-	return self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), timeout)
+	local r = {self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), timeout)}
+	self:on_writer_finished(txn, k, kl)
+	return unpack(r)
 end
 function range_mt:cas(k, ov, nv, txn, timeout)
 	local oval, ol = ov or nil, ov and #ov or 0
@@ -255,7 +348,9 @@ function range_mt:cas(k, ov, nv, txn, timeout)
 	return self:rawcas(k, #k, oval, ol, nval, nl, txn, timeout)
 end
 function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, txn, timeout)
-	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), timeout)
+	local r = {self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), timeout)}
+	self:on_writer_finished(txn, k, kl)
+	return unpack(r)
 end
 function range_mt:watch(k, kl, watcher, method, timeout)
 	return self:write(cmd.watch(self.kind, k, kl, watcher, method, range_manager.clock:issue()), timeout)
@@ -265,8 +360,8 @@ function range_mt:split(at, txn, timeout)
 	if at then
 		spk, spkl = at, #at
 	else
-		local cf = self:kv_group()
-		spk, spkl = cf:find_split_key(self.stats, 
+		local p = self:partition()
+		spk, spkl = p:find_split_key(self.stats, 
 			self.start_key.p, self.start_key:length(),
 			self.end_key.p, self.end_key:length())
 	end
@@ -275,27 +370,44 @@ end
 function range_mt:scan(k, kl, n, txn, timeout)
 	return self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), timeout)
 end
-function range_mt:end_txn(txn, n, s, sl, e, el)
+function range_mt:resolve(txn, n, s, sl, e, el)
 	-- does not wait for reply
 	local ts = range_manager.clock:issue()
 	if s then
-		return self:write_no_wait(cmd.end_txn(s, sl, e, el, n, ts, txn))
+		return self:write_no_wait(cmd.resolve(s, sl, e, el, n, ts, txn))
 	else
-		return self:write_no_wait(cmd.end_txn(self.start_key.p, self.start_key:length(),
+		return self:write_no_wait(cmd.resolve(self.start_key.p, self.start_key:length(),
 			self.end_key.p, self.end_key:length(), n, ts, txn))
 	end
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn)
-	return rawget_to_s(storage:rawget(k, kl, ts, txn))
+	if self:is_mvcc() then
+		return rawget_to_s(storage:rawget(k, kl, ts, txn))
+	else
+		return rawget_to_s(storage:backend():rawget(k, kl))
+	end
 end
 function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
-	storage:rawput(self.stats, k, kl, v, vl, ts, txn)
-	self:split_if_necessary()
+	if self:is_mvcc() then
+		storage:rawput(self.stats, k, kl, v, vl, ts, txn)
+		self:on_write_replica_finished()
+	else
+		storage:backend():rawput(k, kl, v, vl)
+	end
+end
+function range_mt:exec_delete(storage, k, kl, ts, txn)
+	if self:is_mvcc() then
+		storage:rawdelete(self.stats, k, kl, ts, txn)
+		self:on_write_replica_finished()
+	else
+		strorage:backend():rawdelete(k, kl)
+	end
 end
 function range_mt:exec_merge(storage, k, kl, v, vl, op, ts, txn)
+	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
 	local r = {storage:rawmerge(self.stats, k, kl, v, vl, op, ts, txn)}
-	self:split_if_necessary()
+	self:on_write_replica_finished()
 	return unpack(r)
 end
 local function sync_cas(storage, stats, k, kl, o, ol, n, nl, ts, txn)
@@ -303,8 +415,9 @@ local function sync_cas(storage, stats, k, kl, o, ol, n, nl, ts, txn)
 	return storage:rawmerge(stats, k, kl, cas, #cas, 'cas', ts, txn)
 end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
+	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
 	local ok, ov = sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
-	self:split_if_necessary()
+	self:on_write_replica_finished()
 	return ok, ov	
 end
 local range_scan_filter_count
@@ -312,44 +425,63 @@ function range_mt.range_scan_filter(k, kl, v, vl, ts, r)
 	table.insert(r, ffi.cast('luact_dht_range_t*', v))
 	return #r >= range_scan_filter_count
 end
+-- make last key of this kind by increment last byte of prefix
+local scan_end_key_work = memory.alloc_typed('char', 1)
 function range_mt:scan_end_key(k, kl)
-	if self.kind >= _M.KIND_VID then
+	if self.kind >= _M.NON_METADATA_KIND_START then
 		exception.raise('invalid', 'this range, should not scanned', self)
-	elseif k[1] >= 0xFF then
-		exception.raise('invalid', 'invalid meta key', ('%q'):format(ffi.string(k, kl)))		
-	else
-		return string.char(k[0] + 1), 1
+	elseif self.kind == _M.KIND_META1 then
+		return _M.META2_SCAN_END_KEYSTR, #(_M.META2_SCAN_END_KEYSTR) 
+	else -- range data for actual data (DATA_FAMILY)
+		ffi.copy(scan_end_key_work, k, 1)
+		scan_end_key_work[0] = scan_end_key_work[0] + 1
+		return scan_end_key_work, 1
 	end
 end
 function range_mt:exec_scan(storage, k, kl, n, ts, txn)
+	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
 	local ek, ekl = self:scan_end_key(k, kl)
-	--logger.warn('k/kl', ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)))
+	logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)))
 	range_scan_filter_count = n
 	return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn)
 end
-function range_mt:exec_end_txn(storage, s, sl, e, el, n, ts, txn)
-	return storage:end_txn(self.stats, s, sl, e, el, n, ts, txn)
+function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
+	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
+	return storage:resolve_versions_in_range(self.stats, s, sl, e, el, n, ts, txn)
 end
 function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts)
 	assert(false, "TBD")
 end
 function range_mt:exec_split(storage, at, atl, ts)
-	range_manager:run_txn(function (txn, rng, a, al)
-		-- create split range data
-		local rng1, rng2 = rng:make_split_ranges(a, al)
+	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
+	-- create split range data
+	local new, updated = rng:make_split_ranges(at, atl)
+	range_manager:run_txn(function (txn, new_rng, update_rng)
 		-- search for the range which stores split ranges
-		rng1:update_address(txn)
-		rng2:update_address(txn)
-	end, self, at, atl)
+		new_rng:update_address(txn)
+		update_rng:update_address(txn)
+	end, new, updated)
+end
+function range_mt:make_split_ranges(a, al)
+	if self.start_key:less_than(a, al) and (not self.end_key:less_than_equals(a, al)) then
+		local new = self:clone()
+		new.start_key:init(a, al)
+		self.end_key:init(a, al)
+		new:compute_stats()
+		self:compute_stats()
+		return new, self
+	else
+		exception.raise('invalid', 'split key out of range', ('%q'):format(ffi.string(a, al)), self)
+	end
 end
 function range_mt:update_address(txn)
 	assert(self.kind > _M.KIND_META1)
-	local mk = self:metakey()
+	local mk, mkl = self:metakey()
 	local rng = range_manager:find(mk, #mk, self.kind - 1)
-	rng:rawput(mk, #mk, ffi.cast('char *', self), #self, txn)
+	rng:rawput(mk, mkl, ffi.cast('char *', self), #self, txn)
 end
-function range_mt:kv_group()
-	return range_manager.kv_groups[self.kind]
+function range_mt:partition()
+	return range_manager.partitions[self.kind]
 end
 function range_mt:start_scan()
 	-- become new leader of this range
@@ -358,22 +490,25 @@ end
 function range_mt:stop_scan()
 	scanner.stop(self)
 end
-function range_mt:start_split()
-	tentacle(self.split, self)
+function range_mt:on_writer_finished(txn, k, kl)
+	--if txn then
+	--	txn.coord:add_key(k, kl)
+	--end
 end
-function range_mt:split_if_necessary()
+function range_mt:on_write_replica_finished()
+	-- split if necessary
 	local st = self.stats
 	if (st.bytes_key + st.bytes_val) > range_manager.opts.range_size_max then
-		self:start_split()
+		self:split()
 	end
 end
 
 -- call from raft module
 function range_mt:apply(cmd)
 	assert(self.kind == cmd.kind)
-	local cf = self:kv_group()
+	local p = self:partition()
 	range_manager.clock:witness(cmd.timestamp)
-	return cmd:apply_to(cf, self)
+	return cmd:apply_to(p, self)
 end
 function range_mt:metadata()
 	return {
@@ -381,8 +516,8 @@ function range_mt:metadata()
 	}
 end
 function range_mt:fetch_state(k, kl, ts, txn)
-	local cf = self:kv_group()
-	return rawget_to_s(cf:rawget(k, kl, ts, txn))
+	local p = self:partition()
+	return rawget_to_s(p:rawget(k, kl, ts, txn))
 end
 function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if not uuid.valid(leader) then
@@ -471,14 +606,12 @@ range_manager_mt.__index = range_manager_mt
 -- wait for initialization
 function range_manager_mt:bootstrap(nodelist)
 	local opts = self.opts
-	local bootstrap_stats
-	if not nodelist then
-		bootstrap_stats = ffi.new('luact_mvcc_stats_t')
-	end
 	-- create storage for initial dht setting with bootstrap mode
-	local root_cf = self:new_kv_group(_M.KIND_META1, _M.META1_FAMILY, bootstrap_stats)
-	local meta2_cf = self:new_kv_group(_M.KIND_META2, _M.META2_FAMILY, bootstrap_stats)
-	local default_cf = self:new_kv_group(_M.KIND_VID, _M.VID_FAMILY, bootstrap_stats)
+	local root_cf = self:new_partition(_M.KIND_META1, _M.META1_FAMILY_NAME)
+	local meta2_cf = self:new_partition(_M.KIND_META2, _M.META2_FAMILY_NAME)
+	self:new_partition(_M.KIND_TXN, _M.DATA_FAMILY_NAME)
+	self:new_partition(_M.KIND_VID, _M.DATA_FAMILY_NAME)
+	self:new_partition(_M.KIND_STATE, _M.DATA_FAMILY_NAME)
 	-- start dht gossiper
 	self.gossiper = luact.root_actor.gossiper(opts.gossip_port, {
 		nodelist = nodelist,
@@ -487,19 +620,20 @@ function range_manager_mt:bootstrap(nodelist)
 		end
 	})
 	-- primary thread create initial cluster data structure
-	if bootstrap_stats then
+	if not nodelist then
 		-- create root range
 		self.root_range = self:new_range(key.MIN, key.MAX, _M.KIND_META1, true)
-		self.root_range.stats = bootstrap_stats
 		self.root_range:start_replica_set()
 		-- put initial meta2 storage into root_range (with writing raft log)
-		local meta2 = self:new_range(key.MIN, key.MAX, _M.KIND_META2)
-		local meta2_key = meta2:metakey()
-		self.root_range:rawput(meta2_key, #meta2_key, ffi.cast('char *', meta2), #meta2, nil, nil, true)
+		local meta2 = self:new_range(key.MIN, _M.META2_MAX_KEY, _M.KIND_META2)
+		local meta2_key, meta2_key_len = meta2:metakey()
+		self.root_range:rawput(meta2_key, meta2_key_len, ffi.cast('char *', meta2), #meta2, nil, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
-		local vids = self:new_range(key.MIN, key.MAX, _M.KIND_VID)
-		local vids_key = vids:metakey()
-		meta2:rawput(vids_key, #vids_key, ffi.cast('char *', vids), #vids, nil, nil, true)
+		for _, kind in ipairs({_M.KIND_TXN, _M.KIND_VID, _M.KIND_STATE}) do
+			local rng = self:new_range(key.MIN, key.MAX, kind)
+			local mk, mkl = rng:metakey()
+			meta2:rawput(mk, mkl, ffi.cast('char *', rng), #rng, nil, nil, true)
+		end
 	end
 end
 -- shutdown range manager.
@@ -512,13 +646,26 @@ end
 -- create new kind of dht which name is *name*, 
 -- it is caller's responsibility to give unique value for *kind*.
 -- otherwise it fails.
-function range_manager_mt:bootstrap_kind(kind, name)
-	local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(kind))
-	if self.root_range:cas(syskey, nil, name) then
-		self:new_kv_group(id, name)
-		self:new_range(key.MIN, key.MAX, kind)
-		return kind
+function range_manager_mt:bootstrap_kind(name, kind)
+	if kind then
+		if kind >= _M.BUILTIN_KIND_START and kind <= _M.BUILTIN_KIND_END then
+			return kind
+		elseif kind < _M.USER_KIND_PREFIX_MIN or kind > _M.USER_KIND_PREFIX_MAX then
+			exception.raise('invalid', 'kind value should be within', _M.USER_KIND_PREFIX_MIN, _M.USER_KIND_PREFIX_MAX)
+		end
 	end
+	for k=kind or _M.USER_KIND_PREFIX_MIN, _M.USER_KIND_PREFIX_MAX do
+		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(k))
+		local ok, prev = self.root_range:cas(syskey, nil, name) 
+		if ok then
+			self:new_partition(k, _M.DATA_FAMILY_NAME)
+			self:new_range(key.MIN, key.MAX, k)
+			return k
+		elseif prev == name then
+			return k
+		end
+	end
+	exception.raise('invalid', 'there is no unused kind value')
 end
 -- shutdown specified kind of dht
 -- TODO : do following steps to execute cluster-wide shutdown
@@ -531,7 +678,6 @@ function range_manager_mt:shutdown_kind(kind, truncate)
 end
 -- create new range
 function range_manager_mt:new_range(start_key, end_key, kind, dont_start_replica)
-	kind = kind or _M.KIND_VID
 	local r = range_mt.alloc(_M.NUM_REPLICA)
 	r:init(start_key, end_key, kind)
 	self.ranges[kind]:add(r)
@@ -565,72 +711,61 @@ function range_manager_mt:destory_range(rng)
 	memory.free(rng)
 end
 function range_manager_mt:clear_cache(rng)
-	local kind = rng.kind
-	if kind > _M.KIND_META1 then
-		self.caches[kind]:remove(rng)
+	if rng.kind > _M.KIND_META1 then
+		self.caches[rng.kind]:remove(rng)
 	end
 end
-function range_manager_mt:new_kv_group(kind, name, bootstrap_stats)
-	if #self.kv_groups >= 255 then
+function range_manager_mt:new_partition(kind, name)
+	if #self.partitions >= 255 then
 		exception.raise('invalid', 'cannot create new family: full')
 	end
-	local stats 
-	local c = self.kv_groups.lookup[name]
-	if not c then
-		c = self.storage:column_family(name)
-		self.kv_groups[kind] = c
+	local p = self.partitions.lookup[name]
+	if not p then
+		p = self.storage:column_family(name)
+		self.partitions.lookup[name] = c
+	end
+	if not self.partitions[kind] then
+		self.partitions[kind] = p
 		self.ranges[kind] = cache.new(kind)
 		if kind > _M.KIND_META1 then
 			self.caches[kind] = cache.new(kind)
 		end
-		self.kv_groups.lookup[name] = c
 	end
-	if bootstrap_stats then
-		local storage = self.kv_groups[_M.KIND_META1]
-		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(kind))
-		if not sync_cas(storage, bootstrap_stats, syskey, #syskey, nil, 0, name, #name, self.clock:issue()) then
-			exception.raise('fatal', 'initial kind of dht cannot registered', kind, name)
-		end
-	end
-	return c
+	return p
 end
-function range_manager_mt:new_txn()
-	return txncoord.new_txn(self.clock:issue())
+function range_manager_mt:new_txn(isolation)
+	return txncoord.new_txn(isolation)
 end
 function range_manager_mt:fin_txn(txn, commit)
 	return txncoord.fin_txn(txn, commit)
 end
+function range_manager_mt:run_txn(proc, ...)
+	return txncoord.run_txn(self:new_txn(), proc, ...)
+end
 -- find range which contains key (k, kl)
 -- search original kind => KIND_META2 => KIND_META1
---[[
-	"\n{key}" (n >= _M.KIND_VID) in ranges/caches KIND_META2 => range which contains addressing info for {key} of range kind n.
-	"\n{key}" (n >= _M.KIND_VID) in root_range => range which contains addressing info for "\n{key}" of range meta2
-]]
 function range_manager_mt:find(k, kl, kind)
 	local r, mk, mkl
 	local prefetch = self.opts.range_prefetch
 	kind = kind or _M.KIND_VID
-	if kind >= _M.KIND_VID then
+	if kind >= _M.NON_METADATA_KIND_START then
 		r = self.caches[kind]:find(k, kl)
 		-- logger.info('r = ', r)
 		if not r then
-			mk = make_metakey(kind, ffi.string(k, kl))
-			mkl = #mk
+			mk, mkl = make_metakey(kind, k, kl)
 			-- find range from meta ranges
-			r = self:find(mk, mkl, _M.KIND_META2)
+			r = self:find(mk, mkl, _M.NON_METADATA_KIND_START - 1)
 			if r then
 				r = r:scan(mk, mkl, prefetch)
 			end
 		end
-	elseif kind > _M.KIND_META1 then
+	elseif kind > _M.ROOT_METADATA_KIND then
 		r = self.caches[kind]:find(k, kl)
 		if not r then
-			mk = make_metakey(kind, ffi.string(k, kl))
-			mkl = #mk
 			-- find range from top level meta ranges
-			r = self:find(mk, mkl, kind - 1)
+			r = self:find(k, kl, kind - 1)
 			if r then
-				r = r:scan(mk, mkl, prefetch)
+				r = r:scan(k, kl, prefetch)
 			end
 		end
 	else -- KIND_META1
@@ -660,9 +795,9 @@ function range_manager_mt:find_on_memory(k, kl, kind)
 	end
 end
 -- get kind id from kind name
-function range_manager_mt:family_name_by_kind(kind)
-	local cf = self.kv_groups[kind]
-	for k,v in pairs(self.kv_groups.lookup) do
+function range_manager_mt:parition_name_by_kind(kind)
+	local cf = self.partitions[kind]
+	for k,v in pairs(self.partitions.lookup) do
 		if v == cf then
 			return k
 		end
@@ -799,7 +934,7 @@ function _M.get_manager(nodelist, datadir, opts)
 			ranges = {}, -- same data structure as cache
 			caches = {},
 			threads = {}, 
-			kv_groups = {
+			partitions = {
 				lookup = {}, 
 			}, 
 			boot = false, 

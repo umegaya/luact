@@ -12,7 +12,7 @@ cache_mt.__index = cache_mt
 function cache_mt:find(k, kl)
 	kl = kl or #k
 	for i=1,#self do
-		-- logger.info(self[i].start_key, self[i]:include(k, kl))
+		-- logger.info('cache search', self[i].start_key, self[i]:include(k, kl))
 		if self[i]:include(k, kl) then
 			return self[i]
 		end

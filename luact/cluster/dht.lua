@@ -40,8 +40,8 @@ typedef struct luact_dht {
 -- dht object
 local dht_mt = {}
 dht_mt.__index = dht_mt
-function dht_mt:init(name, operation_timeout)
-	self.kind = range_manager:bootstrap(name)
+function dht_mt:init(name, operation_timeout, kind)
+	self.kind = range_manager:bootstrap_kind(name, kind)
 	self.timeout = operation_timeout
 end
 function dht_mt:destroy(truncate)

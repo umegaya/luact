@@ -18,7 +18,7 @@ tools.start_luact(1, nil, function ()
 	function luact.root.arbiter(id, func, opts, rng)
 		local rm = (require 'luact.cluster.dht.range').get_manager()
 		rng = rm:create_fsm_for_arbiter(rng)
-		local storage = rm.kv_groups[rng.kind]
+		local storage = rng:partition()
 		local a = range_arbiters[id]
 		if not a then
 			a = luact({
@@ -29,6 +29,7 @@ tools.start_luact(1, nil, function ()
 				end,
 				write = function (self, logs, timeout, dictatorial)
 					if ffi.typeof('luact_dht_cmd_get_t*') == ffi.typeof(logs[1]) then
+						print('consistent_flag set')
 						consistent_flag = true
 					end
 					--logger.info('write', logs, timeout, dictatorial)
@@ -37,6 +38,8 @@ tools.start_luact(1, nil, function ()
 			})
 			range_arbiters[id] = a
 			rng:debug_add_replica(a)
+		else
+			assert(false, "same arbiter should not called")
 		end
 		return a
 	end
@@ -51,16 +54,20 @@ tools.start_luact(1, nil, function ()
 	
 	local key = "hoge"
 	print('put test')
-	rm:find(key):put(key, "fuga")
+	rm:find(key, #key):put(key, "fuga")
 	print('get test')
-	assert(rm:find(key):get(key) == "fuga" and (not consistent_flag), "same value as given to put should be returned")
+	assert(rm:find(key, #key):get(key) == "fuga" and (not consistent_flag), "same value as given to put should be returned")
 	print('cas test1')
-	local res = rm:find(key):cas(key, "gyaa", "guha")
+	local res = rm:find(key, #key):cas(key, "gyaa", "guha")
 	assert(not res, "cas should fail if condition not met")
 	print('cas test2')
-	assert(rm:find(key):cas(key, "fuga", "guha"), "cas should success if condition met")
+	assert(rm:find(key, #key):cas(key, "fuga", "guha"), "cas should success if condition met")
 	print('get test2')
-	assert(rm:find(key):get(key, nil, true) == "guha" and consistent_flag, "result of get also should change")
+	assert(rm:find(key, #key):get(key, nil, true) == "guha" and consistent_flag, "result of get also should change")
+	print('delete test')
+	rm:find(key, #key):delete(key)
+	assert(not rm:find(key, #key):get(key), "result of get shouldn't be found")
+	
 	
 end)
 

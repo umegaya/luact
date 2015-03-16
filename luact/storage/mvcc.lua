@@ -461,11 +461,12 @@ function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
 end
 -- scan and apply iterator for the meta key in {(s, sl) <= {key} < {e, el}} and its value.
 function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
+	--dump_db(self.db)
 	local it = self.db:iterator(opts)
 	it:seek(_M.bytes_codec:encode(s, sl)) --> seek to the smallest of bigger key
 	while it:valid() do
 		local k, kl, ts = _M.bytes_codec:decode(it:key())
-		-- print(pstr(k, kl), pstr(e, el), ts)
+		-- logger.warn('rawscan_internal', pstr(k, kl), pstr(e, el), ts, kl, el)
 		if ts then
 			exception.raise('mvcc', 'invalid_key', 'start key should not be versioned key', pstr(s, sl), ts)
 		end
@@ -874,17 +875,11 @@ function mvcc_mt:rawcas(stats, k, kl, ov, ovl, nv, nvl, ts, txn, opts)
 	self:rawmerge(stats, k, kl, ffi.cast('char *', op), #op, 'cas', ts, txn, opts)
 	return op:result()
 end
-function mvcc_mt:new_txn(ts)
-	return txncoord.new_txn(ts)
-end	
-function mvcc_mt:fin_txn(txn, commit)
-	txncoord.fin_txn(txn, commit)
-end
-function mvcc_mt:resolve_txn(stats, k, kl, ts, txn, opts)
+function mvcc_mt:resolve_version(stats, k, kl, ts, txn, opts)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local v, vl = self.db:rawget(mk, mkl, opts)
 	if v ~= ffi.NULL then
-		local ok, r = pcall(self.resolve_txn_internal, self, stats, k, kl, v, vl, ts, txn, opts)
+		local ok, r = pcall(self.resolve_version_internal, self, stats, k, kl, v, vl, ts, txn, opts)
 		memory.free(v)
 		if not ok then
 			error(r)
@@ -894,9 +889,9 @@ function mvcc_mt:resolve_txn(stats, k, kl, ts, txn, opts)
 	end
 end
 local orig_timestamp_work = ffi.new('pulpo_hlc_t')
-function mvcc_mt:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
+function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	if not txn then
-		logger.warn('resolve_txn', 'no txn specified')
+		logger.warn('resolve_version', 'no txn specified')
 		return
 	end
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
@@ -1005,8 +1000,8 @@ function mvcc_mt:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- dump_db(self.db)
 	stats:aborted(mkl, prev_meta_work[0], meta, iter)
 end
-function mvcc_mt:end_txn_filter(k, kl, v, vl, ctx, stats, ts, txn, opts)
-	self:resolve_txn_internal(stats, k, kl, v, vl, ts, txn, opts)
+function mvcc_mt:resolve_version_filter(k, kl, v, vl, ctx, stats, ts, txn, opts)
+	self:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	if ctx.count > 0 then
 		ctx.count = ctx.count - 1
 		return ctx.count <= 0
@@ -1014,9 +1009,9 @@ function mvcc_mt:end_txn_filter(k, kl, v, vl, ctx, stats, ts, txn, opts)
 		ctx.count = ctx.count - 1 -- count delete num as negative value
 	end	
 end
-function mvcc_mt:end_txn(stats, s, sl, e, el, n, ts, txn, opts)
+function mvcc_mt:resolve_versions_in_range(stats, s, sl, e, el, n, ts, txn, opts)
 	local ctx = { count = n }
-	self:rawscan(s, sl, e, el, opts, self.end_txn_filter, ctx, stats, ts, txn, opts)
+	self:rawscan(s, sl, e, el, opts, self.resolve_version_filter, ctx, stats, ts, txn, opts)
 	return n - ctx.count
 end
 local split_key_work = memory.alloc_typed('char', 256)
@@ -1029,7 +1024,6 @@ function mvcc_mt:find_split_key(st, s, sl, e, el, checker)
 	local current_bytes = 0
 	local k, kl, v, vl, best_k, best_kl
 	local best_diff = 0xFFFFFFFFULL
-	local time_slice_start = 
 	it:seek(_M.bytes_codec:encode(s, sl)) --> seek to the smallest of bigger key
 	-- print('find_split_key: desired_size=', desired_size)
 	while it:valid() do

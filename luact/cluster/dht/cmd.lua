@@ -26,6 +26,13 @@ typedef struct luact_dht_cmd_put {
 	char p[0];	
 } luact_dht_cmd_put_t;
 
+typedef struct luact_dht_cmd_delete {
+	pulpo_hlc_t timestamp;
+	uint8_t kind, txn_f;
+	uint16_t kl;
+	char p[0];
+} luact_dht_cmd_delete_t;
+
 typedef struct luact_dht_cmd_cas {
 	pulpo_hlc_t timestamp;
 	uint8_t kind, txn_f;
@@ -68,14 +75,14 @@ typedef struct luact_dht_cmd_scan {
 	char p[0];	
 } luact_dht_cmd_scan_t;
 
-typedef struct luact_dht_cmd_end_txn {
+typedef struct luact_dht_cmd_resolve {
 	pulpo_hlc_t timestamp;
 	uint8_t kind, commit;
 	uint16_t n_process;
 	uint16_t skl, ekl;
 	luact_dht_txn_t txn;
 	char p[0];
-} luact_dht_cmd_end_txn_t;
+} luact_dht_cmd_resolve_t;
 
 typedef struct luact_dht_gossip_replica_change {
 	uint8_t kind, padd[3];
@@ -113,11 +120,13 @@ local function register_ctype(what, name, typename, id)
 end
 register_ctype('struct', 'luact_dht_cmd_get', 'luact_dht_cmd_get_t', serde_common.LUACT_DHT_CMD_GET)
 register_ctype('struct', 'luact_dht_cmd_put', 'luact_dht_cmd_put_t', serde_common.LUACT_DHT_CMD_PUT)
+register_ctype('struct', 'luact_dht_cmd_delete', 'luact_dht_cmd_delete_t', serde_common.LUACT_DHT_CMD_DELETE)
 register_ctype('struct', 'luact_dht_cmd_cas', 'luact_dht_cmd_cas_t', serde_common.LUACT_DHT_CMD_CAS)
 register_ctype('struct', 'luact_dht_cmd_merge', 'luact_dht_cmd_merge_t', serde_common.LUACT_DHT_CMD_MERGE)
 register_ctype('struct', 'luact_dht_cmd_watch', 'luact_dht_cmd_watch_t', serde_common.LUACT_DHT_CMD_WATCH)
 register_ctype('struct', 'luact_dht_cmd_split', 'luact_dht_cmd_split_t', serde_common.LUACT_DHT_CMD_SPLIT)
 register_ctype('struct', 'luact_dht_cmd_scan', 'luact_dht_cmd_scan_t', serde_common.LUACT_DHT_CMD_SCAN)
+register_ctype('struct', 'luact_dht_cmd_resolve', 'luact_dht_cmd_resolve_t', serde_common.LUACT_DHT_CMD_RESOLVE)
 
 register_ctype('struct', 'luact_dht_gossip_replica_change', 'luact_dht_gossip_replica_change_t', serde_common.LUACT_DHT_GOSSIP_REPLICA_CHANGE)
 register_ctype('struct', 'luact_dht_gossip_range_split', 'luact_dht_gossip_range_split_t', serde_common.LUACT_DHT_GOSSIP_RANGE_SPLIT)
@@ -212,6 +221,37 @@ function put_mt:apply_to(storage, range)
 end
 ffi.metatype('luact_dht_cmd_put_t', put_mt)
 
+-- delete command
+local delete_mt = util.copy_table(base_mt)
+delete_mt.__index = delete_mt
+delete_mt.__gc = memory.free
+function delete_mt.size(kl, txn)
+	return ffi.sizeof('luact_dht_cmd_delete_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+end
+function delete_mt.new(kind, k, kl, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_delete_t*', memory.alloc(delete_mt.size(kl, txn)))
+	p.kind = kind
+	p.timestamp = timestamp
+	p.kl = kl
+	ffi.copy(p:key(), k, kl)
+	p:set_txn(txn)
+	return p
+end
+_M.delete = delete_mt.new
+function delete_mt:key()
+	return self.p
+end
+function delete_mt:txn()
+	return self.p + self.kl
+end
+function delete_mt:__len()
+	return delete_mt.size(self.kl, self:has_txn())
+end
+function delete_mt:apply_to(storage, range)
+	return range:exec_delete(storage, self:key(), self.kl, self.timestamp, self:get_txn())
+end
+ffi.metatype('luact_dht_cmd_delete_t', delete_mt)
+
 
 -- cas command
 local cas_mt = util.copy_table(base_mt)
@@ -289,15 +329,15 @@ end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 
 
--- end_txn command
-local end_txn_mt = {}
-end_txn_mt.__index = end_txn_mt
-end_txn_mt.__gc = memory.free
-function end_txn_mt.size(skl, ekl)
-	return ffi.sizeof('luact_dht_cmd_end_txn_t') + skl + ekl
+-- resolve command
+local resolve_mt = {}
+resolve_mt.__index = resolve_mt
+resolve_mt.__gc = memory.free
+function resolve_mt.size(skl, ekl)
+	return ffi.sizeof('luact_dht_cmd_resolve_t') + skl + ekl
 end
-function end_txn_mt.new(kind, sk, skl, ek, ekl, n, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(skl, ekl)))
+function resolve_mt.new(kind, sk, skl, ek, ekl, n, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_resolve_t*', memory.alloc(resolve_mt.size(skl, ekl)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.txn = txn
@@ -308,25 +348,25 @@ function end_txn_mt.new(kind, sk, skl, ek, ekl, n, timestamp, txn)
 	ffi.copy(p:end_key(), ek, ekl)
 	return p
 end
-_M.end_txn = end_txn_mt.new
-function end_txn_mt:txn()
+_M.resolve = resolve_mt.new
+function resolve_mt:txn()
 	return self.txn
 end
-function end_txn_mt:start_key()
+function resolve_mt:start_key()
 	return self.p
 end
-function end_txn_mt:end_key()
+function resolve_mt:end_key()
 	return self.p + self.skl
 end
-function end_txn_mt:__len()
-	return end_txn_mt.size(self.skl, self.ekl)
+function resolve_mt:__len()
+	return resolve_mt.size(self.skl, self.ekl)
 end
-function end_txn_mt:apply_to(storage, range)
-	return range:exec_end_txn(storage, 
+function resolve_mt:apply_to(storage, range)
+	return range:exec_resolve(storage, 
 		self:start_key(), self.skl, self:end_key(), self.ekl, 
 		self.n_process, self.timestamp, self:txn())
 end
-ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
+ffi.metatype('luact_dht_cmd_resolve_t', resolve_mt)
 
 
 -- merge command
