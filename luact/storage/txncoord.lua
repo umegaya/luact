@@ -1,20 +1,28 @@
 local ffi = require 'ffiex.init'
 local luact = require 'luact.init'
 local uuid = require 'luact.uuid'
+local serde_common = require 'luact.serde.common'
 
 local memory = require 'pulpo.memory'
 local lamport = require 'pulpo.lamport'
 local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
+local tentacle = require 'pulpo.tentacle'
 
 local _M = {}
+
+exception.define('txn_aborted')
+exception.define('txn_old_retry')
+exception.define('txn_future_ts')
+exception.define('txn_push_fail')
+exception.define('txn_need_retry')
 
 -- cdefs
 ffi.cdef [[
 typedef enum luact_dht_isolation_type {
-	SNAPSHOT_ISOLATION,
-	SERIALIZED_SNAPSHOT_ISOLATION,
-	LINEARIZABILITY,
+	SNAPSHOT,
+	SERIALIZABLE,
+	LINEARIZABLE,
 } luact_dht_isolation_type_t;
 
 typedef enum luact_dht_txn_status {
@@ -27,9 +35,12 @@ typedef struct luact_dht_txn {
 	luact_uuid_t coord;
 	uint16_t n_retry;
 	uint8_t status, isolation;
+	uint32_t priority;
+	pulpo_walltime_t last_update;
 	pulpo_hlc_t timestamp; //proposed timestamp
-	pulpo_hlc_t start_at; //initial timestamp
+	pulpo_hlc_t start_at; //current txn start timestamp
 	pulpo_hlc_t max_ts; //start_at + maximum clock skew
+	pulpo_hlc_t init_at; //transaction creation timestamp. never changed afterward
 } luact_dht_txn_t;
 ]]
 local TXN_STATUS_PENDING = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_PENDING')
@@ -39,12 +50,12 @@ _M.STATUS_PENDING = TXN_STATUS_PENDING
 _M.STATUS_ABORTED = TXN_STATUS_ABORTED
 _M.STATUS_COMMITTED = TXN_STATUS_COMMITTED
 
-local SERIALIZED_SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SERIALIZED_SNAPSHOT_ISOLATION')
-local SNAPSHOT_ISOLATION = ffi.cast('luact_dht_isolation_type_t', 'SNAPSHOT_ISOLATION')
-local LINEARIZABILITY = ffi.cast('luact_dht_isolation_type_t', 'LINEARIZABILITY')
-_M.SERIALIZED_SNAPSHOT_ISOLATION = SERIALIZED_SNAPSHOT_ISOLATION
-_M.SNAPSHOT_ISOLATION = SNAPSHOT_ISOLATION
-_M.LINEARIZABILITY = LINEARIZABILITY
+local SNAPSHOT = ffi.cast('luact_dht_isolation_type_t', 'SNAPSHOT')
+local SERIALIZABLE = ffi.cast('luact_dht_isolation_type_t', 'SERIALIZABLE')
+local LINEARIZABLE = ffi.cast('luact_dht_isolation_type_t', 'LINEARIZABLE')
+_M.SNAPSHOT = SNAPSHOT
+_M.SERIALIZABLE = SERIALIZABLE
+_M.LINEARIZABLE = LINEARIZABLE
 
 -- const
 -- TxnRetryOptions sets the retry options for handling write conflicts.
@@ -74,10 +85,13 @@ end
 function txn_mt:init(coord, isolation, debug_opts)
 	local ts = _M.clock:issue()
 	self.coord = coord
+	self.init_at = ts
 	self.start_at = ts
 	self:refresh_timestamp(ts)
-	self.isolation = isolation or SERIALIZED_SNAPSHOT_ISOLATION
+	self.isolation = isolation or SERIALIZABLE
 	self.status = TXN_STATUS_PENDING
+	self.last_update = 0
+	self.priority = 0
 	self.n_retry = 0
 	if debug_opts then
 		for k,v in pairs(debug_opts) do
@@ -98,9 +112,10 @@ function txn_mt:__len()
 	return ffi.sizeof('luact_dht_txn_t')
 end
 function txn_mt:__tostring()
-	return ("txn(%s):%s:%s,ts(%s),max_ts(%s),st(%d),n(%d)"):format(
+	return ("txn(%s):%s:%s,sts(%s),ts(%s),max_ts(%s),st(%d),n(%d)"):format(
 		tostring(ffi.cast('void *', self)),
 		tostring(self.coord),
+		tostring(self.init_at),
 		tostring(self.start_at),
 		tostring(self.timestamp),
 		tostring(self.max_ts),
@@ -113,7 +128,7 @@ function txn_mt:clone(debug_opts)
 		ffi.copy(p, self, ffi.sizeof(self))
 		return p
 	else
-		for _, key in ipairs({"start_at", "timestamp", "status", "max_ts", "n_retry"}) do
+		for _, key in ipairs({"init_at", "start_at", "timestamp", "status", "max_ts", "n_retry", "last_update"}) do
 			if not debug_opts[key] then
 				debug_opts[key] = self[key]
 			end
@@ -122,7 +137,7 @@ function txn_mt:clone(debug_opts)
 	end
 end
 function txn_mt:same_origin(txn)
-	return uuid.equals(self.coord, txn.coord) and (self.start_at == txn.start_at)
+	return uuid.equals(self.coord, txn.coord) and (self.init_at == txn.init_at)
 end
 function txn_mt:max_timestamp()
 	return self.max_ts
@@ -140,68 +155,52 @@ function txn_mt:invalidate()
 	uuid.invalidate(self.coord)
 end
 function txn_mt:as_key()
-	return self.start_at:as_byte_string()
+	return self.init_at:as_byte_string()
 end
---[[
-func (t *Transaction) Restart(userPriority, upgradePriority int32, timestamp Timestamp) {
-	t.Epoch++
-	if t.Timestamp.Less(timestamp) {
-		t.Timestamp = timestamp
-	}
-	// Set original timestamp to current timestamp on restart.
-	t.OrigTimestamp = t.Timestamp
-	// Potentially upgrade priority both by creating a new random
-	// priority using userPriority and considering upgradePriority.
-	t.UpgradePriority(MakePriority(userPriority))
-	t.UpgradePriority(upgradePriority)
-}
-
-// Update ratchets priority, timestamp and original timestamp values (among
-// others) for the transaction. If t.ID is empty, then the transaction is
-// copied from o.
-func (t *Transaction) Update(o *Transaction) {
-	if o == nil {
+function txn_mt:restart(priority, timestamp)
+	if self.timestamp < timestamp then
+		self.timestamp = timestamp
+	end
+	self.start_at = self.timestamp
+	if self.priority < priority then
+		self.priority = priority
+	end
+end
+function txn_mt:update_with(txn)
+	if not txn then 
 		return
-	}
-	if len(t.ID) == 0 {
-		*t = *gogoproto.Clone(o).(*Transaction)
-		return
-	}
-	if o.Status != PENDING {
-		t.Status = o.Status
-	}
-	if t.Epoch < o.Epoch {
-		t.Epoch = o.Epoch
-	}
-	if t.Timestamp.Less(o.Timestamp) {
-		t.Timestamp = o.Timestamp
-	}
-	if t.OrigTimestamp.Less(o.OrigTimestamp) {
-		t.OrigTimestamp = o.OrigTimestamp
-	}
-	// Should not actually change at the time of writing.
-	t.MaxTimestamp = o.MaxTimestamp
-	// Copy the list of nodes without time uncertainty.
-	t.CertainNodes = NodeList{Nodes: append(Int32Slice(nil),
-		o.CertainNodes.Nodes...)}
-	t.UpgradePriority(o.Priority)
-}
-
-// UpgradePriority sets transaction priority to the maximum of current
-// priority and the specified minPriority.
-func (t *Transaction) UpgradePriority(minPriority int32) {
-	if minPriority > t.Priority {
-		t.Priority = minPriority
-	}
-}
-]]
+	end
+	if not txn:valid() then
+		self:invalidate()
+	end
+	if txn.status ~= TXN_STATUS_PENDING then
+		self.status = txn.status
+	end
+	if self.n_retry < txn.n_retry then
+		self.n_retry = txn.n_retry
+	end
+	if self.timestamp < txn.timestamp then
+		self.timestamp = txn.timestamp
+	end
+	if self.start_at < txn.start_at then
+		self.start_at = txn.start_at
+	end
+	if self.priority < txn.priority then
+		self.priority = txn.priority
+	end
+	self.max_ts = txn.max_ts
+end
 ffi.metatype('luact_dht_txn_t', txn_mt)
+serde_common.register_ctype('struct', 'luact_dht_txn', nil, serde_common.LUACT_DHT_TXN)
 
 
 
 -- txn coordinator
 local txn_coord_mt = {}
 txn_coord_mt.__index = txn_coord_mt
+function txn_coord_mt:initialize()
+	self:start_heartbeat()
+end
 function txn_coord_mt:start(txn)
 	local k = txn:as_key()
 	if self.txns[k] then
@@ -210,73 +209,216 @@ function txn_coord_mt:start(txn)
 	self.txns[k] = {txn = txn, keys = {}}
 end
 function txn_coord_mt:heartbeat()
+	for k, txn_data in pairs(self.txns) do
+		local k, kl, txn = txn_data[1]:key(), txn_data[1]:keylen(), txn_data.txn
+		local ok, r = pcall(_M.range_manager.heartbeat_txn, _M.range_manager, k, kl, txn)
+		if ok then -- transaction finished by other process (maybe max timestamp exceed)
+			if r.status ~= TXN_STATUS_PENDING then
+				_M.resolve_version(r) -- 
+			end
+		else
+			logger.warn('heartbeat_txn error', r)
+		end
+	end
 end
-function txn_coord_mt:finish(txn, commit)
-	txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
+function txn_coord_mt:start_heartbeat()
+	self.hbt = tentacle(self.heartbeat, self)
+end
+function txn_coord_mt:finish(txn, exist_txn, commit)
+	local reply
+	if exist_txn then
+		-- Use the persisted transaction record as final transaction.
+		reply = exist_txn
+		if reply.status == TXN_STATUS_COMMITTED then
+			exception.raise('txn_committed', reply)
+		elseif reply.status == TXN_STATUS_ABORTED then
+			exception.raise('txn_aborted', reply)
+		elseif txn.n_retry < reply.n_retry then
+			exception.raise('txn_old_retry', txn.n_retry, reply.n_retry, reply)
+		elseif reply.timestamp < txn.timestamp then
+			-- The transaction record can only ever be pushed forward, so it's an
+			-- error if somehow the transaction record has an earlier timestamp
+			-- than the transaction timestamp.
+			exception.raise('txn_future_ts', txn.timestamp, reply.timestamp, reply)
+		end
+		-- Take max of requested epoch and existing epoch. The requester
+		-- may have incremented the epoch on retries.
+		if reply.n_retry < txn.n_retry then
+			reply.n_retry = txn.n_retry
+		end
+		-- Take max of requested priority and existing priority. This isn't
+		-- terribly useful, but we do it for completeness.
+		if reply.priority < txn.priority then
+			reply.priority = txn.priority
+		end
+	else
+		reply = txn
+	end	
+	-- Set transaction status to COMMITTED or ABORTED as per the
+	-- args.Commit parameter.
+	if commit then
+		-- If the isolation level is SERIALIZABLE, return a transaction
+		-- retry error if the commit timestamp isn't equal to the txn
+		-- timestamp.
+		if txn.isolation == SERIALIZE and reply.timestamp == txn.start_at then
+			exception.raise('txn_need_retry', reply)
+		end
+		reply.status = TXN_STATUS_COMMITTED
+	else
+		reply.status = TXN_STATUS_ABORTED
+	end
+
+	return reply
+end
+function txn_coord_mt:resolve_version(txn, commit, sync)
+	print('resolve_version')
+	if commit ~= nil then
+		txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
+	end
 	local key = txn:as_key()	
 	local txn_data = self.txns[key]
+	self.txns[key] = nil
 	local ranges = {}
 	-- get ranges to send end_txn. (with de-dupe)
 	for i=1,#txn_data do
 		-- commit each range.
-		local k, kind = unpack(txn_data[i])
-		local rng = _M.range_manager:find(k, #k, kind)
+		local c = txn_data[i]
+		local k, kl, kind = c:key(), c:keylen(), c.kind
+		local rng = _M.range_manager:find(k, kl, kind)
 		local span = ranges[rng]
 		if not span then
-			ranges[rng] = { min = k, max = k }
-		elseif memory.rawcmp_ex(span.max, #span.max, k, #k) < 0 then
-			ranges[rng].max = k
-		elseif memory.rawcmp_ex(span.min, #span.min, k, #k) > 0 then
-			ranges[rng].min = k
+			-- TODO : if this causes GC problem, use pre allocated cdata struct instead of temporary table
+			ranges[rng] = { min = k, minl = kl, max = k, maxl = kl }
+		elseif memory.rawcmp_ex(span.max, span.maxl, k, kl) < 0 then
+			ranges[rng].max, ranges[rng].maxl = k, kl
+		elseif memory.rawcmp_ex(span.min, span.minl, k, kl) > 0 then
+			ranges[rng].min, ranges[rng].minl = k, kl
 		end 
 	end
-	for rng,span in pairs(ranges) do
-		rng:resolve(txn, 0, span.min, #span.min, span.max, #span.max)
+	if sync then
+		local evs = {}
+		for rng,span in pairs(ranges) do
+			table.insert(evs, tentacle(function (r, sp)
+				print('resolve_version dispatch', ffi.string(sp.min, sp.minl), ffi.string(sp.max, sp.maxl))
+				rng:resolve(txn, 0, sp.min, sp.minl, sp.max, sp.maxl)
+			end, rng, span))
+		end
+		logger.info('wait all resolve completion')
+		event.join(nil, unpack(evs))
+	else
+		for rng,span in pairs(ranges) do
+		print('resolve_version dispatch', ffi.string(span.min, span.minl), ffi.string(span.max, span.maxl))
+			rng:resolve(txn, 0, span.min, span.minl, span.max, span.maxl)
+		end
 	end
 end
-function txn_coord_mt:add_key(start_at, key, kind)
-	local txn_data = self.txns[start_at:as_byte_string()]
-	table.insert(txn_data, {key, kind})
+function txn_coord_mt:add_cmd(txn, cmd)
+	local txn_data = self.txns[txn:as_key()]
+	print('add_cmd', ffi.string(cmd:key(), cmd:keylen()))
+	table.insert(txn_data, cmd)
+	txn.last_update = util.msec_walltime()
 end
-
+function txn_coord_mt:txn_key(txn)
+	local txn_data = self.txns[txn:as_key()]
+	if (not txn_data) or (#txn_data <= 0) then
+		print('txn_key, no commands')
+		return 
+	end
+	local c = txn_data[1]
+	return c:key(), c:keylen()
+end
 
 
 -- module functions
 local default_opts = {
 	max_clock_skew = 0.25, -- 250 msec
+	linearizable = false, -- no linearizability
 }
 function _M.initialize(rm, opts)
 	_M.range_manager = rm
 	_M.clock = rm.clock
-	_M.opts = util.merge_table(default_opts, opts or {}) 
+	_M.opts = util.merge_table(default_opts, opts or {})
 	_M.coordinator = setmetatable({
 		txns = {},
 	}, txn_coord_mt)
+	_M.coordinator:initialize()
 	_M.coord_actor = luact(_M.coordinator)
 end
-function _M.new_txn(isolation)
-	local txn = txn_mt.new(_M.coord_actor, isolation)
+function _M.new_txn(isolation, txn)
+	if txn then
+		txn:initialize(_M.coord_actor, isolation)
+	else
+		txn = txn_mt.new(_M.coord_actor, isolation)
+	end
 	_M.coordinator:start(txn)
 	return txn
 end
-function _M.fin_txn(txn, commit)
-	_M.coordinator:finish(txn, commit)
-	txn:fin()
-end
-function _M.run_txn(txn, proc, ...)
-	_M.fin_txn(txn, util.retry(retry_opts, function (txn, proc, ...)
+function _M.run_txn(opts, proc, ...)
+	opts = opts or {}
+	return util.retry(retry_opts, function (txn, on_commit, proc, ...)
+		txn.status = TXN_STATUS_PENDING
 		local ok, r = pcall(proc, txn, ...)
+		print('run_txn', ok, r)
 		if ok then
-			return 
+			if txn.status == TXN_STATUS_PENDING then
+				_M.range_manager:end_txn(txn, true)
+				if on_commit then on_commit(...) end
+			end
+			return util.retry_pattern.STOP
 		elseif r:is('mvcc') then
 			if r.args[1] == 'txn_ts_uncertainty' then
-				txn:refresh_timestamp()
 				return util.retry_pattern.RESTART
 			end
+		elseif r:is('txn_aborted') then
+			return util.retry_pattern.CONTINUE
+		elseif r:is('txn_push_fail') then
+			return util.retry_pattern.CONTINUE
+		elseif r:is('txn_need_retry') then
+			return util.retry_pattern.RESTART
 		end
-		return util.retry_pattern.TERMINATE
-	end))
+		return util.retry_pattern.ABORT
+	end, _M.new_txn(opts.isolation), opts.on_commit, proc, ...)
 end
+function _M.resolve_version(txn, commit, sync)
+	_M.coordinator:resolve_version(txn, commit, sync)
+end
+function _M.end_txn(txn, exist_txn, commit)
+	return _M.coordinator:finish(txn, exist_txn, commit)
+end
+function _M.add_cmd(txn, cmd, kind)
+	_M.coordinator:add_cmd(txn, cmd)
+end
+-- MakePriority generates a random priority value, biased by the
+-- specified userPriority. If userPriority=100, the resulting
+-- priority is 100x more likely to be probabilistically greater
+-- than a similar invocation with userPriority=1.
+function _M.make_priority(user_priority)
+	-- A currently undocumented feature allows an explicit priority to
+	-- be set by specifying priority < 1. The explicit priority is
+	-- simply -userPriority in this case. This is hacky, but currently
+	-- used for unittesting. Perhaps this should be documented and allowed.
+	if user_priority < 0 then
+		return -user_priority
+	end
+	if user_priority == 0 then
+		user_priority = 1
+	end
+	-- The idea here is to bias selection of a random priority from the
+	-- range [1, 2^31-1) such that if userPriority=100, it's 100x more
+	-- likely to be a higher int32 than if userPriority=1. The formula
+	-- below chooses random values according to the following table:
+	--   userPriority  |  range
+	--   1             |  all positive int32s
+	--   10            |  top 9/10ths of positive int32s
+	--   100           |  top 99/100ths of positive int32s
+	--   1000          |  top 999/1000ths of positive int32s
+	--   ...etc
+	return 0xFFFFFFFF - math.random(0xFFFFFFFF/user_priority)
+end
+function _M.txn_key(txn)
+	return _M.coordinator:txn_key(txn)
+end
+
 function _M.debug_make_txn(debug_opts)
 	return txn_mt.new(_M.coord_actor, nil, debug_opts)[0]
 end

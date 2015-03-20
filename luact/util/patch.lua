@@ -33,23 +33,24 @@ local default_retry_opts = {
 local retry_pattern = {
 	RESTART = 1,
 	CONTINUE = 2,
-	TERMINATE = 3,
+	ABORT = 3,
+	STOP = 4,
 }
 function util.retry(opts, fn, ...)
-	opts = _M.merge_table(default_retry_opts, opts)
+	opts = opts and util.merge_table(default_retry_opts, opts) or default_retry_opts
 	local n_fail = 0
 	local wait_sec = opts.wait
 	while true do
-		local ok, r = pcall(fn, ...)
+		local ok, r, ret = pcall(fn, ...)
 		if ok then
 			if r == retry_pattern.RESTART then
 				n_fail, wait_sec = 0, opts.wait
 			elseif r == retry_pattern.CONTINUE then
 				n_fail = n_fail + 1
-			elseif r == retry_pattern.TERMINATE then
+			elseif r == retry_pattern.ABORT then
 				return false
 			else
-				return true
+				return true, ret
 			end
 			if n_fail < opts.max_attempt then
 				clock.sleep(wait_sec)

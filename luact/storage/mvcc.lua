@@ -57,7 +57,9 @@ local MVCC_KEY_VERSIONED = ffi.cast('luact_mvcc_key_type_t', 'MVCC_KEY_VERSIONED
 
 -- exception
 exception.define('mvcc')
-
+exception.define('txn_exists')
+exception.define('txn_ts_uncertainty')
+exception.define('txn_write_too_old')
 
 
 -- local functions
@@ -149,7 +151,7 @@ function merger_cas_mt.process(key, key_length,
 			new_value_length[0] = context.sl
 			context.prev_val_len = 0
 			context.success = true
-			return context:swap(), true
+			return true, context:swap()
 		end
 	elseif cmp and context.cl == existing_length and 
 		memory.cmp(existing, cmp, existing_length) then
@@ -158,7 +160,7 @@ function merger_cas_mt.process(key, key_length,
 		context.prev_val = existing
 		context.prev_val_len = existing_length
 		context.success = true
-		return context:swap(), true
+		return true, context:swap()
 	end
 	context.prev_val = existing
 	context.prev_val_len = existing_length
@@ -386,6 +388,9 @@ end
 function mvcc_mt:fin()
 	self.db:fin()
 end
+function mvcc_mt:backend()
+	return self.db
+end
 function mvcc_mt:column_family(name, opts)
 	exception.raise('mvcc', 'not_support', 'please implement it properly for each kind of mvcc')
 end
@@ -396,8 +401,7 @@ function mvcc_mt:default_filter(k, kl, v, vl, ts, txn, opts, n, results)
 		-- print(n, pstr(k, kl), pstr(value, value_len))
 		if type(n) == 'number' then
 			local ks = ffi.string(k, kl)
-			local vs = ffi.string(value, value_len)
-			table.insert(results, {ks, #ks, vs, #vs, value_ts})
+			table.insert(results, {ks, #ks, memory.smart(value), value_len, value_ts})
 			if n > 0 and #results >= n then
 				return true
 			end
@@ -628,7 +632,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 	if (ts >= meta.timestamp) or same_txn then
 		if meta.txn:valid() and (not (txn and txn:same_origin(meta.txn))) then
 			-- if txn already exists, only same txn can read latest value.
-			exception.raise('mvcc', 'txn_exists', pstr(k, kl), meta.txn:clone(), txn)
+			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
 		end
 		local latest_key, latest_key_len = _M.bytes_codec:encode(k, kl, meta.timestamp)
 
@@ -657,7 +661,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 			-- absolute time if the writer had a fast clock.
 			-- The reader should try again with a later timestamp than the
 			-- one given below.
-			exception.raise('mvcc', 'txn_ts_uncertainty', pstr(k, kl), meta.timestamp:clone(true), txn:max_timestamp())
+			exception.raise('txn_ts_uncertainty', pstr(k, kl), meta.timestamp:clone(true), txn:max_timestamp())
 		end
 
 		-- We want to know if anything has been written ahead of timestamp, but
@@ -671,7 +675,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 				-- value, but there is another previous write with the same issues
 				-- as in the second case, so the reader will have to come again
 				-- with a higher read timestamp.
-				exception.raise('mvcc', 'txn_ts_uncertainty', pstr(k, kl), newest_ts, ts)
+				exception.raise('txn_ts_uncertainty', pstr(k, kl), newest_ts, ts)
 			end
 		end
 		-- Fourth case: There's no value in our future up to MaxTimestamp, and
@@ -776,7 +780,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- This should not happen since range should check the existing
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
-			exception.raise('mvcc', 'txn_exists', pstr(k, kl), meta.txn:clone(), txn)
+			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
 		end
 
 		-- We can update the current metadata only if both the timestamp
@@ -798,7 +802,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		elseif (meta.timestamp > ts) and (not meta.txn:valid()) then
 			-- If we receive a Put request to write before an already-
 			-- committed version, send write too old error.
-			exception.raise('mvcc', 'write_too_old', pstr(k, kl), meta.timestamp:clone(true), ts)
+			exception.raise('txn_write_too_old', pstr(k, kl), meta.timestamp:clone(true), ts)
 		else
 			-- Otherwise, its an old write to the current transaction. Just ignore.
 			return
@@ -860,7 +864,7 @@ function mvcc_mt:rawmerge(stats, k, kl, v, vl, merge_op, ts, txn, opts)
 	local r = {mergers[merge_op](k, kl, cv, cvl, v, vl, pvl_work)}
 	if r[1] then
 		if pvl_work[0] > 0 then
-			self:rawput(stats, k, kl, r[1], pvl_work[0], ts, txn, opts)
+			self:rawput(stats, k, kl, r[2], pvl_work[0], ts, txn, opts)
 		else
 			self:rawdelete(stats, k, kl, ts, txn, opts)
 		end
@@ -1012,6 +1016,7 @@ end
 function mvcc_mt:resolve_versions_in_range(stats, s, sl, e, el, n, ts, txn, opts)
 	local ctx = { count = n }
 	self:rawscan(s, sl, e, el, opts, self.resolve_version_filter, ctx, stats, ts, txn, opts)
+	dump_db(self.db)
 	return n - ctx.count
 end
 local split_key_work = memory.alloc_typed('char', 256)

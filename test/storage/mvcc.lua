@@ -12,6 +12,7 @@ local lamport = require 'pulpo.lamport'
 local util = require 'pulpo.util'
 local fs = require 'pulpo.fs'
 local exception = require 'pulpo.exception'
+local tools = require 'test.tools.cluster'
 
 txncoord.initialize({
 	find = function ()
@@ -28,29 +29,34 @@ local test_key3     = "db3"
 local test_key4     = "db4"
 local txn1         	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 })
 local txn1_commit  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_COMMITTED,
 })
 local txn1_abort  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_ABORTED,
 })
 local txn1_1		= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	n_retry = 1
 })
 local txn1_1_commit	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 1),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_COMMITTED,
@@ -58,11 +64,13 @@ local txn1_1_commit	= txncoord.debug_make_txn({
 })
 local txn2         	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 2),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 })
 local txn2_commit  	= txncoord.debug_make_txn({
 	coord = actor.root_of(nil, 2),
+	init_at = lamport.debug_make_hlc(0, 1),
 	start_at = lamport.debug_make_hlc(0, 1),
 	timestamp = lamport.debug_make_hlc(0, 1),  
 	status = txncoord.STATUS_COMMITTED,
@@ -108,40 +116,7 @@ function verify_stats(exp, st)
 	return st.bytes_val == exp.bytes_val and st.bytes_key == exp.bytes_key
 end
 
-
-local function test_err_handle(e)
-	return exception.new_with_bt('runtime', debug.traceback(), e)
-end
-local function test(name, proc, ctor, dtor)
-	local r 
-	if ctor then
-		r = {xpcall(ctor, test_err_handle)}
-		if not r[1] then
-			error(r[2])
-		end
-	end
-	local args
-	if r then
-		args = util.copy_table(r)
-		r = {xpcall(proc, test_err_handle, unpack(r, 2))}
-	else
-		r = {xpcall(proc, test_err_handle)}
-	end
-	if not r[1] then
-		error(r[2])
-	end
-	if dtor then
-		if args then
-			r = {xpcall(dtor, test_err_handle, unpack(args, 2))}
-		else
-			r = {xpcall(dtor, test_err_handle)}
-		end
-		if not r[1] then
-			error(r[2])
-		end
-	end
-	logger.notice(name, 'success')
-end
+local test = tools.test_runner
 
 -- [[
 -- Verify the sort ordering of successive keys with metadata and
@@ -248,10 +223,10 @@ test("TestMVCCUpdateExistingKeyOldVersion", function (db, stats)
 	db:put(stats, test_key1, value1, makets(1, 1))
 	-- Earlier walltime.
 	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(1, 0))
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+	assert((not ok) and r:is('txn_write_too_old'))
 	-- Earlier logical time.
 	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(0, 1))
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+	assert((not ok) and r:is('txn_write_too_old'))
 end, create_db, destroy_db)
 
 
@@ -263,7 +238,7 @@ end, create_db, destroy_db)
 test("TestMVCCUpdateExistingKeyDiffTxn", function (db, stats)
 	db:put(stats, test_key1, value1, makets(1, 0), txn1)
 	local ok, r = pcall(db.put, db, stats, test_key1, value2, makets(0, 1), txn2)
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	assert((not ok) and r:is('txn_exists'))
 end, create_db, destroy_db)
 
 test("TestMVCCGetNoMoreOldVersion", function (db, stats)
@@ -315,14 +290,12 @@ test("TestMVCCGetUncertainty", function (db, st)
 	ubk, ubkl = mvcc.upper_bound_of_prefix(test_key2)
 
 	ok, r = pcall(db.get, db, test_key2, makets(0, 7), txn)
-	assert((not ok) and r:is('mvcc') and 
-		r.args[1] == 'txn_ts_uncertainty' and 
-		r.args[3] == makets(0, 9) and r.args[4] == txn:max_timestamp())
+	assert((not ok) and r:is('txn_ts_uncertainty') and 
+		r.args[2] == makets(0, 9) and r.args[3] == txn:max_timestamp())
 
 	ok, r = pcall(db.scan, db, test_key2, #test_key2, ubk, ubkl, 10, makets(0, 7), txn)
-	assert((not ok) and r:is('mvcc') and 
-		r.args[1] == 'txn_ts_uncertainty' and 
-		r.args[3] == makets(0, 9) and r.args[4] == txn:max_timestamp())
+	assert((not ok) and r:is('txn_ts_uncertainty') and 
+		r.args[2] == makets(0, 9) and r.args[3] == txn:max_timestamp())
 
 	-- Adjust MaxTimestamp and retry.
 	txn.max_ts = makets(0, 7)
@@ -340,14 +313,12 @@ test("TestMVCCGetUncertainty", function (db, st)
 	db:put(st, test_key3, value2, makets(0, 9))
 	db:put(st, test_key3, value2, makets(0, 99))
 	ok, r = pcall(db.scan, db, test_key3, #test_key3, ubk, ubkl, 10, makets(0, 7), txn)
-	assert((not ok) and r:is('mvcc') and 
-		r.args[1] == 'txn_ts_uncertainty' and 
-		r.args[3] == makets(0, 9) and r.args[4] == makets(0, 7))
+	assert((not ok) and r:is('txn_ts_uncertainty') and 
+		r.args[2] == makets(0, 9) and r.args[3] == makets(0, 7))
 
 	ok, r = pcall(db.get, db, test_key3, makets(0, 7), txn)
-	assert((not ok) and r:is('mvcc') and 
-		r.args[1] == 'txn_ts_uncertainty' and 
-		r.args[3] == makets(0, 9) and r.args[4] == makets(0, 7))
+	assert((not ok) and r:is('txn_ts_uncertainty') and 
+		r.args[2] == makets(0, 9) and r.args[3] == makets(0, 7))
 
 end, create_db, destroy_db)
 
@@ -395,10 +366,10 @@ test("TestMVCCGetWriteIntentError", function (db, st)
 	local ok, r 
 	db:put(st, test_key1, value1, makets(0, 1), txn1)
 	ok, r = pcall(db.get, db, test_key1, makets(0, 1))
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists', 
+	assert((not ok) and r:is('txn_exists'), 
 		"cannot read the value of a write intent without TxnID")
 	ok, r = pcall(db.get, db, test_key1, makets(0, 1), txn2)
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists', 
+	assert((not ok) and r:is('txn_exists'), 
 		"cannot read the value of a write intent from a different TxnID")
 	local v = db:get(test_key1, makets(0, 2), txn1)
 	assert(v == value1, "in same txn, should get correct value")
@@ -520,7 +491,7 @@ test("TestMVCCScanInTxn", function (db, st)
 		"the value should not be empty")
 
 	local ok, r = pcall(db.scan, db, test_key2, #test_key2, test_key4, #test_key4, 0, makets(0, 1))
-	assert(not ok and r:is('mvcc') and r.args[1] == 'txn_exists')
+	assert(not ok and r:is('txn_exists'))
 end, create_db, destroy_db)
 
 -- TestMVCCIterateCommitted writes several values, some as intents
@@ -611,7 +582,7 @@ test("TestMVCCDeleteRangeFailed", function (db, st)
 
 	local ok, r
 	ok, r = pcall(db.delete_range, db, st, test_key2, test_key4, 0, makets(0, 1))
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	assert((not ok) and r:is('txn_exists'))
 	
 	db:delete_range(st, test_key2, test_key4, 0, makets(0, 1), txn1)
 end, create_db, destroy_db)
@@ -629,7 +600,7 @@ test("TestMVCCDeleteRangeConcurrentTxn", function (db, st)
 
 	local ok, r
 	ok, r = pcall(db.delete_range, db, st, test_key2, test_key4, 0, makets(0, 1), txn1)
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	assert((not ok) and r:is('txn_exists'))
 end, create_db, destroy_db)
 
 test("TestMVCCConditionalPut", function (db, st)
@@ -655,7 +626,7 @@ test("TestMVCCResolveTxn", function (db, st)
 	v = db:get(test_key1, makets(0, 1), txn1)
 	assert(v == value1)
 	local ok, r = pcall(db.get, db, test_key1, makets(0, 1))
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'txn_exists')
+	assert((not ok) and r:is('txn_exists'))
 	-- Resolve will write with txn1's timestamp which is 1, 0
 	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), txn1_commit)
 	-- now non-transactional get can see the value put at 1, 0
@@ -710,7 +681,7 @@ test("TestMVCCWriteWithDiffTimestampsAndEpochs", function (db, st)
 	db:resolve_version(st, test_key1, #test_key1, makets(0, 1), maketxn(txn1_1_commit, makets(0, 2)))
 	-- Now try writing an earlier intent--should get write too old error.
 	ok, r = pcall(db.put, db, st, test_key1, value2, makets(1, 0), txn2)
-	assert((not ok) and r:is('mvcc') and r.args[1] == 'write_too_old')
+	assert((not ok) and r:is('txn_write_too_old'))
 	-- Attempt to read older timestamp; should fail.
 	v = db:get(test_key1, makets(0, 0))
 	assert(not v)
@@ -740,7 +711,7 @@ test("TestMVCCReadWithDiffEpochs", function (db, st)
 	for _, test in ipairs(fixtures) do
 		local ok, v = pcall(db.get, db, test_key1, makets(0, 2), test[1])
 		if test[3] then
-			assert((not ok) and v:is('mvcc') and v.args[1] == 'txn_exists')
+			assert((not ok) and v:is('txn_exists'))
 		else
 			assert(v == test[2])
 		end
@@ -809,7 +780,7 @@ test("TestMVCCResolveWithPushedTimestamp", function (db, st)
 
 	ok, v = pcall(db.get, db, test_key1, makets(1, 1))
 	-- because test_key1 is not committed, just pushed, so read latest version without txn will be failure
-	assert((not ok) and v:is('mvcc') and v.args[1] == 'txn_exists') 
+	assert((not ok) and v:is('txn_exists')) 
 
 	-- Can still fetch the value using txn1.
 	v = db:get(test_key1, makets(1, 1), txn1)	
@@ -1104,9 +1075,9 @@ test("TestMVCCStatsWithRandomRuns", function (db, st)
 			local ok, r = pcall(db.delete, db, st, keys[idx], ts, txn)
 			if not ok then
 				-- if transaction exists, abort it
-				assert(r:is('mvcc') and r.args[1] == 'txn_exists', tostring(r))
+				assert(r:is('txn_exists'), tostring(r))
 				-- print(i, 'delete key', 'remove prev txn')
-				local exist_txn = r.args[3]
+				local exist_txn = r.args[2]
 				exist_txn.status = txncoord.STATUS_ABORTED
 				db:resolve_version(st, keys[idx], #keys[idx], ts, exist_txn)
 				db:delete(st, keys[idx], ts, txn)

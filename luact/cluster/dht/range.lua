@@ -56,7 +56,9 @@ _M.USER_KIND_PREFIX_MAX = 0xfe
 _M.NUM_USER_KIND = _M.USER_KIND_PREFIX_MAX - _M.USER_KIND_PREFIX_MIN
 -- syskey prefix
 _M.SYSKEY_CATEGORY_KIND = 0
-
+-- hook type
+_M.SPLIT_HOOK = 1
+_M.MERGE_HOOK = 2
 
 -- cdefs
 ffi.cdef [[
@@ -143,13 +145,16 @@ end
 local function make_syskey(category, k, kl)
 	return string.char(0, category)..ffi.string(k, kl)
 end
+
 -- synchorinized merge
 local function sync_merge(storage, stats, k, kl, v, vl, ts, txn)
 	return storage:rawmerge(stats, k, kl, v, vl, ts, txn)
 end
 local function rawget_to_s(v, vl)
 	if v then
-		return ffi.string(v, vl)
+		local s = ffi.string(v, vl)
+		memory.free(v)
+		return s
 	end
 end
 
@@ -233,6 +238,16 @@ end
 function range_mt:metakey()
 	return make_metakey(self.kind, self.end_key:as_slice())
 end
+function range_mt:metakind()
+	return self.kind > _M.KIND_META2 and _M.KIND_META2 or _M.KIND_META1
+end
+function range_mt:is_lead_by_this_node()
+	return uuid.owner_of(self.replicas[0])
+end
+function range_mt:metarange()
+	local mk, mkl = self:metakey()
+	return range_manager:find(mk, mkl, self:metakind())
+end
 function range_mt:cachekey()
 	return self.end_key:as_slice()
 end
@@ -280,33 +295,65 @@ function range_mt:find_replica_by(node, check_thread_id)
 		end
 	end
 end
-function range_mt:write(command, timeout, dictatorial)
-	if not dictatorial then
-		self:check_replica()
-	end
-	local replica, r, retry
-::RETRY::
+function range_mt:write_retryer(command, txn, timeout)
+	local replica, r
 	replica = self.replicas[0]
 	r = {pcall(replica.write, replica, {command}, timeout, dictatorial)}
 	if r[1] then
-		return unpack(r, 2)
-	elseif (not retry) and r[2]:is('actor_no_body') then
-		-- invalidate and retrieve range again
-		range_manager:clear_cache(self)
-		local p, len = self.start_key:as_slice()
-		self = range_manager:find(p, len, self.kind)
-		retry = true
-		goto RETRY
+		self:on_writer_finished(command, txn, true, unpack(r, 2))
+		return util.retry_pattern.STOP, r
+	elseif r[2]:is('actor_no_body') then
+		-- if this node is not owner of this range, invalidate and retrieve range again.
+		-- if it is, should be replication delay, so just wait and retry.
+		if not range_manager:is_owner(self) then
+			range_manager:clear_cache(self)
+			local ok, ret = pcall(range_manager.find, range_manager, command:key(), command:keylen(), self.kind)
+			ffi.gc(self, memory.free) -- it is useless after this write call finished, so enable gc
+			if ok then
+				ffi.copy(self, ret, ffi.sizeof(self))
+			else
+				error(ret)
+			end
+		end
+		return util.retry_pattern.CONTINUE
+	elseif r[2]:is('txn_exists') then
+		local exist_txn = r[2].args[3]
+		local ok, res_txn = pcall(range_manager.resolve_txn, range_manager, 
+			command:key(), command:keylen(), exist_txn, false)
+		if ok then
+			pcall(range_manager.resolve, range_manager, k, kl, res_txn)
+			return util.retry_pattern.RESTART
+		else -- cannot resolve txn. update timestamp and try again
+			command:get_txn().timestamp:least_greater_of(exist_txn.timestamp)
+			return util.retry_pattern.CONTINUE
+		end
+	elseif r[2]:is('txn_write_too_old') then
+		local exist_ts = r[2].args[3]
+		command:get_txn().timestamp:least_greater_of(exist_ts)
+		return util.retry_pattern.RESTART
 	else
+		-- does some stuff to recover from write error, including tweaking txn
+		self:on_writer_finished(command, txn, false, r[2])
+		if txn then -- reset txn if specified
+			command:set_txn(txn)
+		end
 		error(r[2])
 	end
 end
-function range_mt:write_no_wait(command)
-	self.replicas[0]:notify_write({command})
+function range_mt:write(command, txn, timeout, dictatorial)
+	if not dictatorial then
+		self:check_replica()
+	end
+	local ok, r = util.retry(retry_opts, self.write_retryer, self, command, txn, timeout)
+	if ok then
+		return unpack(r, 2)
+	else
+		error(r)
+	end
 end
 function range_mt:read(k, kl, ts, txn, consistent, timeout)
 	if consistent then
-		return self:write(cmd.get(self.kind, k, kl, ts, txn), timeout)
+		return self:write(cmd.get(self.kind, k, kl, ts, txn), txn, timeout)
 	else
 		self:check_replica()
 		return self.replicas[0]:read(timeout, k, kl, ts, txn)
@@ -323,23 +370,19 @@ function range_mt:put(k, v, txn, timeout)
 	return self:rawput(k, #k, v, #v, txn, timeout)
 end
 function range_mt:rawput(k, kl, v, vl, txn, timeout, dictatorial)
-	self:write(cmd.put(self.kind, k, kl, v, vl, range_manager.clock:issue(), txn), timeout, dictatorial)
-	self:on_writer_finished(txn, k, kl)
+	return self:write(cmd.put(self.kind, k, kl, v, vl, range_manager.clock:issue(), txn), txn, timeout, dictatorial)
 end
 function range_mt:delete(k, txn, timeout)
 	return self:rawdelete(k, #k, txn, timeout)
 end
 function range_mt:rawdelete(k, kl, txn, timeout)
-	self:write(cmd.delete(self.kind, k, kl, range_manager.clock:issue(), txn), timeout)
-	self:on_writer_finished(txn, k, kl)
+	return self:write(cmd.delete(self.kind, k, kl, range_manager.clock:issue(), txn), timeout)
 end
 function range_mt:merge(k, v, op, txn, timeout)
 	return self:rawmerge(k, #k, v, #v, op, #op, txn, timeout)
 end
 function range_mt:rawmerge(k, kl, v, vl, op, ol, txn, timeout)
-	local r = {self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), timeout)}
-	self:on_writer_finished(txn, k, kl)
-	return unpack(r)
+	return self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), txn, timeout)
 end
 function range_mt:cas(k, ov, nv, txn, timeout)
 	local oval, ol = ov or nil, ov and #ov or 0
@@ -348,12 +391,10 @@ function range_mt:cas(k, ov, nv, txn, timeout)
 	return self:rawcas(k, #k, oval, ol, nval, nl, txn, timeout)
 end
 function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, txn, timeout)
-	local r = {self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), timeout)}
-	self:on_writer_finished(txn, k, kl)
-	return unpack(r)
+	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), txn, timeout)
 end
 function range_mt:watch(k, kl, watcher, method, timeout)
-	return self:write(cmd.watch(self.kind, k, kl, watcher, method, range_manager.clock:issue()), timeout)
+	return self:write(cmd.watch(self.kind, k, kl, watcher, method, range_manager.clock:issue()), txn, timeout)
 end
 function range_mt:split(at, txn, timeout)
 	local spk, spkl
@@ -365,20 +406,28 @@ function range_mt:split(at, txn, timeout)
 			self.start_key.p, self.start_key:length(),
 			self.end_key.p, self.end_key:length())
 	end
-	return self:write(cmd.split(self.kind, spk, spkl, range_manager.clock:issue(), txn), timeout)
+	return self:write(cmd.split(self.kind, spk, spkl, range_manager.clock:issue(), txn), txn, timeout)
+end
+function range_mt:merge_hook()
 end
 function range_mt:scan(k, kl, n, txn, timeout)
-	return self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), timeout)
+	return self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn), txn, timeout)
 end
 function range_mt:resolve(txn, n, s, sl, e, el)
 	-- does not wait for reply
 	local ts = range_manager.clock:issue()
 	if s then
-		return self:write_no_wait(cmd.resolve(s, sl, e, el, n, ts, txn))
+		return self:write(cmd.resolve(self.kind, s, sl, e, el, n, ts, txn))
 	else
-		return self:write_no_wait(cmd.resolve(self.start_key.p, self.start_key:length(),
+		return self:write(cmd.resolve(self.kind, self.start_key.p, self.start_key:length(),
 			self.end_key.p, self.end_key:length(), n, ts, txn))
 	end
+end
+function range_mt:end_txn(k, kl, txn, commit, hook, timeout)
+	return self:write(cmd.end_txn(self.kind, k, kl, range_manager.clock:issue(), txn, commit, hook), txn, timeout)
+end
+function range_mt:resolve_txn(k, kl, txn, commit, timeout)
+	return self:write(cmd.resolve_txn(self.kind, k, kl, range_manager.clock:issue(), txn, commit), txn, timeout)
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn)
@@ -404,9 +453,9 @@ function range_mt:exec_delete(storage, k, kl, ts, txn)
 		strorage:backend():rawdelete(k, kl)
 	end
 end
-function range_mt:exec_merge(storage, k, kl, v, vl, op, ts, txn)
-	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
-	local r = {storage:rawmerge(self.stats, k, kl, v, vl, op, ts, txn)}
+function range_mt:exec_merge(storage, k, kl, v, vl, op, ol, ts, txn)
+	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
+	local r = {storage:rawmerge(self.stats, k, kl, v, vl, ffi.string(op, ol), ts, txn)}
 	self:on_write_replica_finished()
 	return unpack(r)
 end
@@ -415,7 +464,7 @@ local function sync_cas(storage, stats, k, kl, o, ol, n, nl, ts, txn)
 	return storage:rawmerge(stats, k, kl, cas, #cas, 'cas', ts, txn)
 end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
-	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
+	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	local ok, ov = sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 	self:on_write_replica_finished()
 	return ok, ov	
@@ -439,46 +488,148 @@ function range_mt:scan_end_key(k, kl)
 	end
 end
 function range_mt:exec_scan(storage, k, kl, n, ts, txn)
-	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
+	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	local ek, ekl = self:scan_end_key(k, kl)
 	logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)))
 	range_scan_filter_count = n
 	return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn)
 end
 function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
-	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
-	return storage:resolve_versions_in_range(self.stats, s, sl, e, el, n, ts, txn)
+	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
+	if el > 0 then
+		return storage:resolve_versions_in_range(self.stats, s, sl, e, el, n, ts, txn)
+	else
+		return storage:resolve_version(self.stats, s, sl, ts, txn)
+	end
+end
+function range_mt:exec_end_txn(storage, k, kl, ts, txn, commit)
+	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
+	local v, vl = storage:backend():rawget(k, kl)
+	-- if txn record exists, make it gc-able. otherwise nil
+	local exist_txn = (v ~= ffi.NULL and ffi.gc(ffi.cast('luact_dht_txn_t *', v), memory.free) or nil)
+	local rtxn = txncoord.end_txn(txn, exist_txn, commit)
+	-- Persist the transaction record with updated status (& possibly timestamp).
+	storage:backend():rawput(k, kl, ffi.cast('char *', rtxn), #rtxn)	
+	return rtxn
+end
+function range_mt:exec_resolve_txn(storage, k, kl, ts, txn, commit)
+	local txk, txkl = make_metakey(self.kind, k, kl)
+	local v, vl = storage:backend():rawget(txk, txkl)
+	local exist_txn = ffi.gc(ffi.cast('luact_dht_txn_t*', v), memory.free)
+
+	if exist_txn ~= ffi.NULL then
+		if exist_txn.n_retry < txn.n_retry then
+			exist_txn.n_retry = txn.n_retry
+		end
+		if exist_txn.timestamp < txn.timestamp then
+			exist_txn.timestamp = txn.timestamp
+		end
+		if exist_txn.priority < txn.priority then
+			exist_txn.priority = txn.priority
+		end
+	else
+		-- Some sanity checks for case where we don't find a transaction record.
+		if txn.last_update == 0 then
+			exception.raise('invalid', 'no txn persisted, yet intent has heartbeat')
+		elseif txn.status ~= txncoord.STATUS_PENDING then
+			exception.raise('invalid', '"no txn persisted, yet intent has status', txn)
+		end
+		exist_txn = txn
+	end
+
+	-- If already committed or aborted, return success.
+	if exist_txn.status ~= txncoord.STATUS_PENDING then
+		return exist_txn
+	end
+
+	-- If we're trying to move the timestamp forward, and it's already
+	-- far enough forward, return success.
+	if commit and (ts < exist_txn.timestamp) then
+		return exist_txn
+	end
+
+	-- pusherWins bool is true in the event the pusher prevails.
+	local pusher_wins
+
+	-- If there's no incoming transaction, the pusher is
+	-- non-transactional. We make a random priority, biased by
+	-- specified args.Header().UserPriority in this case.
+	local priority = txn and txn.priority or txncoord.make_priority(10)
+
+	-- Check for txn timeout.
+	if exist_txn.last_update == 0 then
+		exist_txn.last_update = exist_txn.timestamp
+	end
+	-- Compute heartbeat expiration.
+	local now = range_manager.clock:issue()
+	now:add_walltime(- 2 * range_manager.opts.heartbeat_interval)
+	if exist_txn.last_update < now then
+		logger.info("pushing expired txn", exist_txn)
+		pusher_wins = true
+	elseif txn.n_retry < exist_txn.n_retry then
+		-- Check for an intent from a prior epoch.
+		logger.info("pushing intent from previous epoch for txn", exist_txn)
+		pusher_wins = true
+	elseif (exist_txn.priority < priority) or (exist_txn.priority == priority and txn.timestamp < exist_txn.timestamp) then
+		-- Finally, choose based on priority; if priorities are equal, order by lower txn timestamp.
+		logger.info("pushing intent from txn with lower priority", exist_txn, priority)
+		pusher_wins = true
+	elseif exist_txn.isolation == txncoord.SNAPSHOT and commit then
+		logger.info("pushing timestamp for snapshot isolation txn")
+		pusher_wins = true
+	end
+
+	if not pusher_wins then
+		log.info("failed to push intent using priority", exist_txn, txn, priority)
+		exception.raise('txn_push_fail', txn, exist_txn)
+	end
+	-- Upgrade priority of pushed transaction to one less than pusher's.
+	exist_txn:upgrade_priority(priority - 1)
+
+	-- If aborting transaction, set new status and return success.
+	if not commit then
+		exist_txn.status = txncoord.STATUS_ABORTED
+	else
+		-- Otherwise, update timestamp to be one greater than the request's timestamp.
+		exist_txn.timestamp:least_greater_of(ts)
+	end
+	-- Persist the pushed transaction using zero timestamp for inline value.
+	storage:backend():rawput(txk, txkl, exist_txn, #exist_txn)
+	return exist_txn
 end
 function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts)
 	assert(false, "TBD")
 end
+function range_mt.split_hook(fr, sr)
+	-- compute stats after commit done, to minimize write lock duration.
+	fr:compute_stats()
+	sr:compute_stats()
+end
 function range_mt:exec_split(storage, at, atl, ts)
 	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
 	-- create split range data
-	local new, updated = rng:make_split_ranges(at, atl)
-	range_manager:run_txn(function (txn, new_rng, update_rng)
+	txncoord.run_txn({
+		on_commit = range_mt.split_hook,
+	}, function (txn, fr, sr, mfr, msr)
 		-- search for the range which stores split ranges
-		new_rng:update_address(txn)
-		update_rng:update_address(txn)
-	end, new, updated)
+		fr:update_address(txn, mfr)
+		sr:update_address(txn, msr)
+	end, rng:make_split_ranges(at, atl))
 end
 function range_mt:make_split_ranges(a, al)
 	if self.start_key:less_than(a, al) and (not self.end_key:less_than_equals(a, al)) then
-		local new = self:clone()
-		new.start_key:init(a, al)
-		self.end_key:init(a, al)
-		new:compute_stats()
-		self:compute_stats()
-		return new, self
+		local first, second = self:clone(true), self:clone(true)
+		first.end_key:init(a, al)
+		second.start_key:init(a, al)
+		return first, second, first:metarange(), second:metarange()
 	else
 		exception.raise('invalid', 'split key out of range', ('%q'):format(ffi.string(a, al)), self)
 	end
 end
-function range_mt:update_address(txn)
+function range_mt:update_address(txn, mrng)
 	assert(self.kind > _M.KIND_META1)
-	local mk, mkl = self:metakey()
-	local rng = range_manager:find(mk, #mk, self.kind - 1)
-	rng:rawput(mk, mkl, ffi.cast('char *', self), #self, txn)
+	mrng = mrng or self:metarange()
+	mrng:rawput(mk, mkl, ffi.cast('char *', self), #self, txn)
 end
 function range_mt:partition()
 	return range_manager.partitions[self.kind]
@@ -490,15 +641,103 @@ end
 function range_mt:stop_scan()
 	scanner.stop(self)
 end
-function range_mt:on_writer_finished(txn, k, kl)
-	--if txn then
-	--	txn.coord:add_key(k, kl)
-	--end
+function range_mt:recover_write_error(command, txn, err)
+	local k, kl = command:key(), command:keylen()
+	-- Move txn timestamp forward to response timestamp if applicable.
+	if txn.timestamp < command.timestamp then
+		txn.timestamp = command.timestamp
+	end
+
+	-- Take action on various errors.
+	if err:is('txn_ts_uncertainty') then
+		-- TODO: Mark the host as certain. certain node skips timestamp check
+
+		-- If the reader encountered a newer write within the uncertainty
+		-- interval, move the timestamp forward, just past that write or
+		-- up to MaxTimestamp, whichever comes first.
+		local exist_ts, max_ts, new_ts = err.args[3], txn:max_timestamp()
+		if exist_ts < max_ts then
+			new_ts = max_ts
+			-- this will change txn.max_ts, but txn.max_ts resets after txn:restart is called
+			new_ts:least_greater_of(exist_ts) 
+		else
+			new_ts = max_ts
+		end
+		-- Only change the timestamp if we're moving it forward.
+		if txn.timestamp < new_ts then
+			txn.timestamp = new_ts
+		end
+		txn:restart(txn.priority, txn.timestamp)
+	elseif err:is('txn_aborted') then
+		-- Increase timestamp if applicable.
+		local exist_txn = err.args[1]
+		if txn.timestamp < exist_txn.timestamp then
+			txn.timestamp = exist_txn.timestamp
+		end
+		txn.priority = exist_txn.priority
+	elseif err:is('txn_push_fail') then
+		local exist_txn = err.args[1]
+		if txn.timestamp < exist_txn.timestamp then
+			txn.timestamp:least_greater_of(exist_txn.timestamp)
+		end
+		txn:restart(math.max(0, exist_txn.priority - 1), txn.timestamp)
+	elseif err:is('txn_need_retry') then
+		local exist_txn = err.args[1]
+		if exist_txn.timestamp < txn.timestamp then
+			exist_txn.timestamp = txn.timestamp
+		end
+		txn:restart(exist_txn.priority, txn.timestamp)
+	end
+end
+function range_mt:on_writer_finished(command, txn, ok, r)
+	print('on_writer_finished', ok, r, command, command:end_txn())
+	if not ok then
+		if txn then
+			self:recover_write_error(command, txn, r)
+			if r:is('txn_aborted') then
+				-- abort this txn
+				txncoord.resolve_version(txn)
+				txncoord.new_txn(txn.isolation, txn) -- reinitialize this txn
+			end
+		elseif r:is('txn_required') then -- without txn, this should be checked.
+			exception.raise('fatal', "TODO : start txn on the fly.")
+		end
+	elseif txn then
+		if command:create_versioned_value() then
+			txncoord.add_cmd(txn, command)
+		end
+		if command:end_txn() then
+			-- If the -linearizable flag is set, we want to make sure that
+			-- all the clocks in the system are past the commit timestamp
+			-- of the transaction. This is guaranteed if either
+			-- - the commit timestamp is MaxOffset behind startNS
+			-- - MaxOffset ns were spent in this function
+			-- when returning to the client. Below we choose the option
+			-- that involves less waiting, which is likely the first one
+			-- unless a transaction commits with an odd timestamp.
+			local wt = math.min(r.timestamp:walltime(), txn.timestamp:walltime())
+			local sleep_ms = txncoord.opts.max_clock_skew - (util.msec_walltime() - wt)
+			if txncoord.opts.linearizable and sleep_ms > 0 then
+				log.info(r, ("waiting %d msec on EndTransaction for linearizability"):format(sleep_ms))
+				clock.sleep(sleep_ms / 1000)
+			end
+			if r.status ~= txncoord.STATUS_PENDING then
+			-- print('end txn done: resolve version', r.status)
+				txncoord.resolve_version(r)
+			end
+		end
+		-- update with returned transaction
+		--print('check retval', pcall(ffi.typeof, r))
+		if type(r) == 'cdata' and ffi.typeof(r) == ffi.typeof('luact_dht_txn_t') then
+			txn:update_with(r)
+		end
+	end
 end
 function range_mt:on_write_replica_finished()
 	-- split if necessary
 	local st = self.stats
-	if (st.bytes_key + st.bytes_val) > range_manager.opts.range_size_max then
+	if self:is_lead_by_this_node() and 
+		((st.bytes_key + st.bytes_val) > range_manager.opts.range_size_max) then
 		self:split()
 	end
 end
@@ -587,7 +826,7 @@ serde_common.register_ctype('struct', 'luact_dht_range', {
 			local ptr = range_mt.alloc(n_replica)
 			ffi.copy(ptr, rb:curr_byte_p(), len)
 			rb:seek_from_curr(len)
-			return ffi.gc(ptr, memory.free)
+			return ptr
 		end,
 	},
 }, serde_common.LUACT_DHT_RANGE)
@@ -689,6 +928,9 @@ function range_manager_mt:new_range(start_key, end_key, kind, dont_start_replica
 	end
 	return r
 end
+function range_manager_mt:is_owner(rng)
+	return self.ranges[rng.kind]:find(rng:cachekey())
+end
 function range_manager_mt:create_fsm_for_arbiter(rng)
 	local kind = rng.kind
 	if not self.ranges[kind] then
@@ -710,6 +952,7 @@ function range_manager_mt:destory_range(rng)
 	rng:fin()
 	memory.free(rng)
 end
+-- if rng is hosted by this node, 
 function range_manager_mt:clear_cache(rng)
 	if rng.kind > _M.KIND_META1 then
 		self.caches[rng.kind]:remove(rng)
@@ -733,21 +976,12 @@ function range_manager_mt:new_partition(kind, name)
 	end
 	return p
 end
-function range_manager_mt:new_txn(isolation)
-	return txncoord.new_txn(isolation)
-end
-function range_manager_mt:fin_txn(txn, commit)
-	return txncoord.fin_txn(txn, commit)
-end
-function range_manager_mt:run_txn(proc, ...)
-	return txncoord.run_txn(self:new_txn(), proc, ...)
-end
 -- find range which contains key (k, kl)
 -- search original kind => KIND_META2 => KIND_META1
 function range_manager_mt:find(k, kl, kind)
 	local r, mk, mkl
 	local prefetch = self.opts.range_prefetch
-	kind = kind or _M.KIND_VID
+	kind = kind or _M.KIND_STATE
 	if kind >= _M.NON_METADATA_KIND_START then
 		r = self.caches[kind]:find(k, kl)
 		-- logger.info('r = ', r)
@@ -792,6 +1026,21 @@ function range_manager_mt:find_on_memory(k, kl, kind)
 		return self.caches[kind]:find(k, kl)
 	else
 		return self.root_range
+	end
+end
+function range_manager_mt:resolve(k, kl, txn, commit)
+	-- only k, kl should be processed
+	return self:find(k, kl, _M.KIND_TXN):resolve(txn, 1, k, kl, "", 0, commit)
+end
+function range_manager_mt:resolve_txn(k, kl, txn, commit)
+	return self:find(k, kl, _M.KIND_TXN):resolve_txn(k, kl, txn, commit)
+end
+function range_manager_mt:end_txn(txn, commit)
+	local k, kl = txncoord.txn_key(txn)
+	if k then
+		self:find(k, kl, _M.KIND_TXN):end_txn(k, kl, txn, commit)
+	else
+		logger.warn('run_txn', 'no transactional operation performed')
 	end
 end
 -- get kind id from kind name

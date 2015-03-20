@@ -92,6 +92,7 @@ local default_opts = {
 	root_range_send_interval = 30,
 	replica_maintain_interval = 1.0,
 	collect_garbage_interval = 60 * 60,
+	txn_heartbeat_interval = 3.0,
 	range_size_max = 64 * 1024 * 1024,
 	gossip_port = 8008,
 	range_prefetch = 8,

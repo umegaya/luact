@@ -4,6 +4,7 @@ local tools = require 'test.tools.cluster'
 
 tools.start_luact(1, nil, function ()
 	local luact = require 'luact.init'
+	local tools = require 'test.tools.cluster'
 	local range = require 'luact.cluster.dht.range'
 	local fs = require 'pulpo.fs'
 	local util = require 'pulpo.util'
@@ -13,36 +14,15 @@ tools.start_luact(1, nil, function ()
 	local rm
 
 	-- modify arbiter message so that range can use special raft actor for debug
-	local range_arbiters = {}
 	local consistent_flag
-	function luact.root.arbiter(id, func, opts, rng)
-		local rm = (require 'luact.cluster.dht.range').get_manager()
-		rng = rm:create_fsm_for_arbiter(rng)
-		local storage = rng:partition()
-		local a = range_arbiters[id]
-		if not a then
-			a = luact({
-				read = function (self, timeout, ...)
-				--print('range:read', ...)
-					consistent_flag = false
-					return rng:exec_get(storage, ...)
-				end,
-				write = function (self, logs, timeout, dictatorial)
-					if ffi.typeof('luact_dht_cmd_get_t*') == ffi.typeof(logs[1]) then
-						print('consistent_flag set')
-						consistent_flag = true
-					end
-					--logger.info('write', logs, timeout, dictatorial)
-					return rng:apply(logs[1])
-				end,
-			})
-			range_arbiters[id] = a
-			rng:debug_add_replica(a)
-		else
-			assert(false, "same arbiter should not called")
+	tools.use_dummy_arbiter(function ()
+		consistent_flag = false
+	end, function (actor, logs, timeout, dictatorial)
+		if ffi.typeof('luact_dht_cmd_get_t*') == ffi.typeof(logs[1]) then
+			print('consistent_flag set')
+			consistent_flag = true
 		end
-		return a
-	end
+	end)
 
 	fs.rmdir("/tmp/luact/range_test")
 	rm = range.get_manager(nil, "/tmp/luact/range_test", { 

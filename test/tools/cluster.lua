@@ -6,6 +6,7 @@ local fs = require 'pulpo.fs'
 local pulpo = require 'pulpo.init'
 local thread = require 'pulpo.thread'
 local memory = require 'pulpo.memory'
+local exception = require 'pulpo.exception'
 local _M = {}
 
 ffi.cdef [[
@@ -207,6 +208,70 @@ function _M.create_latch(name, num_thread)
 		p.values = memory.alloc_fill_typed('int', num_thread)
 		return 'luact_thread_latch_t', p
 	end, num_thread)
+end
+
+function _M.use_dummy_arbiter(on_read, on_write)
+	local range_arbiters = {}
+	local consistent_flag
+	function luact.root.arbiter(id, func, opts, rng)
+		local rm = (require 'luact.cluster.dht.range').get_manager()
+		rng = rm:create_fsm_for_arbiter(rng)
+		local storage = rng:partition()
+		local a = range_arbiters[id]
+		if not a then
+			a = luact({
+				read = function (self, timeout, ...)
+				--print('range:read', ...)
+					if on_read then on_read(self, timeout, ...) end
+					return rng:exec_get(storage, ...)
+				end,
+				write = function (self, logs, timeout, dictatorial)
+					if on_write then on_write(self, logs, timeout, dictatorial) end
+					--logger.info('write', logs, timeout, dictatorial)
+					return rng:apply(logs[1])
+				end,
+			})
+			range_arbiters[id] = a
+			rng:debug_add_replica(a)
+		else
+			assert(false, "same arbiter should not called")
+		end
+		return a
+	end
+end
+
+local function test_err_handle(e)
+	return exception.new_with_bt('runtime', debug.traceback(), e)
+end
+function _M.test_runner(name, proc, ctor, dtor)
+	local r 
+	if ctor then
+		r = {xpcall(ctor, test_err_handle)}
+		if not r[1] then
+			error(r[2])
+		end
+	end
+	local args
+	if r then
+		args = util.copy_table(r)
+		r = {xpcall(proc, test_err_handle, unpack(r, 2))}
+	else
+		r = {xpcall(proc, test_err_handle)}
+	end
+	if not r[1] then
+		error(r[2])
+	end
+	if dtor then
+		if args then
+			r = {xpcall(dtor, test_err_handle, unpack(args, 2))}
+		else
+			r = {xpcall(dtor, test_err_handle)}
+		end
+		if not r[1] then
+			error(r[2])
+		end
+	end
+	logger.notice(name, 'success')
 end
 
 function _M.new_fsm(thread_id)
