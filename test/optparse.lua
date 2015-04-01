@@ -2,15 +2,15 @@ local fn = require 'luact.optparse'
 
 local args = {
 	"--datadir=/tmp/hoge",
-	"main.lua",
 	"--foo.bar.baz=fuga",
+	"main.lua",
+	"args1",
 }
 
 local r, o = fn(args)
-
 assert(r.datadir == "/tmp/hoge")
 assert(r.foo.bar.baz == "fuga")
-assert(#o == 1 and o[1] == "main.lua")
+assert(#o == 2 and o[1] == "main.lua" and o[2] == "args1")
 
 local args2 = {
 	"-c", "hogehoge+garbage",

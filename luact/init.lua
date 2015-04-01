@@ -109,14 +109,19 @@ local function init_worker_and_global_ref(opts)
 end
 local function get_opts(opts)
 	opts = util.merge_table(require 'luact.option', opts or {})
-	local cmdl, others = optparse(_G.arg, opts_defs)
-	for i=1,#others do
-		if others[i]:match("^.+%.lua$") then
-			opts.executable = others[i]
-			break
+	if opts.parse_arg then
+		local cmdl, others = optparse(_G.arg, opts_defs)
+		if #others > 0 then
+			opts.executable = others[1]
+			-- remove system options 
+			for i=0,#others-1 do
+				_G.arg[i] = others[i+1]
+			end
 		end
+		return util.merge_table(opts, cmdl, true)
+	else
+		return opts
 	end
-	return util.merge_table(opts, cmdl, true)
 end
 
 
@@ -126,7 +131,6 @@ function _M.start(opts, executable)
 	opts.init_params = serpent.dump(opts)
 	opts.init_proc = _G.luact and init_worker_and_global_ref or init_worker
 	pulpo.initialize(opts)
-	-- TODO : need to change pulpo configuration from commandline
 	_M.initialize(opts)
 	pulpo.run(opts, executable or opts.executable)
 end

@@ -1,4 +1,10 @@
 local luact = require 'luact.init'
+local tools = require 'test.tools.cluster'
+local fs = require 'pulpo.fs'
+
+tools.start_luact(1, nil, function ()
+
+local luact = require 'luact.init'
 local cmd = require 'luact.cluster.dht.cmd'
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
@@ -48,5 +54,7 @@ assert(w2.kind == 7, "kind should be same as given to ctor")
 assert(memory.cmp(w2:key(), "guee", 4), "argument and stored data should be same")
 assert(memory.cmp(w2:method(), "notify_me", 9), "argument and stored data should be same")
 assert(memory.cmp(w2:arg(), "argument", 8), "arg not specified, so should return nil")
+
+end)
 
 return true

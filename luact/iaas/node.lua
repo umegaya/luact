@@ -33,10 +33,10 @@ end
 
 local function exec(cmd, name, opts)
 	local cmdl = ("docker-machine %s %s %s"):format(cmd, build_opts(opts), name)
-	if opts.async then
+	if opts.open_only then
 		return process.open(cmdl)
 	else
-		return wait(process.open(cmdl), opts.callback)
+		return tentacle(wait, process.open(cmdl), opts.callback)
 	end
 end
 

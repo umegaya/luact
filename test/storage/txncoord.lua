@@ -534,6 +534,7 @@ function check_concurrency(name, isolations, txns, verify, exp_success, rm)
 	v:run(isolations, rm)
 end
 
+--[[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -577,7 +578,6 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true, range_manager)
 end)
 
---[[
 // TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
 // are subject to the lost update anomaly. This anomaly is prevented
 // in most cases by using the the READ_COMMITTED ANSI isolation level.

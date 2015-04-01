@@ -7,7 +7,8 @@
 return function (args, opts_defs, DEBUG)
 	local ret, others = {}, {}
 	opts_defs = opts_defs or {}
-	for i=1,#args,1 do
+	local i = 1
+	while i <= #args do
 		local a = args[i]
 		local long, short, v, vv, found
 		long, v = a:match('^%-%-([%w_%.]+)=(.*)$')
@@ -18,7 +19,7 @@ return function (args, opts_defs, DEBUG)
 					goto on_found
 				end
 			end
-			-- long option always treated as configuration
+			-- even if no defs, long option always treated as configuration
 			if not found then
 				ret[long] = v
 				goto next
@@ -46,10 +47,13 @@ return function (args, opts_defs, DEBUG)
 				end
 			end
 		else
-			table.insert(others, a)
+			others = { unpack(args, i) }
+			break
 		end
 ::next::
+		i = i + 1
 	end
+	-- convert "a.b.c"=v to { a = { b = { c = v }}}
 	local opts = {}
 	for k,v in pairs(ret) do
 		local dir = {}
@@ -71,8 +75,3 @@ return function (args, opts_defs, DEBUG)
 	end
 	return opts, others
 end
-
-
-
-
-
