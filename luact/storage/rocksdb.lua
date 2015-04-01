@@ -3,7 +3,6 @@ local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
 local thread = require 'pulpo.thread'
 local exception = require 'pulpo.exception'
-local wp = require 'pulpo.debug.watchpoint'
 exception.define('rocksdb')
 
 local _M = {}
