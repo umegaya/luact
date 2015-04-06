@@ -1,17 +1,14 @@
--- (should be) thin wrapper of docker-machine
+-- thin wrapper of docker-machine
 local pulpo = require 'pulpo.init'
 local memory = require 'pulpo.memory'
 local process = pulpo.evloop.io.process
 local _M = {}
 
-local function build_opts(opts)
+local function build_create_opts(kind, opts)
 	local cmd = ""
-	if opts then
-		for k,v in pairs(opts) do
-			for kk,vv in pairs(v) do
-				cmd = cmd .. ("--%s-%s=%s"):format(k, kk, vv)
-			end
-		end
+	opts = opts or _M.create_opts
+	for k,v in pairs(opts) do
+		cmd = cmd .. (" --%s-%s=%s"):format(kind, k, v)
 	end
 	return cmd
 end
@@ -31,27 +28,33 @@ local function wait(io, cb)
 	end
 end
 
-local function exec(cmd, name, opts)
-	local cmdl = ("docker-machine %s %s %s"):format(cmd, build_opts(opts), name)
-	if opts.open_only then
-		return process.open(cmdl)
+local function exec(cmd, opts)
+	if opts.stdout then
+		return print(cmd)
+	elseif opts.open_only then
+		return process.open(cmd)
 	else
-		return tentacle(wait, process.open(cmdl), opts.callback)
+		return tentacle(wait, process.open(cmd), opts.callback)
 	end
 end
 
-function _M.create(name, opts)
-	return exec("create", name, opts)
+function _M.create(name, exec_opts, kind, opts)
+	local cmd = ("docker-machine create --driver=%s %s %s"):format(kind, build_create_opts(kind, opts), name)
+	return exec(cmd, exec_opts)
 end
 
-function _M.destroy(name, opts)
-	return exec("rm", name, opts)
+function _M.rm(name, exec_opts)
+	return exec(("docker-machine rm %s"):format(name), exec_opts)
 end
 
-function _M.list()
-	return exec("ls", "")
+function _M.ls(exec_opts)
+	return exec("docker-machine ls", exec_opts)
 end
-
 _M.exec = exec
+
+function _M.initialize(kind, opts)
+	_M.kind = kind
+	_M.create_opts = opts
+end
 
 return _M
