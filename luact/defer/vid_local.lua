@@ -96,6 +96,7 @@ function vid_ent_mt:unref()
 	return self.refc <= 0
 end
 function vid_ent_mt:remove(key, id, dtor)
+	logger.report('vident:remove', self, self.id)
 	if self.multi ~= 0 then
 		local rmidx
 		for i=0,self.n_id-1 do
@@ -168,6 +169,13 @@ function vid_manager_mt:decache(k)
 		end
 	end
 end
+-- should be called from mutex'ed code block
+function vid_manager_mt:refresh_cache(map)
+	local c = self:cache()
+	for k,_ in pairs(c) do
+		rawset(c, k, map:get(k))
+	end
+end
 function vid_manager_mt:get(k)
 	local c = self:cache()
 	local ent = rawget(c, k)
@@ -194,9 +202,14 @@ function vid_manager_mt:getent(k)
 end
 function vid_manager_mt:put(k, allow_multi, fn, ...)
 	return self.map:touch(function (data, key, multi, ctor, ...) 
+		local prev_size = data.size
 		local ent,exists = data:put(key, function (ent, f, ...)
 			ent.data:init(f, ...)
 		end, ctor, ...)
+		if prev_size ~= data.size then
+			logger.notice('data allocation changed: refresh cache:', prev_size, data.size)
+			self:refresh_cache(data)
+		end
 		if exists then
 			if not ent:alive() then
 				local refc = ent.refc
@@ -249,7 +262,6 @@ function _M.initialize(opts)
 		p:init(sz)
 		return 'luact_vid_manager_t', p
 	end, opts.local_map_initial_size or 4096)
-	logger.warn('vid', _M, _M.dht)
 end
 
 function _M.unregister_actor(vid, id)

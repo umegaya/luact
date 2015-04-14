@@ -8,7 +8,7 @@ local raise = exception.raise
 local _M = {}
 local lmap = {}
 
-function new_listener(proto, serde, address, opts)
+local function new_listener(proto, serde, address, opts)
 	local p = pulpo.evloop.io[proto]
 	assert(p.listen, exception.new('not_found', 'method', 'listen', proto))
 	opts.serde = serde
@@ -24,21 +24,29 @@ function new_listener(proto, serde, address, opts)
 	return ln
 end
 
+local function check_internal_violation(proto, addr)
+	if proto == _M.int_proto and addr == _M.int_addr then
+		raise('invalid', 'addr already in use for internal service', proto.."://"..addr)
+	end
+end
+
 function _M.listen(url, opts)
 	local proto, serde, address = conn.parse_hostname(url)
-	local ln = lmap[address]
+	check_internal_violation(proto, address)
+	local ln = lmap[url]
 	if not ln then
 		assert((not ops) or (not opts.internal), exception.new('invalid', 'argument', 
 			"please use unprotected_listen to open internal listener"))
 		ln = actor.new(new_listener, proto, serde, address, opts or {})
-		lmap[address] = ln
+		lmap[url] = ln
 	end
 	return ln
 end
 
 function _M.unprotected_listen(url, opts)
 	local proto, serde, address = conn.parse_hostname(url)
-	local ln = lmap[address]
+	check_internal_violation(proto, address)
+	local ln = lmap[url]
 	if not ln then
 		if opts then
 			opts.internal = true
@@ -46,9 +54,15 @@ function _M.unprotected_listen(url, opts)
 			opts = { internal = true }
 		end
 		ln = actor.new(new_listener, proto, serde, address, opts)
-		lmap[address] = ln
+		lmap[url] = ln
 	end
 	return ln
+end
+
+function _M.set_intenral_url(url)
+	local proto, serde, address = conn.parse_hostname(url)
+	_M.int_proto = proto
+	_M.int_addr = address
 end
 
 return _M

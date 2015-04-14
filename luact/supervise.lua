@@ -1,6 +1,7 @@
 local actor = require 'luact.actor'
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
+local deploy = require 'luact.deploy'
 local exception = require 'pulpo.exception'
 local _M = {}
 
@@ -93,6 +94,11 @@ local supervise_opts = { supervised = true }
 function supervisor_index:start_children()
 	while #self.children < self.opts.count do
 		local child = actor.new_link_with_opts(actor.of(self), supervise_opts, self.ctor, unpack(self.args))
+		if self.opts.sources then
+			for i=1,#self.opts.sources do
+				deploy.set_actor_dependency(child, self.opts.sources[i])
+			end
+		end
 		table.insert(self.children, child)
 	end
 	return #self.children == 1 and self.children[1] or self.children

@@ -30,4 +30,8 @@ return {
 	vid = {
 
 	}, 
+	deploy = {
+		method = "github.com",
+		diff_base = ".",
+	},
 }

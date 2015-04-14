@@ -74,7 +74,7 @@ function actor_index:event__(body, event, ...)
 		-- by default, if linked actor dead, you also dies.
 		_M.destroy(self.uuid)
 	elseif event == _M.EVENT_DESTROY then
-		_M.destroy(self.uuid)
+		_M.destroy(self.uuid, ({...})[1])
 	elseif event == _M.EVENT_LINK then
 		table.insert(self.links, ({...})[1])
 		-- print('add link:', ({...})[1], self, #self.links)
@@ -235,7 +235,7 @@ function _M.new_link_with_opts(to, opts, ctor, ...)
 		logger.notice('add bodymap', s, body, debug.traceback())
 	end
 	if type(body) == 'cdata' then
-		if (require 'reflect').typeof(body).name == 'luact_uuid' then
+		if ffi.typeof(body) == ffi.typeof('union luact_uuid') then
 			exception.raise('invalid', 'actor is specified as body at:'..debug.traceback())
 		end
 	end

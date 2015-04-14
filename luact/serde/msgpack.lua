@@ -415,68 +415,61 @@ function serde_mt.unpack_array(rb, size)
 	end
 	return r
 end
-function serde_mt.unpack_ext_struct_cdata(rb, size)
-	local p = serde_mt.wait_data_arrived(rb, 1 + size)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, size)
-	rb:seek_from_curr(1 + size)
-	p = serde_mt.wait_data_arrived(rb, len)
-	local ctype_id = serde_mt.conv:ptr2unsigned(p + 1, 4) -- +1 for skip ext_type
+-- clen for unpack_ext_**** shows actual payload without ext_type
+function serde_mt.unpack_ext_struct_cdata(rb, clen)
+	local p = serde_mt.wait_data_arrived(rb, clen)
+	local ctype_id = serde_mt.conv:ptr2unsigned(p, 4)
 	-- logger.warn('struct_cdata', p[0], ctype_id)
 	local unpacker = common.msgpack_unpacker[ctype_id]
 	-- seek to start offset of actual payload
-	rb:seek_from_curr(4 + 1)
-	len = len - 4 - 1
+	rb:seek_from_curr(4)
+	clen = clen - 4
 	if unpacker then
-		return unpacker(rb, len)
+		return unpacker(rb, clen)
 	else
 		local ct, ctp = common.ctype_from_id(ctype_id)
 		local ptr
-		if len == ffi.sizeof(ct) then
+		if clen == ffi.sizeof(ct) then
 			ptr = ffi.new(ct)
 		else
-			ptr = ffi.new(ctp, len / ffi.sizeof(ct))
+			ptr = ffi.new(ctp, clen / ffi.sizeof(ct))
 		end
-		ffi.copy(ptr, rb:curr_byte_p(), len)
-		rb:seek_from_curr(len)
+		ffi.copy(ptr, rb:curr_byte_p(), clen)
+		rb:seek_from_curr(clen)
 		return ptr
 	end
 end
-function serde_mt.unpack_ext_error(rb, size)
-	local i = 0
+function serde_mt.unpack_ext_error(rb, clen)
 	local name, bt, args
-	local p = serde_mt.wait_data_arrived(rb, 2 + size)
-	local clen = serde_mt.conv:ptr2unsigned(p + 1, size)
-	rb:seek_from_curr(2 + size)
 	serde_mt.wait_data_arrived(rb, clen)
 	-- unpack error object
 	name = serde_mt.unpack_any(rb) 
 	bt = serde_mt.unpack_any(rb) 
 	args = serde_mt.unpack_any(rb)
+	if type(args) == 'number' then
+		rb:dump()
+	end
 	return exception.new_with_bt(name, bt, unpack(args))
 end
-function serde_mt.unpack_ext_function(rb, size)
-	local p = serde_mt.wait_data_arrived(rb, 1 + size)
-	-- [type(1byte)][len(size byte)][payload]
-	-- payload = [ext_type(1byte)][function body]
-	local clen = serde_mt.conv:ptr2unsigned(p + 1, size)
-	-- +1 and clen - 1 for skipping ext_type
-	rb:seek_from_curr(1 + size)
-	p = serde_mt.wait_data_arrived(rb, clen)
-	local code = ffi.string(p + 1, clen - 1)
+function serde_mt.unpack_ext_function(rb, clen)
+	local p = serde_mt.wait_data_arrived(rb, clen)
+	local code = ffi.string(p, clen)
 	local fn = loadstring(code)
 	rb:seek_from_curr(clen)
 	return fn
 end
 function serde_mt.unpack_ext(rb, size)
-	local p = serde_mt.wait_data_arrived(rb, size)
-	local t = p[1 + size]
+	local p = serde_mt.wait_data_arrived(rb, 2 + size)
+	local clen = serde_mt.conv:ptr2unsigned(p + 1, size)
+	local t = p[1 + size] -- (2 + size) - 1
+	rb:seek_from_curr(2 + size)
 	--logger.warn('unpack_ext', t)
 	if t == EXT_CDATA_TYPE then
-		return serde_mt.unpack_ext_struct_cdata(rb, size)
+		return serde_mt.unpack_ext_struct_cdata(rb, clen - 1)
 	elseif t == EXT_ERROR then
-		return serde_mt.unpack_ext_error(rb, size)
+		return serde_mt.unpack_ext_error(rb, clen - 1)
 	elseif t == EXT_FUNCTION then
-		return serde_mt.unpack_ext_function(rb, size)
+		return serde_mt.unpack_ext_function(rb, clen - 1)
 	else
 		exception.raise('invalid', 'currently, varext represent struct cdata/error/function', t)
 	end

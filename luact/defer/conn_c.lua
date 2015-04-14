@@ -246,6 +246,7 @@ local function conn_common_destroy(self, reason, map, free_list)
 		self.rb:reset()
 		self.wb:reset()
 		table.insert(free_list, self)
+	logger.notice('conn free(cache):', self, self.io)
 	end
 end
 -- for server push
@@ -294,7 +295,7 @@ function conn_index:read_int(io, sr)
 		-- rb:dump()
 		while true do 
 			local parsed, err_or_len = sr:unpack_packet(sup)
-			--- logger.info('parsed', parsed, rb.hpos, rb.used)
+			--- logger.info('read_int', parsed, rb.hpos, rb.used)
 			if not parsed then 
 				if err_or_len then exception.raise('invalid', 'encoding', err_or_len) end
 				break

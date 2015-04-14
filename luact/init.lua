@@ -22,6 +22,7 @@ local uuid = require 'luact.uuid'
 local vid = require 'luact.vid'
 local peer = require 'luact.peer'
 local common = require 'luact.serde.common'
+local deploy = require 'luact.deploy'
 
 local _M = {}
 _M.event = require 'pulpo.event'
@@ -77,19 +78,10 @@ factory = {
 		end
 		return ok()
 	end,
-	["module"] = function (mod, fallback)
-		local ok, r = pcall(require, mod)
+	["module"] = function (modname)
+		local ok, r = pcall(require, modname)
 		if not ok then
-			logger.warn('require module fails', r)
-			if fallback then
-				if os.execute('luarocks install '..fallback) ~= 0 then
-					exception.raise('runtime', 'os.execute')
-				end
-				ok, r = pcall(require, mod)
-			end
-		end
-		if not ok then
-			exception.raise('runtime', err)
+			exception.raise('runtime', r)
 		end
 		return r
 	end,
@@ -160,7 +152,9 @@ function _M.initialize(opts)
 	logger.notice('node_id', ('%x:%u'):format(_M.machine_id, _M.thread_id))
 
 	-- initialize listener of internal actor messaging 
-	listener.unprotected_listen(tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port))
+	local int_url = tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port)
+	listener.unprotected_listen(int_url)
+	listener.set_intenral_url(int_url)
 	-- external port should be declared at each startup routine.
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
@@ -202,6 +196,8 @@ function _M.initialize(opts)
 		}
 		return _M.root
 	end, opts)
+	-- deploy setting
+	deploy.config_method(opts.deploy.method, opts.deploy)
 end
 function _M.load(file, opts)
 	return actor.new(from_file, file, opts)
@@ -210,6 +206,14 @@ function _M.require(module, opts)
 	return actor.new(from_module, module, opts)
 end
 function _M.supervise(target, opts, ...)
+	if type(target) == 'string' then
+		if opts then
+			opts.sources = { target }
+		else
+			opts = { sources = { target } }
+		end
+		return supervise(factory.string, opts, target, ...)
+	end
 	return supervise(assert(factory[type(target)]), opts, target, ...)
 end
 
