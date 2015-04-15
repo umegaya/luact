@@ -16,3 +16,6 @@
 [submodule "luact/ext/ffi-reflect"]
 	path = luact/ext/ffi-reflect
 	url = git@github.com:umegaya/ffi-reflect.git
+[submodule "test/deploy/foo"]
+	path = test/deploy/foo
+	url = git@github.com:umegaya/deploy_test_foo.git

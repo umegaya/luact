@@ -16,9 +16,9 @@ pulpo.run({
 	local foomain = require 'test.deploy.foo.main'
 
 	local loaded = {
-		["206f5eb40817133469bddad419dd87323890e305"] = {"bar"},
+		["6dd51173d85ee4c25893226e6d8e5435fa739202"] = {"bar"},
 		["01d898ef94899c6312c4ac3b8bc455e7a997335a"] = {"baz"},
-		["2c3ae38ede0b2ba1cd0df9a837afe0f7cfc23946"] = {"baz"},
+		["a56773fa203b8299ffb15a982066a83bec36a9ed"] = {"baz"},
 	}
 
 	for k,v in pairs(loaded) do

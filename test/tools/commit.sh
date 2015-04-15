@@ -1,8 +1,8 @@
 #!/bin/bash -eu
 pushd ./test/deploy/foo
-	git reset --hard 6b61b019fba690dc4dbda7f90bde71969fa39a4f
+	git reset --hard 4f4dc0f06330f77e1a7f55db1249d7502ee51f15
 	pushd ./bar
-		git reset --hard 206f5eb40817133469bddad419dd87323890e305
+		git reset --hard 6dd51173d85ee4c25893226e6d8e5435fa739202
 		pushd ./baz
 			git reset --hard 01d898ef94899c6312c4ac3b8bc455e7a997335a
 			if [ -z "$1" ]; then
