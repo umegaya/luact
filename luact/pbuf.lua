@@ -39,6 +39,12 @@ function rbuf_index:fin()
 		memory.free(self.buf)
 	end
 end
+function rbuf_index:from_buffer(buf, len)
+	self.buf = buf
+	self.used = len
+	self.max = len
+	self.hpos = 0
+end
 function rbuf_index:reserve(sz)
 	local r = self.max - self.used
 	local buf
@@ -108,6 +114,14 @@ function rbuf_index:reserve_with_cmd(sz, cmd)
 	self:seek_from_last(0)
 end
 function rbuf_index:read(io, size)
+	self:reserve_and_reduce_unused(size)
+	local len = io:read(self.buf + self.used, size)
+	if len then
+		self.used = self.used + len
+		return true
+	end
+end
+function rbuf_index:read_web(io, size)
 	self:reserve_and_reduce_unused(size)
 	local len = io:read(self.buf + self.used, size)
 	if len then

@@ -35,7 +35,14 @@ function _M.listen(url, opts)
 	check_internal_violation(proto, address)
 	local ln = lmap[url]
 	if not ln then
-		assert((not ops) or (not opts.internal), exception.new('invalid', 'argument', 
+		if proto:match('^http') then
+			if opts then
+				opts.http = true
+			elseif 
+				opts = { http = true }
+			end
+		end
+		assert((not opts) or (not opts.internal), exception.new('invalid', 'argument', 
 			"please use unprotected_listen to open internal listener"))
 		ln = actor.new(new_listener, proto, serde, address, opts or {})
 		lmap[url] = ln

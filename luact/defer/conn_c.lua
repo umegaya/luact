@@ -33,16 +33,16 @@ ffi.cdef [[
 		pulpo_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead;
-		unsigned short task_processor_id;
+		unsigned char serde_id, dead, http, padd;
+		unsigned short task_processor_id, padd;
 		uint32_t local_peer_id, numeric_ipv4;
 	} luact_conn_t;
 	typedef struct luact_ext_conn {
 		pulpo_io_t *io;
 		luact_rbuf_t rb;
 		luact_wbuf_t wb;
-		unsigned char serde_id, dead;
-		unsigned short task_processor_id;
+		unsigned char serde_id, dead, http, padd;
+		unsigned short task_processor_id, padd;
 		uint32_t local_peer_id;
 		char *hostname;
 	} luact_ext_conn_t;
@@ -153,7 +153,7 @@ local function open_io(hostname, opts)
 	-- TODO : if user and credential is specified, how should we handle these?
 	local p = pulpo.evloop.io[proto]
 	assert(p.connect, exception.new('not_found', 'method', 'connect', proto))
-	return p.connect(address, opts), serde.kind[sr]
+	return p.connect(address, opts), serde.kind[sr], proto:match('^http') and 1 or 0
 end
 function conn_index:init_buffer()
 	self.rb:init()
@@ -164,6 +164,8 @@ function conn_index:start_io(opts, sr, server)
 	wev = tentacle(self.write, self, self.io)
 	if opts.internal then
 		rev = tentacle(self.read_int, self, self.io, sr)
+	elseif self.http ~= 0 then
+		rev = tentacle(self.read_webext, self, self.io, true, sr)
 	else
 		rev = tentacle(self.read_ext, self, self.io, true, sr)
 	end
@@ -205,7 +207,7 @@ function conn_index:new(machine_ipv4, opts)
 		exception.raise('invalid', 'machine_id', 0)
 	end
 	local hostname = _M.internal_hostname_by_addr(machine_ipv4)
-	self.io,self.serde_id = open_io(hostname, opts)
+	self.io,self.serde_id,self.http = open_io(hostname, opts)
 	self.dead = 0
 	self.numeric_ipv4 = machine_ipv4
 	self.local_peer_id = 0
@@ -215,6 +217,7 @@ end
 function conn_index:new_server(io, opts)
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
+	self.http = opts.http and 1 or 0
 	self.dead = 0
 	self.numeric_ipv4 = io:address():as_machine_id()
 	self:assign_local_peer_id()
@@ -319,6 +322,26 @@ function conn_index:read_ext(io, unstrusted, sr)
 			router.external(self, parsed, err_or_len, untrusted)
 		end
 		rb:shrink_by_hpos()
+	end
+end
+local web_rb_work = memory.alloc_typed('luact_rbuf_t')
+function conn_index:read_webext(io, unstrusted, sr)
+	local rb = web_rb_work
+	while self:alive() do
+		local req = io:read()
+		local _, path, headers, body, blen = req:payload()
+		local p, method = path:match('(.*)/([^/]+)/?$')
+		rb:from_buffer(body, blen)
+		local parsed, len = sr:unpack(rb)
+		if bit.band(payload[1], router.NOTICE_MASK) ~= 0 then
+			table.insert(parsed, 2, method)
+			table.insert(parsed, 2, p)
+		else
+			table.insert(parsed, 2, method)
+			table.insert(parsed, 4, p)
+		end
+		router.external(self, parsed, len + 2, untrusted)
+		req:fin()
 	end
 end
 function conn_index:write(io)
@@ -459,7 +482,7 @@ local ext_conn_mt = {
 }
 function ext_conn_index:new(hostname, opts)
 	self.hostname = memory.strdup(hostname)
-	self.io,self.serde_id = open_io(hostname, opts)
+	self.io,self.serde_id,self.http = open_io(hostname, opts)
 	self.dead = 0
 	self.local_peer_id = 0
 	self:start_io(opts, self:serde())
@@ -469,6 +492,7 @@ function ext_conn_index:new_server(io, opts)
 	self.hostname = memory.strdup(socket.inet_namebyhost(self.io:address().p))
 	self.io = io
 	self.serde_id = serde.kind[opts.serde or _M.DEFAULT_SERDE]
+	self.http = opts.http and 1 or 0
 	self.dead = 0
 	self:assign_local_peer_id()
 	self:start_io(opts, self:serde(), true)
@@ -486,6 +510,28 @@ function ext_conn_index:destroy(reason)
 	peer_cmap[self:local_peer_key()] = nil	
 	memory.free(self.hostname)
 end
+function ext_conn_index:rawsend(...)
+-- logger.warn('conn:rawsend', self.io:address(), ...)
+	if not self.http then
+		self.wb:send(conn_writer, self:serde(), ...)
+	else
+		local kind = ...
+		self.wb.curr:reset()
+		if kind ~= router.RESPONSE then
+			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
+				assert(false, "TODO: support notification via http by using http server push")
+			else
+				local _, path, method = ...
+				self:serde():pack(self.wb.curr, {kind, select(4, ...)})
+				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
+			end
+		else
+			self:serde():pack(self.wb.curr, {kind, select(2, ...)})
+			self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
+		end
+	end
+end
+
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)
 
 -- create external connections

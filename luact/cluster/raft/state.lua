@@ -141,7 +141,7 @@ function raft_state_container_index:write_any_logs(kind, msgid, logs)
 		-- add and commit 
 		self.proposals:dictatorial_add(actor.of(self.actor_body), start_idx, end_idx)
 	else
-		exception.raise('invalid', self:group_id(), 'quorum too short', q)		
+		exception.raise('invalid', self:group_id(), 'quorum too short', q)
 	end
 end
 function raft_state_container_index:kick_replicator()
