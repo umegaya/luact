@@ -80,7 +80,7 @@ local function run_request(c, dispatcher, msg, len)
 end
 
 function _M.internal(connection, message, len)
-	--logger.notice('router_internal', unpack(message))
+	-- logger.notice('router_internal', unpack(message, 1, len))
 	local k = message[KIND]
 	local kind,notice = bit.band(k, KIND_MASK), bit.band(k, NOTICE_MASK) ~= 0
 	if kind == KIND_RESPONSE then
@@ -184,7 +184,7 @@ end
 
 local context_work = {}
 function _M.external(connection, message, len, from_untrusted)
-	-- logger.notice('router_external', unpack(message))
+	-- logger.notice('router_external', unpack(message, 1, len))
 	local k = message[KIND]
 	local notice = bit.band(k, NOTICE_MASK) ~= 0
 	if from_untrusted then

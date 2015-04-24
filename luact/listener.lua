@@ -12,11 +12,12 @@ local function new_listener(proto, serde, address, opts)
 	local p = pulpo.evloop.io[proto]
 	assert(p.listen, exception.new('not_found', 'method', 'listen', proto))
 	opts.serde = serde
+	opts.http = proto:match('^http') ~= nil
 	local ln = p.listen(address, opts.proto_opts)
 	tentacle(function (s, options)
 		while true do
 			local c = s:read()
-			logger.debug(address, 'accept')
+			if not c then break end
 			conn.from_io(c, options)
 		end
 	end, ln, opts)
@@ -25,8 +26,9 @@ local function new_listener(proto, serde, address, opts)
 end
 
 local function check_internal_violation(proto, addr)
-	if proto == _M.int_proto and addr == _M.int_addr then
-		raise('invalid', 'addr already in use for internal service', proto.."://"..addr)
+	local port = addr:match('([0-9]+)$')
+	if _M.int_port and _M.int_port == port then
+		raise('invalid', proto.."://"..addr, 'port already in use for internal service', _M.int_url)
 	end
 end
 
@@ -35,13 +37,6 @@ function _M.listen(url, opts)
 	check_internal_violation(proto, address)
 	local ln = lmap[url]
 	if not ln then
-		if proto:match('^http') then
-			if opts then
-				opts.http = true
-			elseif 
-				opts = { http = true }
-			end
-		end
 		assert((not opts) or (not opts.internal), exception.new('invalid', 'argument', 
 			"please use unprotected_listen to open internal listener"))
 		ln = actor.new(new_listener, proto, serde, address, opts or {})
@@ -68,8 +63,8 @@ end
 
 function _M.set_intenral_url(url)
 	local proto, serde, address = conn.parse_hostname(url)
-	_M.int_proto = proto
-	_M.int_addr = address
+	_M.int_port = address:match('([0-9]+)$')
+	_M.int_url = url
 end
 
 return _M

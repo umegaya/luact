@@ -16,7 +16,7 @@ apt-get -y install wget
 # -- jemalloc
 apt-get -y install libjemalloc-dev 
 # -- openssl 
-apt-get -y install openssl
+apt-get -y install libssl-dev
 pushd /tmp
 # -- luajit
 git clone http://luajit.org/git/luajit-2.0.git --branch $LUAJIT_VERSION
@@ -30,14 +30,11 @@ pushd rocksdb
 make shared_lib && objcopy -S librocksdb.so && make install
 popd
 rm -rf rocksdb
-# -- nghttp2
-git clone https://github.com/tatsuhiro-t/nghttp2.git --branch $NGHTTP2_VERSION
-pushd nghttp2
-apt-get -y install libxml2-dev
-autoreconf -i && automake && autoconf && ./configure && make && make install
-objcopy -S /usr/local/lib/libnghttp2.so
+# -- picohttpparser
+git clone https://github.com/umegaya/picohttpparser --branch $HTTP_PARSER_VERSION
+pushd picohttpparser
+make so && objcopy -S libpicohttpparser.so && make install_so
 popd
-rm -rf nghttp2
 popd
 # -- docker machine
 DOCKER_MACHINE_URL=https://github.com/docker/machine/releases/download/$DOCKER_MACHINE_VERSION/docker-machine_linux-amd64

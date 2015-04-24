@@ -83,6 +83,7 @@ function wbuf_index:write()
 		if not _M.writer[now[0]] then
 			curr:dump(true)
 			logger.report('enddump', now, now[0], _M.writer[now[0]])--, debug.traceback())
+			exception.raise('invalid', 'broken packet written')
 		end
 		local w = ffi.cast(_M.writer[now[0]], now + 1)
 		local r = w:syscall(self.io)

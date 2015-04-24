@@ -150,26 +150,36 @@ local conn_mt = {
 }
 local function open_io(hostname, opts)
 	local proto, sr, address, user, credential = _M.parse_hostname(hostname)
+	-- print('open_io', proto, sr, address, debug.traceback())
 	-- TODO : if user and credential is specified, how should we handle these?
 	local p = pulpo.evloop.io[proto]
 	assert(p.connect, exception.new('not_found', 'method', 'connect', proto))
-	return p.connect(address, opts), serde.kind[sr], proto:match('^http') and 1 or 0
+	local ok, io = pcall(p.connect, address, opts)
+	if not ok then
+		logger.report('connect error', io)
+		exception.raise(io)
+	end
+	return io, serde.kind[sr], proto:match('^http') and 1 or 0
 end
 function conn_index:init_buffer()
 	self.rb:init()
 	self.wb:init()
 end
 function conn_index:start_io(opts, sr, server)
+	-- print('start_io', self, self.http, server, opts.internal, debug.traceback())
 	local rev, wev
-	wev = tentacle(self.write, self, self.io)
-	if opts.internal then
-		rev = tentacle(self.read_int, self, self.io, sr)
-	elseif self.http ~= 0 then
+	if self.http ~= 0 then
 		rev = tentacle(self.read_webext, self, self.io, true, sr)
-	else
-		rev = tentacle(self.read_ext, self, self.io, true, sr)
+		tentacle(self.sweeper, self, rev)
+	else	
+		wev = tentacle(self.write, self, self.io)
+		if opts.internal then
+			rev = tentacle(self.read_int, self, self.io, sr)
+		else
+			rev = tentacle(self.read_ext, self, self.io, true, sr)
+		end
+		tentacle(self.sweeper, self, rev, wev)
 	end
-	tentacle(self.sweeper, self, rev, wev)
 	-- for example, normal http (not 2.0) is volatile.
 	if not (server or opts.volatile_connection) then
 		conn_tasks:add(self) -- start keeping alive
@@ -184,15 +194,15 @@ end
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
 	-- assures coroutines are never execute any line
-	if obj == rev then
+	if wev and obj == rev then
 		tentacle.cancel(wev)
-	elseif obj == web then
+	elseif rev and obj == web then
 		tentacle.cancel(rev)
 	end
 	-- these 2 line assures another tentacle (read for write/write for read)
 	-- start to finish.
-	self:destroy('error')
 	self:close()
+	self:destroy('error')
 end
 function conn_index:task()
 	-- do keep alive
@@ -275,6 +285,9 @@ end
 function conn_index:local_peer_key()
 	return tonumber(self.local_peer_id)
 end
+function conn_index:is_server()
+	return self.local_peer_id ~= 0 
+end
 function conn_index:destroy(reason)
 	conn_common_destroy(self, reason, cmap, conn_free_list)
 end
@@ -328,20 +341,34 @@ local web_rb_work = memory.alloc_typed('luact_rbuf_t')
 function conn_index:read_webext(io, unstrusted, sr)
 	local rb = web_rb_work
 	while self:alive() do
-		local req = io:read()
-		local _, path, headers, body, blen = req:payload()
-		local p, method = path:match('(.*)/([^/]+)/?$')
-		rb:from_buffer(body, blen)
-		local parsed, len = sr:unpack(rb)
-		if bit.band(payload[1], router.NOTICE_MASK) ~= 0 then
-			table.insert(parsed, 2, method)
-			table.insert(parsed, 2, p)
-		else
-			table.insert(parsed, 2, method)
-			table.insert(parsed, 4, p)
+		local buf = io:read()
+		if buf then
+			if self:is_server() then
+				local _, path, headers, body, blen = buf:payload()
+				--print(path, headers, ffi.string(body, blen))
+				local p, method = path:match('(.*)/([^/]+)/?$')
+				rb:from_buffer(body, blen)
+				local parsed, len = sr:unpack(rb)
+				buf:fin()
+				if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
+					table.insert(parsed, 2, p)
+					table.insert(parsed, 2, method)
+				else
+					table.insert(parsed, 2, p)
+					table.insert(parsed, 4, false) -- because nil cannot be inserted
+					table.insert(parsed, 4, method)
+					parsed[5] = nil
+				end
+				router.external(self, parsed, len + 2, untrusted)
+			else -- client. receive response
+				local status, headers, body, blen = buf:payload()
+				--print(status, headers, ffi.string(body, blen))
+				rb:from_buffer(body, blen)
+				local parsed, len = sr:unpack(rb)
+				buf:fin()
+				router.external(self, parsed, len, untrusted)				
+			end
 		end
-		router.external(self, parsed, len + 2, untrusted)
-		req:fin()
 	end
 end
 function conn_index:write(io)
@@ -450,9 +477,25 @@ end
 -- direct send
 function conn_index:rawsend(...)
 -- logger.warn('conn:rawsend', self.io:address(), ...)
-	self.wb:send(conn_writer, self:serde(), ...)
+	if self.http == 0 then
+		self.wb:send(conn_writer, self:serde(), ...)
+	else
+		local kind = ...
+		self.wb.curr:reset()
+		if kind ~= router.RESPONSE then
+			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
+				assert(false, "TODO: support notification via http by using http2 server push")
+			else
+				local _, path, msgid, method = ...
+				self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
+				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
+			end
+		else
+			self:serde().pack_vararg(self.wb.curr, {kind, select(2, ...)}, select('#', ...))
+			self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
+		end
+	end
 end
-
 ffi.metatype('luact_conn_t', conn_mt)
 
 -- create remote connections
@@ -506,30 +549,9 @@ function ext_conn_index:cmapkey()
 	return ffi.string(self.hostname)
 end
 function ext_conn_index:destroy(reason)
-	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
 	peer_cmap[self:local_peer_key()] = nil	
 	memory.free(self.hostname)
-end
-function ext_conn_index:rawsend(...)
--- logger.warn('conn:rawsend', self.io:address(), ...)
-	if not self.http then
-		self.wb:send(conn_writer, self:serde(), ...)
-	else
-		local kind = ...
-		self.wb.curr:reset()
-		if kind ~= router.RESPONSE then
-			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
-				assert(false, "TODO: support notification via http by using http server push")
-			else
-				local _, path, method = ...
-				self:serde():pack(self.wb.curr, {kind, select(4, ...)})
-				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
-			end
-		else
-			self:serde():pack(self.wb.curr, {kind, select(2, ...)})
-			self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
-		end
-	end
+	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
 end
 
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)

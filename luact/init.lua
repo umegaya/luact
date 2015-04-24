@@ -89,6 +89,7 @@ factory = {
 local from_file, from_module = factory["file"], factory["module"]
 
 -- additional thread startup routines
+-- caution : these routine is re-created on destination thread, so no upvalue can be used.
 local function init_worker(opts)
 	opts = assert(loadstring(opts))()
 	local _luact = require 'luact.init'
@@ -99,6 +100,18 @@ local function init_worker_and_global_ref(opts)
 	_G.luact = require 'luact.init'
 	_G.luact.initialize(opts)
 end
+local function on_pre_start(opts)
+	local _luact = require 'luact.init'	
+	local deploy = require 'luact.deploy'
+	-- initialize system virtual actor
+	_luact.register("/luact", { multi_actor = true }, function ()
+		return {
+			deploy = deploy.hook_commit,
+		}
+	end)
+end
+
+-- create option from default and argument and commandline
 local function get_opts(opts)
 	opts = util.merge_table(require 'luact.option', opts or {})
 	if opts.parse_arg then
@@ -122,7 +135,9 @@ function _M.start(opts, executable)
 	opts = get_opts(opts)
 	opts.init_params = serpent.dump(opts)
 	opts.init_proc = _G.luact and init_worker_and_global_ref or init_worker
-	pulpo.initialize(opts)
+	opts.pre_start_proc = on_pre_start
+	opts.pre_start_params = opts.init_params
+	pulpo.initialize(opts)	
 	_M.initialize(opts)
 	pulpo.run(opts, executable or opts.executable)
 end
@@ -132,6 +147,7 @@ end
 function _M.initialize(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
+
 	-- initialize other modules
 	uuid.initialize(actor.uuid_metatable, opts.startup_at, opts.local_address)
 	actor.initialize(opts.actor)
@@ -143,6 +159,10 @@ function _M.initialize(opts)
 	_M.dht = vid.dht
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
+
+	-- initialize pulpo io modules
+	require('pulpo.io.ssl').initialize(opts.ssl)
+	require('pulpo.io.process').initialize(_M.clock.alarm)
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id
@@ -196,6 +216,7 @@ function _M.initialize(opts)
 		}
 		return _M.root
 	end, opts)
+
 	-- deploy setting
 	deploy.config_method(opts.deploy.method, opts.deploy)
 end

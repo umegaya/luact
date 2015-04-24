@@ -34,4 +34,8 @@ return {
 		method = "github.com",
 		diff_base = ".",
 	},
+	ssl = {
+		public_key = "./luact/ext/pulpo/test/cert/public.key",
+		private_key = "./luact/ext/pulpo/test/cert/private.key",
+	}, 
 }
