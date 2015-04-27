@@ -35,7 +35,14 @@ git clone https://github.com/umegaya/picohttpparser --branch $HTTP_PARSER_VERSIO
 pushd picohttpparser
 make so && objcopy -S libpicohttpparser.so && make install_so
 popd
+# -- lua cjson
+git clone https://github.com/umegaya/cJSON --branch $JSON_VERSION
+pushd lua-cjson
+gcc cJSON.c -o libcjson.so -shared -fPIC
+install -D -m 755 libcjson.so /usr/local/lib/
 popd
+popd
+
 # -- docker machine
 DOCKER_MACHINE_URL=https://github.com/docker/machine/releases/download/$DOCKER_MACHINE_VERSION/docker-machine_linux-amd64
 wget $DOCKER_MACHINE_URL -O /usr/local/bin/docker-machine && chmod 755 /usr/local/bin/docker-machine

@@ -10,6 +10,8 @@ luact.start({
 	local luact = require 'luact.init'
 	luact.listen('https://0.0.0.0:8443')
 	luact.listen('http://0.0.0.0:8080')
+	luact.listen('https+json://0.0.0.0:8444')
+	luact.listen('http+json://0.0.0.0:8081')
 	luact.register('/rest/api', function ()
 		return {
 			login = function (acc, pass)
@@ -46,6 +48,8 @@ luact.start({
 
 	luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
 	luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
+	luact.tentacle(proc, "https", 8444, serde.kind.json)
+	luact.tentacle(proc, "http", 8081, serde.kind.json)
 	return true
 end)
 

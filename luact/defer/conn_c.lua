@@ -321,6 +321,7 @@ function conn_index:read_int(io, sr)
 		end
 		rb:shrink_by_hpos()
 	end
+	sr:end_stream_unpacker(sup)
 end
 function conn_index:read_ext(io, unstrusted, sr)
 	local rb = self.rb
@@ -337,6 +338,7 @@ function conn_index:read_ext(io, unstrusted, sr)
 		end
 		rb:shrink_by_hpos()
 	end
+	sr:end_stream_unpacker(sup)
 end
 local web_rb_work = memory.alloc_typed('luact_rbuf_t')
 function conn_index:read_webext(io, unstrusted, sr)

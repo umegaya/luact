@@ -741,6 +741,8 @@ function serde_mt.start_unpacker(rb)
 		coroutine.yield(true, serde_mt.unpack_any(rb))
 	end
 end
+function serde_mt:end_stream_unpacker(ctx)
+end
 function serde_mt:stream_unpacker(rb)
 	local co = coroutine.create(serde_mt.start_unpacker)
 	coroutine.resume(co, rb)

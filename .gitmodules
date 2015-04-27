@@ -13,3 +13,6 @@
 [submodule "test/deploy/foo"]
 	path = test/deploy/foo
 	url = git@github.com:umegaya/deploy_test_foo.git
+[submodule "luact/ext/json"]
+	path = luact/ext/json
+	url = git@github.com:umegaya/lua-resty-libcjson.git
