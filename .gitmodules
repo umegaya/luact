@@ -4,12 +4,6 @@
 [submodule "luact/ext/ffiex"]
 	path = luact/ext/ffiex
 	url = git@github.com:umegaya/ffiex.git
-[submodule "luact/ext/lua-aws"]
-	path = luact/ext/lua-aws
-	url = git@github.com:umegaya/lua-aws.git
-[submodule "luact/ext/msgpack"]
-	path = luact/ext/msgpack
-	url = git@github.com:umegaya/lua-MessagePack.git
 [submodule "luact/ext/serpent"]
 	path = luact/ext/serpent
 	url = git@github.com:umegaya/serpent.git
