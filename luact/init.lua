@@ -161,8 +161,10 @@ function _M.initialize(opts)
 	router.initialize(opts.router)
 
 	-- initialize pulpo io modules
+	require('pulpo.io.ssl').debug = true
 	require('pulpo.io.ssl').initialize(opts.ssl)
 	require('pulpo.io.process').initialize(_M.clock.alarm)
+	_M.process = pulpo.evloop.io.process
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id

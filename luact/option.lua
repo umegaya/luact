@@ -35,7 +35,7 @@ return {
 		diff_base = ".",
 	},
 	ssl = {
-		public_key = "./luact/ext/pulpo/test/cert/public.key",
-		private_key = "./luact/ext/pulpo/test/cert/private.key",
+		pubkey = "./luact/ext/pulpo/test/certs/public.key",
+		privkey = "./luact/ext/pulpo/test/certs/private.key",
 	}, 
 }

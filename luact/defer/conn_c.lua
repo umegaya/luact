@@ -191,6 +191,7 @@ function conn_index:sweep()
 	machine_stats[self:machine_id()] = nil
 	conn_tasks:remove(self)
 end
+-- TODO : now tentacle become cancelable, so remove sweeper is possible.
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
 	-- assures coroutines are never execute any line
@@ -342,32 +343,31 @@ function conn_index:read_webext(io, unstrusted, sr)
 	local rb = web_rb_work
 	while self:alive() do
 		local buf = io:read()
-		if buf then
-			if self:is_server() then
-				local _, path, headers, body, blen = buf:payload()
-				--print(path, headers, ffi.string(body, blen))
-				local p, method = path:match('(.*)/([^/]+)/?$')
-				rb:from_buffer(body, blen)
-				local parsed, len = sr:unpack(rb)
-				buf:fin()
-				if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
-					table.insert(parsed, 2, p)
-					table.insert(parsed, 2, method)
-				else
-					table.insert(parsed, 2, p)
-					table.insert(parsed, 4, false) -- because nil cannot be inserted
-					table.insert(parsed, 4, method)
-					parsed[5] = nil
-				end
-				router.external(self, parsed, len + 2, untrusted)
-			else -- client. receive response
-				local status, headers, body, blen = buf:payload()
-				--print(status, headers, ffi.string(body, blen))
-				rb:from_buffer(body, blen)
-				local parsed, len = sr:unpack(rb)
-				buf:fin()
-				router.external(self, parsed, len, untrusted)				
+		if not buf then break end -- close connection
+		if self:is_server() then
+			local _, path, headers, body, blen = buf:payload()
+			--print(path, headers, ffi.string(body, blen))
+			local p, method = path:match('(.*)/([^/]+)/?$')
+			rb:from_buffer(body, blen)
+			local parsed, len = sr:unpack(rb)
+			buf:fin()
+			if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
+				table.insert(parsed, 2, p)
+				table.insert(parsed, 2, method)
+			else
+				table.insert(parsed, 2, p)
+				table.insert(parsed, 4, false) -- because nil cannot be inserted
+				table.insert(parsed, 4, method)
+				parsed[5] = nil
 			end
+			router.external(self, parsed, len + 2, untrusted)
+		else -- client. receive response
+			local status, headers, body, blen = buf:payload()
+			--print(status, headers, ffi.string(body, blen))
+			rb:from_buffer(body, blen)
+			local parsed, len = sr:unpack(rb)
+			buf:fin()
+			router.external(self, parsed, len, untrusted)				
 		end
 	end
 end
