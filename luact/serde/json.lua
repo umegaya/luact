@@ -37,11 +37,11 @@ ffi.cdef[[
 		int dummy;
 	} luact_json_serde_t;
 	typedef struct luact_json_parse_context {
-		int id;
+		int id, elem_count;
 		luact_rbuf_t *rb;
 		short cs_size, cs_depth;
 		struct luact_json_parse_context_stack { 
-			int parse_type, last_kl;
+			int parse_type, last_kl, elem_count;
 			const char *last_k;
 		} *cs;
 	} luact_json_parse_context_t;
@@ -145,8 +145,8 @@ function serde_mt:pack_packet(buf, append, ...)
 		return pv.sz
 	end
 end
-function serde_mt:pack(buf, obj)
-	return serde_mt.pack_vararg(buf, obj)
+function serde_mt:pack(buf, obj, len)
+	return serde_mt.pack_vararg(buf, obj, len)
 end
 
 -- unpack
@@ -181,6 +181,13 @@ function parse_ctx_mt:last_key()
 		return nil
 	end
 end
+function parse_ctx_mt:inc_elem_count()
+	self:curstack().elem_count = self:curstack().elem_count + 1
+end
+function parse_ctx_mt:last_index()
+	self:inc_elem_count()
+	return self:curstack().elem_count
+end
 function parse_ctx_mt:push_stack(t)
 	local st = get_stack(self)
 	st[#st + 1] = {}
@@ -194,12 +201,15 @@ function parse_ctx_mt:push_stack(t)
 		self.cs_size = tmpsz
 	end
 	self.cs_depth = self.cs_depth + 1
+	self:curstack().last_k = nil
+	self:curstack().elem_count = 0
 	self:set_parse_type(t)
 	return 1
 end
 function parse_ctx_mt:pop_stack()
 	local st = get_stack(self)
 	local res = table.remove(st)
+	self.elem_count = self:curstack().elem_count
 	self.cs_depth = self.cs_depth - 1
 	self:append_value(res)
 	return 1
@@ -218,9 +228,10 @@ function parse_ctx_mt:append_value(value)
 		st[1] = value
 	elseif self:in_array() then 
 		local b = st[d]
-		table.insert(b, value)
+		b[self:last_index()] = value
 	elseif self:in_map() then
 		local b = st[d]
+		self:inc_elem_count()
 		b[self:last_key()] = value
 	else
 		assert(false)
@@ -303,14 +314,15 @@ function serde_mt.unpack_any(ctx, rb, complete)
 		local err = exception.new('json', 'parse_error', 
 			ffi.string(yajl.yajl_get_error(up, 1, rb:curr_p(), rb:available())))
 		yajl.yajl_free(up)
-		return false, err
+		return exception.raise(err)
 	end
+	yajl.yajl_free(up)
 	local st = get_stack(ctx)
 	if #st <= 1 then
-		return st[1], 1
+		return st[1], ctx.elem_count
 	else
 		-- TODO : indicate caller that new buffer is needed
-		return false, exception.new('json', 'unsupported', 'streaming unpack have not supported yet')
+		return exception.raise('json', 'unsupported', 'streaming unpack have not supported yet')
 	end
 end
 function serde_mt:end_stream_unpacker(ctx)
@@ -323,10 +335,10 @@ function serde_mt:unpack_packet(ctx)
 	return serde_mt.unpack_any(ctx, ctx.rb)
 end
 function serde_mt:unpack(rb)
-	local r = serde_mt.unpack_any(shared_context, rb)
+	local r, len = serde_mt.unpack_any(shared_context, rb)
 	-- rewind stack
 	stacks[tonumber(shared_context.id)] = {}
-	return r
+	return r, len
 end
 ffi.metatype('luact_json_serde_t', serde_mt)
 

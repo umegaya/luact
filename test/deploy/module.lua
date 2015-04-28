@@ -11,7 +11,13 @@ pulpo.run({
 	os.execute('bash ./test/tools/commit.sh --reset')
 
 	local mod = require 'luact.module'
+	local pulpo = require 'pulpo.init'
 	local util = require 'pulpo.util'
+	local proc = require 'pulpo.io.process'
+	local clock = pulpo.evloop.clock.new(0.05, 10)
+	proc.initialize(function (dur)
+		return clock:alarm(dur)
+	end)
 
 	local foomain = require 'test.deploy.foo.main'
 

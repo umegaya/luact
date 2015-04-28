@@ -351,18 +351,22 @@ function conn_index:read_webext(io, unstrusted, sr)
 			--print(path, headers, ffi.string(body, blen))
 			local p, method = path:match('(.*)/([^/]+)/?$')
 			rb:from_buffer(body, blen)
-			local parsed, len = sr:unpack(rb)
+			local ok, parsed, len = pcall(sr.unpack, sr, rb)
 			buf:fin()
-			if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
-				table.insert(parsed, 2, p)
-				table.insert(parsed, 2, method)
+			if ok then
+				if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
+					table.insert(parsed, 2, p)
+					table.insert(parsed, 2, method)
+				else
+					table.insert(parsed, 2, p)
+					table.insert(parsed, 4, false) -- because nil cannot be inserted
+					table.insert(parsed, 4, method)
+					parsed[5] = nil
+				end
+				router.external(self, parsed, len + 2, untrusted)
 			else
-				table.insert(parsed, 2, p)
-				table.insert(parsed, 4, false) -- because nil cannot be inserted
-				table.insert(parsed, 4, method)
-				parsed[5] = nil
+				exception.raise('invalid', 'encoding', parsed)
 			end
-			router.external(self, parsed, len + 2, untrusted)
 		else -- client. receive response
 			local status, headers, body, blen = buf:payload()
 			--print(status, headers, ffi.string(body, blen))

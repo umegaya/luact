@@ -19,21 +19,18 @@ luact.start({
 	local util = luact.util
 
 	-- [[
-	local function serde(obj, verify)
+	local function serde(obj, verify, len)
 		local rb = memory.alloc_typed('luact_rbuf_t')
 		rb:init()
-		json:pack(rb, obj)
+		json:pack(rb, obj, len)
 		-- rb:dump()
-		local obj2, err = json:unpack(rb)
-		if type(err) == 'table' then
-			print('unpack error', err)
-		end
+		local obj2, rlen = json:unpack(rb)
+		assert((not len) or (rlen == len))
 		rb:fin()
 		memory.free(rb)
 		if verify then
 			assert(verify(obj, obj2))
 		else
-			logger.report('result', obj, obj2)
 			assert(obj == obj2)
 		end
 	end
@@ -62,6 +59,13 @@ luact.start({
 			f = "テスト",
 		}
 	}, util.table_equals)
+	serde({
+		[1] = "a",
+		[2] = {1, 2, 3},
+		[3] = nil,
+		[4] = nil,
+		[5] = "b",
+	}, util.table_equals, 5)
 --]]
 end)
 

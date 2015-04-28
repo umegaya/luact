@@ -83,7 +83,7 @@ end
 local serde_mt = {}
 serde_mt.__index = serde_mt
 serde_mt.packer = {}
-serde_mt.conv = ffi.new('luact_bytearray_scalar_conv_t')
+local serde_mt_conv = ffi.new('luact_bytearray_scalar_conv_t')
 function serde_mt.pack_length16(p, len)
 	ffi.cast('uint16_t*', p)[0] = socket.htons(len)
 	return 2
@@ -92,26 +92,27 @@ function serde_mt.pack_length32(p, len)
 	ffi.cast('uint32_t*', p)[0] = socket.htonl(len)
 	return 4
 end
-function serde_mt.packer.string(buf, str)
+function serde_mt.pack_string(buf, str)
 	local len, ofs, p = #str, 0
 	buf:reserve(len + 4 + 1)
 	p = buf:last_byte_p()
 	if len <= 0x1F then
-		p[0] = bit.bor(0xa0, len); ofs = 1
+		p[0] = 0xa0 + len; ofs = 1
 	elseif len <= 0xff then
 		p[0], p[1] = 0xd9, len; ofs = 2
 	elseif len <= 0xffff then
-		p[0] = 0xda; ofs = 1
-		ofs = ofs + serde_mt.pack_length16(p + ofs, len)
+		p[0] = 0xda;
+		serde_mt.pack_length16(p + 1, len)
+		ofs = 3
 	else
-		p[0] = 0xdb; ofs = 1
-		ofs = ofs + serde_mt.pack_length32(p + ofs, len)
+		p[0] = 0xdb
+		serde_mt.pack_length32(p + 1, len)
+		ofs = 5
 	end
 	ffi.copy(p + ofs, str, len)
-	ofs = ofs + len
-	buf:use(ofs)
+	buf:use(ofs + len)
 end
-serde_mt.packer["error"] = function (buf, obj)
+function serde_mt.pack_error(buf, obj)
 	local p, ofs
 	buf:reserve(6)
 	p = buf:last_byte_p()
@@ -120,9 +121,6 @@ serde_mt.packer["error"] = function (buf, obj)
 	buf:use(6)
 	serde_mt.pack_any(buf, obj.name)
 	serde_mt.pack_any(buf, obj.bt)
-	if type(obj.args) ~= 'table' then
-		exception.raise('fatal', 'invalid error args', obj.args)
-	end
 	serde_mt.pack_any(buf, obj.args)
 	-- only in here, length can be known
 	serde_mt.pack_length32(buf:start_p() + ofs, buf.used - ofs - 5)
@@ -132,7 +130,7 @@ function serde_mt.pack_vararg(buf, obj, len)
 	if len <= 0xF then
 		buf:reserve(1)
 		p = buf:last_byte_p()
-		p[0] = bit.bor(0x90, len); ofs = 1
+		p[0] = 0x90 + len; ofs = 1
 	elseif len <= 0xFFFF then
 		buf:reserve(3)
 		p = buf:last_byte_p()
@@ -150,16 +148,12 @@ function serde_mt.pack_vararg(buf, obj, len)
 		serde_mt.pack_any(buf, obj[i])
 	end
 end
-function serde_mt.packer.table(buf, obj)
+function serde_mt.pack_table(buf, obj, len)
 	if exception.akin(obj) then
-		return serde_mt.packer["error"](buf, obj)
+		return serde_mt.pack_error(buf, obj)
 	end	
-	local len, ofs, p = #obj
-	if obj[0] then
-		for k,v in pairs(obj) do
-			print(k, v)
-		end
-	end
+	len = len or #obj
+	local ofs, p
 	if len > 0 and (not obj.__not_array__) then
 		serde_mt.pack_vararg(buf, obj, len)
 	else
@@ -169,17 +163,19 @@ function serde_mt.packer.table(buf, obj)
 		if len <= 0xF then
 			buf:reserve(1)
 			p = buf:last_byte_p()
-			p[0] = bit.bor(0x80, len); ofs = 1
+			p[0] = 0x80 + len; ofs = 1
 		elseif len <= 0xFFFF then
 			buf:reserve(3)
 			p = buf:last_byte_p()
-			p[0] = 0xde; ofs = 1
-			ofs = ofs + serde_mt.pack_length16(p + ofs, len)
+			p[0] = 0xde
+			serde_mt.pack_length16(p + 1, len)
+			ofs = 3
 		else
 			buf:reserve(5)
 			p = buf:last_byte_p()
-			p[0] = 0xdf; ofs = 1
-			ofs = ofs + serde_mt.pack_length32(p + ofs, len)
+			p[0] = 0xdf
+			serde_mt.pack_length32(p + 1, len)
+			ofs = 5
 		end
 		-- map
 		buf:use(ofs)
@@ -189,23 +185,23 @@ function serde_mt.packer.table(buf, obj)
 		end
 	end
 end
-function serde_mt.packer.boolean(buf, obj)
+function serde_mt.pack_boolean(buf, obj)
 	local p
 	buf:reserve(1)
 	p = buf:last_byte_p()
 	p[0] = obj and 0xc3 or 0xc2
 	buf:use(1)
 end
-function serde_mt.packer.number(buf, obj)
+function serde_mt.pack_number(buf, obj)
 	local p
 	buf:reserve(9)
 	p = buf:last_byte_p()
 	-- TODO : change object type according to obj's range
 	p[0] = 0xcb
-	ffi.copy(p + 1, serde_mt.conv:float2ptr(obj, 8), 8)
+	ffi.copy(p + 1, serde_mt_conv:float2ptr(obj, 8), 8)
 	buf:use(9)
 end
-serde_mt.packer["nil"] = function (buf, obj)
+function serde_mt.pack_nil(buf)
 	local p
 	buf:reserve(1)
 	p = buf:last_byte_p()
@@ -223,19 +219,19 @@ function serde_mt.pack_ext_header(buf, ext_type, length)
 	elseif length <= 0xFFFF then			
 		buf:reserve(4 + length)
 		p = buf:last_byte_p()
-		p[0], ofs = 0xc8, 1
-		ofs = ofs + serde_mt.pack_length16(p + ofs, length)
-		p[ofs] = ext_type; ofs = ofs + 1
+		p[0] = 0xc8
+		serde_mt.pack_length16(p + 1, length)
+		p[3] = ext_type; ofs = 4
 	else
 		buf:reserve(6 + length)
 		p = buf:last_byte_p()
-		p[0], ofs = 0xc9, 1
-		ofs = ofs + serde_mt.pack_length32(p + ofs, length)
-		p[ofs] = ext_type; ofs = ofs + 1
+		p[0] = 0xc9
+		serde_mt.pack_length32(p + 1, length)
+		p[5] = ext_type; ofs = 6
 	end
 	return p, ofs
 end
-serde_mt.packer["function"] = function (buf, obj) 
+function serde_mt.pack_function(buf, obj) 
 	local code = string.dump(obj)
 	local len, ofs, p = #code
 	p, ofs = serde_mt.pack_ext_header(buf, EXT_FUNCTION, len)
@@ -243,10 +239,10 @@ serde_mt.packer["function"] = function (buf, obj)
 	ofs = ofs + len
 	buf:use(ofs)
 end
-function serde_mt.packer.userdata(buf, obj)
+function serde_mt.pack_userdata(buf, obj)
 	exception.raise('invalid', 'cannot pack', 'userdata')
 end
-function serde_mt.packer.thread(buf, obj)
+function serde_mt.pack_thread(buf, obj)
 	exception.raise('invalid', 'cannot pack', 'thread')
 end
 local custom_pack = {}
@@ -260,21 +256,23 @@ function serde_mt.pack_int_cdata(buf, obj, refl)
 	elseif refl.size == 2 then
 		buf:reserve(3 + 2)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd5, EXT_CDATA_INT, refl.unsigned or 0, 3
-		ofs = ofs + serde_mt.pack_length16(p + ofs, obj)
+		p[0], p[1], p[2] = 0xd5, EXT_CDATA_INT, refl.unsigned or 0
+		serde_mt.pack_length16(p + 3, obj)
+		ofs = 5
 	elseif refl.size == 4 then
 		buf:reserve(3 + 4)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd6, EXT_CDATA_INT, refl.unsigned or 0, 3
-		ofs = ofs + serde_mt.pack_length32(p + ofs, obj)
+		p[0], p[1], p[2] = 0xd6, EXT_CDATA_INT, refl.unsigned or 0
+		serde_mt.pack_length32(p + 3, obj)
+		ofs = 7
 	elseif refl.size == 8 then
 		--uuid.__RB = buf
 		--uuid.check_local_id(obj)
 		buf:reserve(3 + 8)
 		p = buf:last_byte_p()
-		p[0], p[1], p[2], ofs = 0xd7, EXT_CDATA_INT, refl.unsigned or 0, 3
-		ffi.copy(p + ofs, serde_mt.conv:unsigned2ptr(obj, refl.size), refl.size)
-		ofs = ofs + refl.size
+		p[0], p[1], p[2] = 0xd7, EXT_CDATA_INT, refl.unsigned or 0
+		ffi.copy(p + 3, serde_mt_conv:unsigned2ptr(obj, refl.size), refl.size)
+		ofs = 3 + refl.size
 	else
 		exception.raise('invalid', 'integer length', refl.size)
 	end
@@ -302,9 +300,6 @@ function serde_mt.pack_struct_cdata(buf, obj, refl, length)
 	else
 		p, ofs = serde_mt.pack_ext_cdata_header(buf, length, ctype_id)
 	end
-	if ctype_id == common.LUACT_DHT_CMD_GET then
-		logger.report('dhtcmdget', obj, length)
-	end
 	ffi.copy(p + ofs, obj, length)
 	ofs = ofs + length
 	buf:use(ofs)
@@ -317,7 +312,7 @@ struct/union => ref of struct/union
 array => array 
 ptr/ref => ref (even if ptr has multiple element of ctype)
 ]]
-function serde_mt.packer.cdata(buf, obj)
+function serde_mt.pack_cdata(buf, obj)
 	local ofs, p = 0
 	local refl = reflect.typeof(obj)
 	if refl.what == 'int' or refl.what == 'enum' then
@@ -326,14 +321,14 @@ function serde_mt.packer.cdata(buf, obj)
 		buf:reserve(3)
 		p = buf:last_byte_p()
 		if refl.size == 4 then
-			p[0], p[1], ofs = 0xd6, EXT_CDATA_FLOAT, 2
+			p[0], p[1] = 0xd6, EXT_CDATA_FLOAT
 		elseif refl.size == 8 then
-			p[0], p[1], ofs = 0xd7, EXT_CDATA_FLOAT, 2
+			p[0], p[1] = 0xd7, EXT_CDATA_FLOAT
 		else
 			exception.raise('invalid', 'float length', refl.size)
 		end
-		ffi.copy(p + ofs, self:float2ptr(obj, refl.size), refl.size)
-		ofs = ofs + refl.size
+		ffi.copy(p + 2, serde_mt_conv:float2ptr(obj, refl.size), refl.size)
+		ofs = 2 + refl.size
 		buf:use(ofs)
 	elseif refl.what == 'struct' or refl.what == 'union' then
 		serde_mt.pack_struct_cdata(buf, obj, refl, refl.size)
@@ -350,9 +345,26 @@ function serde_mt.packer.cdata(buf, obj)
 		end
 	end
 end
-function serde_mt.pack_any(buf, obj)
+function serde_mt.pack_any(buf, obj, len)
 	-- logger.warn('pack_any', type(obj), obj)
-	return serde_mt.packer[type(obj)](buf, obj)
+	local t = type(obj)
+	if t == 'string' then
+		return serde_mt.pack_string(buf, obj)
+	elseif t == 'number' then
+		return serde_mt.pack_number(buf, obj)
+	elseif t == 'table' then
+		return serde_mt.pack_table(buf, obj, len)
+	elseif t == 'boolean' then
+		return serde_mt.pack_boolean(buf, obj)
+	elseif t == 'nil' then
+		return serde_mt.pack_nil(buf)
+	elseif t == 'function' then
+		return serde_mt.pack_function(buf, obj)
+	elseif t == 'cdata' then
+		return serde_mt.pack_cdata(buf, obj)
+	else
+		exception.raise('not_found', 'packer for', t)
+	end
 end
 function serde_mt:pack_packet(buf, append, ...)
 	local hdsz = ffi.sizeof('luact_writer_raw_t')
@@ -384,8 +396,8 @@ function serde_mt:pack_packet(buf, append, ...)
 		return pv.sz
 	end
 end
-function serde_mt:pack(buf, obj)
-	return self.pack_any(buf, obj)
+function serde_mt:pack(buf, obj, len)
+	return self.pack_any(buf, obj, len)
 end
 -- unpack
 function serde_mt.wait_data_arrived(rb, required)
@@ -413,12 +425,12 @@ function serde_mt.unpack_array(rb, size)
 		-- logger.warn('unpack_array', i, size, v)
 		r[i] = v
 	end
-	return r
+	return r, size
 end
 -- clen for unpack_ext_**** shows actual payload without ext_type
 function serde_mt.unpack_ext_struct_cdata(rb, clen)
 	local p = serde_mt.wait_data_arrived(rb, clen)
-	local ctype_id = serde_mt.conv:ptr2unsigned(p, 4)
+	local ctype_id = serde_mt_conv:ptr2unsigned(p, 4)
 	-- logger.warn('struct_cdata', p[0], ctype_id)
 	local unpacker = common.msgpack_unpacker[ctype_id]
 	-- seek to start offset of actual payload
@@ -446,9 +458,6 @@ function serde_mt.unpack_ext_error(rb, clen)
 	name = serde_mt.unpack_any(rb) 
 	bt = serde_mt.unpack_any(rb) 
 	args = serde_mt.unpack_any(rb)
-	if type(args) == 'number' then
-		rb:dump()
-	end
 	return exception.new_with_bt(name, bt, unpack(args))
 end
 function serde_mt.unpack_ext_function(rb, clen)
@@ -460,7 +469,7 @@ function serde_mt.unpack_ext_function(rb, clen)
 end
 function serde_mt.unpack_ext(rb, size)
 	local p = serde_mt.wait_data_arrived(rb, 2 + size)
-	local clen = serde_mt.conv:ptr2unsigned(p + 1, size)
+	local clen = serde_mt_conv:ptr2unsigned(p + 1, size)
 	local t = p[1 + size] -- (2 + size) - 1
 	rb:seek_from_curr(2 + size)
 	--logger.warn('unpack_ext', t)
@@ -479,12 +488,12 @@ function serde_mt.unpack_ext_numeric_cdata(rb, size)
 	rb:seek_from_curr(3 + size)
 	if p[1] == EXT_CDATA_INT then
 		if p[2] ~= 0 then
-			return serde_mt.conv:ptr2unsigned(p + 3, size)
+			return serde_mt_conv:ptr2unsigned(p + 3, size)
 		else
-			return serde_mt.conv:ptr2signed(p + 3, size)
+			return serde_mt_conv:ptr2signed(p + 3, size)
 		end
 	elseif p[1] == EXT_CDATA_FLOAT then
-		return serde_mt.conv:ptr2float(p + 3, size)
+		return serde_mt_conv:ptr2float(p + 3, size)
 	else
 		exception.raise('invalid', 'currently, fixext always represent numeric cdata', p[1])
 	end		
@@ -494,18 +503,18 @@ function serde_mt.unpack_int(rb, size)
 	local ofs = 1 + size
 	local p = serde_mt.wait_data_arrived(rb, ofs)
 	rb:seek_from_curr(ofs)
-	return serde_mt.conv:ptr2signed(p + 1, size)
+	return serde_mt_conv:ptr2signed(p + 1, size)
 end
 function serde_mt.unpack_uint(rb, size)
 	local ofs = 1 + size
 	local p = serde_mt.wait_data_arrived(rb, ofs)
 	rb:seek_from_curr(ofs)
-	return serde_mt.conv:ptr2unsigned(p + 1, size)
+	return serde_mt_conv:ptr2unsigned(p + 1, size)
 end
-function serde_mt.unpack_bin(rb, size)
+function serde_mt.unpack_bin(rb, size)	
 	local ofs = 1 + size
 	local p = serde_mt.wait_data_arrived(rb, ofs)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, size)
+	local len = serde_mt_conv:ptr2unsigned(p + 1, size)
 	rb:seek_from_curr(ofs)
 	p = serde_mt.wait_data_arrived(rb, len)
 	local str = ffi.string(p, len)
@@ -533,7 +542,7 @@ end
 function serde_mt.unpack_fixarray(rb)
 	local size = tonumber(rb:curr_byte_p()[0]) - 0x90
 	rb:seek_from_curr(1)
-	return serde_mt.unpack_array(rb, size), size
+	return serde_mt.unpack_array(rb, size)
 end
 function serde_mt.unpack_fixstr(rb)
 	local size = tonumber(rb:curr_byte_p()[0]) - 0xa0
@@ -595,13 +604,13 @@ end
 
 function serde_mt.unpack_float32(rb)
 	local p = serde_mt.wait_data_arrived(rb, 5)
-	local n = serde_mt.conv:ptr2float(p + 1, 4)
+	local n = serde_mt_conv:ptr2float(p + 1, 4)
 	rb:seek_from_curr(5)
 	return n
 end
 function serde_mt.unpack_float64(rb)
 	local p = serde_mt.wait_data_arrived(rb, 9)
-	local n = serde_mt.conv:ptr2float(p + 1, 8)
+	local n = serde_mt_conv:ptr2float(p + 1, 8)
 	rb:seek_from_curr(9)
 	return n
 end
@@ -644,26 +653,26 @@ end
 
 function serde_mt.unpack_array16(rb)
 	local p = serde_mt.wait_data_arrived(rb, 3)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, 2)
+	local len = serde_mt_conv:ptr2unsigned(p + 1, 2)
 	rb:seek_from_curr(3)
-	return serde_mt.unpack_array(rb, len), len
+	return serde_mt.unpack_array(rb, len)
 end
 function serde_mt.unpack_array32(rb)
 	local p = serde_mt.wait_data_arrived(rb, 5)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, 4)
+	local len = serde_mt_conv:ptr2unsigned(p + 1, 4)
 	rb:seek_from_curr(5)
-	return serde_mt.unpack_array(rb, len), len
+	return serde_mt.unpack_array(rb, len)
 end
 
 function serde_mt.unpack_map16(rb)
 	local p = serde_mt.wait_data_arrived(rb, 3)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, 2)
+	local len = serde_mt_conv:ptr2unsigned(p + 1, 2)
 	rb:seek_from_curr(3)
 	return serde_mt.unpack_map(rb, len)
 end
 function serde_mt.unpack_map32(rb)
 	local p = serde_mt.wait_data_arrived(rb, 5)
-	local len = serde_mt.conv:ptr2unsigned(p + 1, 4)
+	local len = serde_mt_conv:ptr2unsigned(p + 1, 4)
 	rb:seek_from_curr(5)
 	return serde_mt.unpack_map(rb, len)
 end

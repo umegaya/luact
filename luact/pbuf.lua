@@ -59,7 +59,7 @@ function rbuf_index:reserve(sz)
 		if not buf then
 			exception.raise('malloc', 'void*', newsz)
 		end
-		logger.debug('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max, newsz)
+		--logger.debug('reserve1 ptr:', r, self.max, self.used, sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max, newsz, debug.traceback())
 		self.max = newsz
 		self.used = copyb
 	else
@@ -92,7 +92,7 @@ function rbuf_index:reserve_and_reduce_unused(sz)
 		if copyb > 0 then 
 			ffi.copy(buf, self.buf + self.hpos, copyb)
 		end
-		logger.debug('reserve2 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
+		--logger.debug('reserve2 ptr:', sz, self.buf, '=>', buf, copyb, self.used, self.hpos, self.max)
 		self.hpos = 0
 		self.used = copyb
 		memory.free(self.buf)
@@ -136,10 +136,10 @@ function rbuf_index:use(r)
 	self.used = self.used + r
 end
 function rbuf_index:seek_from_curr(r)
-	if self.hpos > self.used then
+	--[[if self.hpos > self.used then
 		logger.report('invalid seek', self.hpos, self.used, debug.traceback())
 		assert(false)
-	end
+	end]]
 	self.hpos = self.hpos + r
 end
 function rbuf_index:seek_from_start(r)
@@ -192,11 +192,12 @@ end
 _M.LARGE_ALLOCATION_THRESHOLD = 256 * 1024
 function rbuf_index:reduce_malloc_size()
 	if self.max >= _M.LARGE_ALLOCATION_THRESHOLD then
-		logger.notice('shrink rbuf', self.max)
-		local buf = memory.realloc(self.buf, math.max(tonumber(self.used), INITIAL_BUFFER_SIZE))
+		--logger.notice('shrink rbuf', self.max, self.used, _M.LARGE_ALLOCATION_THRESHOLD)
+		local newsz = math.max(tonumber(self.used), INITIAL_BUFFER_SIZE)
+		local buf = memory.realloc(self.buf, newsz)
 		if not buf then return end
 		self.buf = buf
-		self.max = INITIAL_BUFFER_SIZE
+		self.max = newsz
 	end
 end
 ffi.metatype('luact_rbuf_t', rbuf_mt)

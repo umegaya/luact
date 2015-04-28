@@ -9,6 +9,7 @@ local memory = luact.memory
 local exception = luact.exception
 local util = luact.util
 
+-- [=[
 local bign = ffi.new('uint64_t', 0x0001349500002001ULL)
 local bign2 = ffi.new('uint64_t', 4743754768895923934ULL)
 local bign3 = ffi.new('uint64_t', 10141066673075246401ULL)
@@ -38,13 +39,14 @@ common.register_ctype('struct', 'long_struct', {
 	},
 }, 10000)
 
-local function serde(obj, verify)
+local function serde(obj, verify, len)
 	print('serde:test', obj)
 	local rb = memory.alloc_typed('luact_rbuf_t')
 	rb:init()
-	msgpack:pack(rb, obj)
+	msgpack:pack(rb, obj, len)
 	rb:dump()
-	local obj2 = msgpack:unpack(rb)
+	local obj2, rlen = msgpack:unpack(rb)
+	assert((not len) or (len == rlen))
 	if verify then
 		assert(verify(obj, obj2))
 	else
@@ -68,6 +70,24 @@ serde({
 		1,2,3,4,5,
 	}
 }, util.table_equals)
+serde({
+	a = "x",
+	b = 123,
+	c = false,
+	d = {
+		1,2,3,4,5,
+	},
+	e = {
+		f = "テスト",
+	}
+}, util.table_equals)
+serde({
+	[1] = "a",
+	[2] = {1, 2, 3},
+	[3] = nil,
+	[4] = nil,
+	[5] = "b",
+}, util.table_equals, 5)
 serde(function ()
 	return 123456
 end, function (obj1, obj2)
@@ -131,7 +151,8 @@ end
 assert(rbtest.used == rbtest.hpos)
 
 
-os.exit(0)
+--os.exit(0)
+-- ]=]
 
 local rb = memory.alloc_typed('luact_rbuf_t')
 rb:init()
@@ -152,18 +173,17 @@ function makestr(n)
 end
 
 local datasets = {
-   { "empty", nLoop*1000, {} },
    { "iary1", nLoop*1000, {1} },
    { "iary10", nLoop*100, {1,2,3,4,5,6,7,8,9,10} },
    { "iary100", nLoop*10, makeiary(100) },
-   { "iary1000", nLoop, makeiary(1000) },
+   { "iary1000", nLoop*10, makeiary(1000) },
    { "iary10000", nLoop, makeiary(10000) },
-   { "str1", nLoop*100, "a" },
-   { "str10", nLoop*100,  makestr(10)  },
-   { "str100", nLoop*100, makestr(100)  },
-   { "str500", nLoop*100, makestr(500)  },   
-   { "str1000", nLoop*100, makestr(1000)  },
-   { "str10000", nLoop*10, makestr(10000)  },
+   { "str1", nLoop*5000, "a", nLoop*500 },
+   { "str10", nLoop*5000,  makestr(10), nLoop*500 },
+   { "str100", nLoop*5000, makestr(100), nLoop*500 },
+   { "str500", nLoop*1000, makestr(500), nLoop*100 },   
+   { "str1000", nLoop*1000, makestr(1000), nLoop*100 },
+   { "str10000", nLoop*100, makestr(10000), nLoop*100},
 }
 
 logger.notice('---------------- bench normal unpack -------------------')
@@ -172,55 +192,55 @@ local st, et
 _G.BENCH = true
 for i,v in ipairs(datasets) do
 
-logger.notice('gc mem', collectgarbage("count"), "KB")
+-- logger.notice('gc mem', collectgarbage("count"), "KB")
 
-   local nLoop = v[2]
-  -- streaming api
- --[[ 
-  st = os.clock()
-  for j=1, nLoop do
-  	rb:reset()
-  	msgpack:pack(rb, v[3])
-    msgpack:unpack_packet(unp)
-    rb:shrink_by_hpos()
-  end
-  et = os.clock()
-  local mpstime = et - st
-  logger.info('stream: # of iter', nLoop, et - st)
-  ]]
-
+   local nLoop, nLoopStream = v[2], v[4] or v[2]
   -- non-streaming
   st = os.clock()
   local offset,res
   for j=1, nLoop do
   	rb:reset()
   	msgpack:pack(rb, v[3])
-    offset,res = msgpack:unpack(rb)
+    msgpack:unpack(rb)
   end
-  assert(offset)
   local et = os.clock()
   local mptime = et - st
-  logger.info('normal: # of iter', nLoop, et - st)
   
---  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime, "orig:", nLoop/mpotime, "(times/sec)", (mpotime/mptime), "times faster")
-  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime)--, "stream:", nLoop/mpstime )
+  -- streaming api
+ -- [[ 
+  st = os.clock()
+  for j=1, nLoopStream do
+  	rb:reset()
+  	msgpack:pack(rb, v[3])
+    msgpack:unpack_packet(unp)
+    rb:shrink_by_hpos()
+  end
+  et = os.clock()
+  --]]
+  local mpstime = et - st
 
-logger.notice('gc mem after', collectgarbage("count"), "KB")
+  
+  print( "mp:", v[1], "sec", mptime, mpstime, "native:", nLoop/mptime, "stream:", nLoop/mpstime)
+  --print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime)--, "stream:", nLoop/mpstime )
+
+-- logger.notice('gc mem after', collectgarbage("count"), "KB")
 
 end
 
+--[[
 logger.notice('---------------- bench streaming unpack -------------------')
 
 for i,v in ipairs(datasets) do
 
-logger.notice('gc mem', collectgarbage("count"), "KB")
+-- logger.notice('gc mem', collectgarbage("count"), "KB")
 
+print('start', v[1])
    local nLoop = v[2]
   -- streaming api
   st = os.clock()
   for j=1, nLoop do
   	msgpack:pack(rb, v[3])
-	assert(msgpack:unpack_packet(unp))
+	msgpack:unpack_packet(unp)
     rb:shrink_by_hpos()
   end
   et = os.clock()
@@ -231,9 +251,9 @@ logger.notice('gc mem', collectgarbage("count"), "KB")
 --  print( "mp:", v[1], mptime, "sec", "native:", nLoop/mptime, "stream:", nLoop/mpstime, "orig:", nLoop/mpotime, "(times/sec)", (mpotime/mptime), "times faster")
   print( "mp:", v[1], mpstime, "sec", "stream:", nLoop/mpstime)--, "stream:", nLoop/mpstime )
 
-logger.notice('gc mem after', collectgarbage("count"), "KB")
+-- logger.notice('gc mem after', collectgarbage("count"), "KB")
 
 end
-
+]]
 
 return true

@@ -46,8 +46,8 @@ luact.start({
 		end
 	end
 
-	luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
-	luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
+	--luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
+	--luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
 	luact.tentacle(proc, "https", 8444, serde.kind.json)
 	luact.tentacle(proc, "http", 8081, serde.kind.json)
 	return true
