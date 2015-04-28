@@ -40,14 +40,14 @@ luact.start({
 		assert(parsed[2] == msgid and parsed[3] and parsed[4])
 		fin_count = fin_count + 1
 		print('proc finish', proto, port, fin_count)
-		if fin_count >= 2 then
+		if fin_count >= 4 then
 			print('graceful stop')
 			luact.stop()
 		end
 	end
 
-	--luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
-	--luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
+	luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
+	luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
 	luact.tentacle(proc, "https", 8444, serde.kind.json)
 	luact.tentacle(proc, "http", 8081, serde.kind.json)
 	return true
