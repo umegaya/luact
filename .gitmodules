@@ -16,3 +16,6 @@
 [submodule "luact/ext/json"]
 	path = luact/ext/json
 	url = git@github.com:umegaya/lua-resty-libcjson.git
+[submodule "luact/ext/lua-aws"]
+	path = luact/ext/lua-aws
+	url = https://github.com/umegaya/lua-aws.git

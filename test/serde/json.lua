@@ -7,6 +7,7 @@ luact.start({
 		gossip_port = false,	
 	}, 
 }, function ()
+	local luact = require 'luact.init'
 	local json = require 'luact.serde.json'
 	local uuid = require 'luact.uuid'
 	local pbuf = require 'luact.pbuf'
@@ -19,18 +20,14 @@ luact.start({
 
 	-- [[
 	local function serde(obj, verify)
-		logger.info('========= serde:test', obj)
 		local rb = memory.alloc_typed('luact_rbuf_t')
 		rb:init()
-		if type(obj) == 'table' then
-			for k,v in pairs(obj) do
-				print(k, v)
-			end
-		end
 		json:pack(rb, obj)
 		-- rb:dump()
-		local obj2 = json:unpack(rb)
-		print('serde', obj2)
+		local obj2, err = json:unpack(rb)
+		if type(err) == 'table' then
+			print('unpack error', err)
+		end
 		rb:fin()
 		memory.free(rb)
 		if verify then
@@ -62,14 +59,9 @@ luact.start({
 			1,2,3,4,5,
 		},
 		e = {
-			f = "g",
+			f = "テスト",
 		}
 	}, util.table_equals)
-	serde(function ()
-		return 123456
-	end, function (obj1, obj2)
-		return obj1() == obj2()
-	end)
 --]]
 end)
 
