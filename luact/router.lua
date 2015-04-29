@@ -230,7 +230,7 @@ end
 
 function _M.unregist(msgid)
 	coromap[msgid] = nil
-	timeout_periods[id] = nil
+	timeout_periods[msgid] = nil
 end
 
 function _M.regist(co, limit)

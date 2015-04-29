@@ -181,8 +181,8 @@ function common_serde_mt:pack_to_string(obj, len)
 	self:pack(rbuf_work, obj, len)
 	return ffi.string(rbuf_work:curr_p(), rbuf_work:available())
 end
-function common_serde_mt:unpack_from_string(str)
-	rbuf_work:from_buffer(ffi.cast('char *', str), #str)
+function common_serde_mt:unpack_from_string(str, len)
+	rbuf_work:from_buffer(ffi.cast('char *', str), len or #str)
 	return self:unpack(rbuf_work)
 end
 _M.serde_mt = common_serde_mt

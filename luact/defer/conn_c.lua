@@ -341,6 +341,7 @@ function conn_index:read_ext(io, unstrusted, sr)
 	sr:end_stream_unpacker(sup)
 end
 local web_rb_work = memory.alloc_typed('luact_rbuf_t')
+local fd_msgid_map = {}
 function conn_index:read_webext(io, unstrusted, sr)
 	local rb = web_rb_work
 	while self:alive() do
@@ -380,12 +381,36 @@ function conn_index:read_webext(io, unstrusted, sr)
 				exception.raise('invalid', 'encoding', parsed)
 			end
 		else -- client. receive response
-			local status, headers, body, blen = buf:payload()
-			--print(status, headers, ffi.string(body, blen))
-			rb:from_buffer(body, blen)
-			local parsed, len = sr:unpack(rb)
-			buf:fin()
-			router.external(self, parsed, len, untrusted)				
+			local status, headers = buf:payload()
+			if not headers:is_luact_server() then
+				-- reply from normal web service. msgid cannot use.
+				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid
+				-- HTTP 2 : stream_id seems to be able to use as msgid. => TODO
+				local msgid = fd_msgid_map[io:nfd()]
+				fd_msgid_map[io:nfd()] = nil
+				if msgid then
+					local ok = status == 200
+					if ok then
+						r = buf
+					else
+						r = exception.new('http', 'status', status)
+						buf:fin()
+					end
+					local wrapped = {
+						router.RESPONSE,
+						msgid, ok, r
+					}
+					router.external(self, wrapped, 4, untrusted)
+				else
+					logger.warn('http response received but recepient not found', io:nfd())
+				end
+			else
+				--print(status, headers, ffi.string(body, blen))
+				rb:from_buffer(body, blen)
+				local parsed, len = sr:unpack(rb)
+				buf:fin()
+				router.external(self, parsed, len, untrusted)
+			end				
 		end
 	end
 end
@@ -508,18 +533,23 @@ function conn_index:rawsend(...)
 				local verb = method:match('^([A-Z]+)$')
 				if verb then
 					-- for normal web service. acts like normal request with 1 table (payload)
-					local _, _, _, _, p, h, t = ...
-					if not (p and (t or h)) then
-						exception.raise('invalid', 'for REST request as RPC requires path and either header or body')
+					local _, _, _, _, _, p, h, t = ...
+					if not p then
+						exception.raise('invalid', 'for REST request as RPC requires path')
 					end
 					if not t then t = h; h = {} end
 					h[1] = verb; h[2] = path..p
-					self:serde():pack(self.wb.curr, t)
+					if t then -- pack body if any
+						self:serde():pack(self.wb.curr, t)
+					end
+					-- when response is received at read_webext, can lookup msgid from request.
+					-- HTTP 1 => only 1 request per connection at a time. so create fd - msgid map.
+					-- HTTP 2 => set stream_id as msgid (TODO)
+					if fd_msgid_map[self.io:nfd()] then
+						logger.report('connection already send http request?', self.io:nfd(), fd_msgid_map[self.io:nfd()])
+					end
+					fd_msgid_map[self.io:nfd()] = msgid
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), h)
-					router.unregist(msgid)
-					tentacle(function (s, co)
-						tentacle.resume(co, pcall(s.read, s))
-					end, self.io, tentacle.running())
 				else 
 					self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
