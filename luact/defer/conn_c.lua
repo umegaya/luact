@@ -354,16 +354,28 @@ function conn_index:read_webext(io, unstrusted, sr)
 			local ok, parsed, len = pcall(sr.unpack, sr, rb)
 			buf:fin()
 			if ok then
-				if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
-					table.insert(parsed, 2, p)
-					table.insert(parsed, 2, method)
+				if not headers:is_luact_agent() then
+					-- rest api call from normal web service. parsed is actual payload of rest api call
+					local wrapped = {
+						router.CALL, 
+						p, 
+						headers:luact_msgid(), 
+						method,
+						[6] = parsed,
+					}
+					router.external(self, wrapped, 6, untrusted)
 				else
-					table.insert(parsed, 2, p)
-					table.insert(parsed, 4, false) -- because nil cannot be inserted
-					table.insert(parsed, 4, method)
-					parsed[5] = nil
+					if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
+						table.insert(parsed, 2, p)
+						table.insert(parsed, 2, method)
+					else
+						table.insert(parsed, 2, p)
+						table.insert(parsed, 4, false) -- because nil cannot be inserted
+						table.insert(parsed, 4, method)
+						parsed[5] = nil
+					end
+					router.external(self, parsed, len + 2, untrusted)
 				end
-				router.external(self, parsed, len + 2, untrusted)
 			else
 				exception.raise('invalid', 'encoding', parsed)
 			end
@@ -490,11 +502,28 @@ function conn_index:rawsend(...)
 		self.wb.curr:reset()
 		if kind ~= router.RESPONSE then
 			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
-				assert(false, "TODO: support notification via http by using http2 server push")
+				exception.raise('invalid', "TODO: support notification via http by using http2 server push")
 			else
 				local _, path, msgid, method = ...
-				self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
-				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
+				local verb = method:match('^([A-Z]+)$')
+				if verb then
+					-- for normal web service. acts like normal request with 1 table (payload)
+					local _, _, _, _, p, h, t = ...
+					if not (p and (t or h)) then
+						exception.raise('invalid', 'for REST request as RPC requires path and either header or body')
+					end
+					if not t then t = h; h = {} end
+					h[1] = verb; h[2] = path..p
+					self:serde():pack(self.wb.curr, t)
+					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), h)
+					router.unregist(msgid)
+					tentacle(function (s, co)
+						tentacle.resume(co, pcall(s.read, s))
+					end, self.io, tentacle.running())
+				else 
+					self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
+					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
+				end
 			end
 		else
 			self:serde().pack_vararg(self.wb.curr, {kind, select(2, ...)}, select('#', ...))

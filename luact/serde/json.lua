@@ -3,10 +3,12 @@ local ffi = require 'ffiex.init'
 local reflect = require 'reflect'
 local common = require 'luact.serde.common'
 local writer = require 'luact.writer'
+local pbuf = require 'luact.pbuf'
 local memory = require 'pulpo.memory'
 local poller = require 'pulpo.poller'
 local thread = require 'pulpo.thread'
 local loader = require 'pulpo.loader'
+local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
 
 local WRITER_RAW = writer.WRITER_RAW
@@ -58,7 +60,7 @@ exception.define('json')
 
 
 -- msgpack serde
-local serde_mt = {}
+local serde_mt = util.copy_table(common.serde_mt)
 serde_mt.__index = serde_mt
 local function printer(buf, str, len)
 	local p = ffi.cast('luact_rbuf_t *', buf)
@@ -148,6 +150,7 @@ end
 function serde_mt:pack(buf, obj, len)
 	return serde_mt.pack_vararg(buf, obj, len)
 end
+
 
 -- unpack
 local stacks = {}

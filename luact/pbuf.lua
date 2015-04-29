@@ -45,6 +45,9 @@ function rbuf_index:from_buffer(buf, len)
 	self.max = len
 	self.hpos = 0
 end
+function rbuf_index:clear_buffer()
+	self:init()
+end
 function rbuf_index:reserve(sz)
 	local r = self.max - self.used
 	local buf

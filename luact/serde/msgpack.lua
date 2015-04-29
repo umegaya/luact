@@ -7,6 +7,7 @@ local exception = require 'pulpo.exception'
 local socket = require 'pulpo.socket'
 local tentacle = require 'pulpo.tentacle'
 local writer = require 'luact.writer'
+local util = require 'pulpo.util'
 local uuid = require 'luact.uuid'
 
 local WRITER_RAW = writer.WRITER_RAW
@@ -80,7 +81,7 @@ end
 
 
 -- msgpack serde
-local serde_mt = {}
+local serde_mt = util.copy_table(common.serde_mt)
 serde_mt.__index = serde_mt
 serde_mt.packer = {}
 local serde_mt_conv = ffi.new('luact_bytearray_scalar_conv_t')

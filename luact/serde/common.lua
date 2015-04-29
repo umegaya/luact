@@ -1,8 +1,11 @@
+-- TODO : this code requires major refactoring like move some uncommon part to proper module, 
+-- better built in ctype id management, etc ...
 local ffi = require 'ffiex.init'
 local reflect = require 'reflect'
 local socket = require 'pulpo.socket'
 local memory = require 'pulpo.memory'
 local exception = require 'pulpo.exception'
+local pbuf = require 'luact.pbuf'
 
 _M = {}
 
@@ -169,6 +172,20 @@ function _M.ctype_from_id(id)
 	return map_id_ctype[tmp], map_id_ctype_ptr[tmp]
 end
 
+-- common serde mt
+local common_serde_mt = {}
+local rbuf_work = memory.alloc_typed('luact_rbuf_t')
+rbuf_work:init()
+function common_serde_mt:pack_to_string(obj, len)
+	rbuf_work:init()
+	self:pack(rbuf_work, obj, len)
+	return ffi.string(rbuf_work:curr_p(), rbuf_work:available())
+end
+function common_serde_mt:unpack_from_string(str)
+	rbuf_work:from_buffer(ffi.cast('char *', str), #str)
+	return self:unpack(rbuf_work)
+end
+_M.serde_mt = common_serde_mt
 
 -- TODO : move below to serpent and also using ctype id
 local custom_pack = {}
