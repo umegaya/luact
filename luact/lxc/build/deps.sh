@@ -35,13 +35,13 @@ git clone https://github.com/umegaya/picohttpparser --branch $HTTP_PARSER_VERSIO
 pushd picohttpparser
 make so && objcopy -S libpicohttpparser.so && make install_so
 popd
+rm -rf picohttpparser
 # -- lua cjson
-git clone https://github.com/umegaya/cJSON --branch $JSON_VERSION
-pushd lua-cjson
-gcc cJSON.c -o libcjson.so -shared -fPIC
-install -D -m 755 libcjson.so /usr/local/lib/
+git clone https://github.com/lloyd/yajl --branch $JSON_VERSION
+pushd yajl
+./configure && make installpopd
 popd
-popd
+rm -rf yajl
 
 # -- docker machine
 DOCKER_MACHINE_URL=https://github.com/docker/machine/releases/download/$DOCKER_MACHINE_VERSION/docker-machine_linux-amd64

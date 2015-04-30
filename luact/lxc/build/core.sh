@@ -5,6 +5,14 @@ git clone https://github.com/umegaya/luact.git --branch=$LUACT_VERSION
 pushd luact
 sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
 git submodule update --init --recursive
+# update foo repository again
+pushd luact/test/deploy/foo
+sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+pushd bar/baz
+sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+popd
+git submodule update --init --recursive
+popd
 # Initialize ffiex
 apt-get -y install gcc
 apt-get -y install g++
