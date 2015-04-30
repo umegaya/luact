@@ -1,4 +1,6 @@
 machine:
+  pre:
+    - sudo apt-get install curl
   services:
     - docker
 
