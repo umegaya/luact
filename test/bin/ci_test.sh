@@ -4,5 +4,7 @@ if [ $# -ge 1 ]; then
 	echo "checkout $1"
 	git fetch && git checkout origin/$1 && git submodule update --recursive
 fi
+# install tools
+apt-get -y install curl
 echo "exec: $LJBIN test/tools/run.lua"
 bash -c "$LJBIN test/tools/run.lua"
