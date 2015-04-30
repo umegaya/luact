@@ -16,7 +16,7 @@ luact.start({
 	luact.listen('https+json://0.0.0.0:8444')
 	luact.listen('http+json://0.0.0.0:8081')
 	local json_serde = serde[serde.kind.json]
-	local payload_fixture = json_serde:unpack_from_string(io.open('./test/tools/push_payload.json'):read('*a'))
+	local body_fixture = json_serde:unpack_from_string(io.open('./test/tools/push_body.json'):read('*a'))
 	local payload_received 
 	luact.register('/rest/api', function ()
 		return {
@@ -24,8 +24,11 @@ luact.start({
 				print('login called', acc, pass)
 				return pass == 3
 			end,
-			push = function (payload)
-				assert(util.table_equals(payload_fixture, payload))
+			push = function (verb, headers, body)
+				assert(verb == "POST")
+				assert(headers["User-Agent"] == "foo")
+				local body_json = json_serde:unpack_from_string(body)
+				assert(util.table_equals(body_fixture, body_json))
 				payload_received = true
 				return "ok"
 			end,
@@ -73,7 +76,8 @@ luact.start({
 	luact.tentacle(proc, "http", 8081, serde.kind.json)
 	-- [=[
 	luact.tentacle(function ()
-		local ec, out = luact.process.execute([[curl -s -k --data @./test/tools/push_payload.json https://127.0.0.1:8444/rest/api/push]])
+		local ec, out = luact.process.execute(
+			[[curl -s -k -H 'User-Agent: foo' --data @./test/tools/push_body.json https://127.0.0.1:8444/rest/api/push]])
 		assert(payload_received, "payload not received:"..out)
 		fin_count = fin_count + 1
 		print('json request finish', fin_count)

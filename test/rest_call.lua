@@ -26,7 +26,7 @@ luact.start({
 
 	resp = ref.GET('/response-headers?key=val') 
 	status, headers = resp:payload()
-	assert(headers:getstr('key') == 'val')
+	assert(headers['key'] == 'val')
 	resp:fin()
 end)
 

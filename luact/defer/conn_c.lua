@@ -348,24 +348,27 @@ function conn_index:read_webext(io, unstrusted, sr)
 		local buf = io:read()
 		if not buf then break end -- close connection
 		if self:is_server() then
-			local _, path, headers, body, blen = buf:payload()
+			local verb, path, headers, body, blen = buf:raw_payload()
 			-- print(path, headers, ffi.string(body, blen))
 			local p, method = path:match('(.*)/([^/]+)/?$')
-			rb:from_buffer(body, blen)
-			local ok, parsed, len = pcall(sr.unpack, sr, rb)
-			buf:fin()
-			if ok then
-				if not headers:is_luact_agent() then
-					-- rest api call from normal web service. parsed is actual payload of rest api call
-					local wrapped = {
-						router.CALL, 
-						p, 
-						headers:luact_msgid(), 
-						method,
-						[6] = parsed,
-					}
-					router.external(self, wrapped, 6, untrusted)
-				else
+			if not headers:is_luact_agent() then
+				-- rest api call from normal web service. parsed is actual payload of rest api call
+				local wrapped = {
+					router.CALL, 
+					p, 
+					headers:luact_msgid(), 
+					method,
+					[6] = verb,
+					[7] = headers:as_table(),
+					[8] = ffi.string(body, blen),
+				}
+				buf:fin()
+				router.external(self, wrapped, 8, untrusted)
+			else
+				rb:from_buffer(body, blen)
+				local ok, parsed, len = pcall(sr.unpack, sr, rb)
+				buf:fin()
+				if ok then
 					if bit.band(parsed[1], router.NOTICE_MASK) ~= 0 then
 						table.insert(parsed, 2, p)
 						table.insert(parsed, 2, method)
@@ -376,12 +379,12 @@ function conn_index:read_webext(io, unstrusted, sr)
 						parsed[5] = nil
 					end
 					router.external(self, parsed, len + 2, untrusted)
+				else
+					exception.raise('invalid', 'encoding', parsed)
 				end
-			else
-				exception.raise('invalid', 'encoding', parsed)
 			end
 		else -- client. receive response
-			local status, headers, body, blen = buf:payload()
+			local status, headers, body, blen = buf:raw_payload()
 			if not headers:is_luact_server() then
 				-- reply from normal web service. msgid cannot use.
 				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid

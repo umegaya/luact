@@ -2,7 +2,10 @@ local actor = require 'luact.actor'
 local tentacle = require 'pulpo.tentacle'
 local mod = require 'luact.module'
 local clock = require 'luact.clock'
+local serde = require 'luact.serde'
+local json = serde[serde.kind.json]
 local util = require 'pulpo.util'
+local aws_util = require 'lua-aws.util'
 local _M = (require 'pulpo.package').module('luact.defer.deploy_c')
 
 local actor_dependency = {}
@@ -15,17 +18,33 @@ local default = {
 local deploy_methods = {
 	["github.com"] = {
 		buf = ffi.new('char[256]'),
-		filter = function (self, payload)
-			if payload.header["X-GitHub-Event"] ~= "push" then
+		filter = function (self, verb, headers, body)
+			if headers["X-GitHub-Event"] ~= "push" then
 				return false
 			end
-			if not payload.body.repository.full_name:match(self.opts.repository) then
+			local secret = self.opts.secret
+			if secret then
+				local sig = headers["X-Hub-Signature"]
+				if not sig then
+					logger.info('web hook ignored by not specifiying X-Hub-Signature')
+					return false
+				end
+				local compute_sig = aws_util.hmac(secret, body, 'hex')
+				if sig ~= compute_sig then
+					logger.info('web hook ignored by signature not matched', sig, compute_sig)
+					return false
+				end
+			else
+				return false
+			end
+			body = json:unpack_from_string(body)
+			if not body.repository.full_name:match(self.opts.repository) then
 				return false
 			end
 			for i=1,#self.opts.branches do
 				local b = self.opts.branches[i]
-				if payload.body.ref:match(b) then
-					return true
+				if body.ref:match(b) then
+					return body
 				end
 			end
 			return false
@@ -94,13 +113,15 @@ end
 
 
 -- module functions
-function _M.hook_commit(payload, opts)
-	if _M.deploy_method:filter(payload) then
+function _M.hook_commit(verb, header, body, opts)
+	if _M.deploy_method:filter(verb, header, body) then
 		local tmp = util.copy_table(default)
 		opts = util.merge_table(tmp, opts)
 		_M.deploy_method:update(opts)
+		return true
 	else
 		logger.info('commit payload received but ignores')
+		return false
 	end
 end
 
