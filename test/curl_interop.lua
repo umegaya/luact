@@ -9,6 +9,7 @@ luact.start({
 }, function ()
 	local luact = require 'luact.init'
 	local serde = require 'luact.serde'
+	local ffi = require 'ffiex.init'
 	local util = luact.util
 	luact.listen('https://0.0.0.0:8443')
 	luact.listen('http://0.0.0.0:8080')
@@ -34,14 +35,25 @@ luact.start({
 	local payload = {1, msgid, "user", nil, 3}
 	local pbuf = require 'luact.pbuf'
 	local fin_count = 0
-	local function proc(proto, port, sr_kind)
+	local function proc(proto, port, sr_kind, bin)
 		local buf = luact.memory.alloc_typed('luact_rbuf_t')
 		buf:init()
 		local sr = serde[sr_kind]
 		sr:pack(buf, payload)
-		local cmd = ([[echo '%s' | curl -s -k -H "User-Agent: Luact-RPC" --data-binary @- %s://127.0.0.1:%s/rest/api/login]]):format(
-			luact.util.hex_escape(buf:curr_p(), buf:available()), proto, tostring(port)
-		)
+		local cmd
+		if bin then
+			cmd = ([[echo %s '%s' | curl -s -k -H 'User-Agent: Luact-RPC' --data-binary @- %s://127.0.0.1:%s/rest/api/login]]):format(
+				ffi.os == "Linux" and "-e" or "", 
+				luact.util.hex_escape(buf:curr_p(), buf:available()), proto, tostring(port)
+			)
+			if ffi.os == "Linux" then
+				cmd = ('bash -c "%s"'):format(cmd)
+			end
+		else
+			cmd = ([[curl -s -k -H "User-Agent: Luact-RPC" -d '%s' @- %s://127.0.0.1:%s/rest/api/login]]):format(
+				ffi.string(buf:curr_p(), buf:available()), proto, tostring(port)
+			)
+		end
 		local exitcode, out = luact.process.execute(cmd)
 		buf:fin()
 		buf:from_buffer(ffi.cast('char *', out), #out)
@@ -55,10 +67,11 @@ luact.start({
 		end
 	end
 
-	luact.tentacle(proc, "https", 8443, serde.kind.msgpack)
-	luact.tentacle(proc, "http", 8080, serde.kind.msgpack)
+	luact.tentacle(proc, "https", 8443, serde.kind.msgpack, true)
+	luact.tentacle(proc, "http", 8080, serde.kind.msgpack, true)
 	luact.tentacle(proc, "https", 8444, serde.kind.json)
 	luact.tentacle(proc, "http", 8081, serde.kind.json)
+	-- [=[
 	luact.tentacle(function ()
 		local ec, out = luact.process.execute([[curl -s -k --data @./test/tools/push_payload.json https://127.0.0.1:8444/rest/api/push]])
 		assert(payload_received, "payload not received:"..out)
@@ -69,6 +82,7 @@ luact.start({
 			luact.stop()
 		end
 	end)
+	--]=]
 	return true
 end)
 

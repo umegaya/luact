@@ -1,7 +1,7 @@
 local exlib = require 'luact.exlib'
 local pulpo = require 'pulpo.init'
 local opts = {
-	datadir = './tmp'
+	datadir = '/tmp/luact'
 }
 pulpo.initialize(opts)
 pulpo.run({

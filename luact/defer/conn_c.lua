@@ -349,7 +349,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 		if not buf then break end -- close connection
 		if self:is_server() then
 			local _, path, headers, body, blen = buf:payload()
-			--print(path, headers, ffi.string(body, blen))
+			-- print(path, headers, ffi.string(body, blen))
 			local p, method = path:match('(.*)/([^/]+)/?$')
 			rb:from_buffer(body, blen)
 			local ok, parsed, len = pcall(sr.unpack, sr, rb)
@@ -381,7 +381,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 				exception.raise('invalid', 'encoding', parsed)
 			end
 		else -- client. receive response
-			local status, headers = buf:payload()
+			local status, headers, body, blen = buf:payload()
 			if not headers:is_luact_server() then
 				-- reply from normal web service. msgid cannot use.
 				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid
@@ -405,7 +405,6 @@ function conn_index:read_webext(io, unstrusted, sr)
 					logger.warn('http response received but recepient not found', io:nfd())
 				end
 			else
-				--print(status, headers, ffi.string(body, blen))
 				rb:from_buffer(body, blen)
 				local parsed, len = sr:unpack(rb)
 				buf:fin()
@@ -539,6 +538,8 @@ function conn_index:rawsend(...)
 					end
 					if not t then t = h; h = {} end
 					h[1] = verb; h[2] = path..p
+					local _, _, address = _M.parse_hostname(ffi.string(self.hostname))
+					h.host = address
 					if t then -- pack body if any
 						self:serde():pack(self.wb.curr, t)
 					end

@@ -113,7 +113,6 @@ function gossip_index:run_reader(mship)
 		a:init()
 		len = self.udp:read(buf, mtu, a)
 		if len then
-			-- logger.info('receive gossip', len)
 			self:receive(mship, buf, len, a)
 		end
 	end
@@ -126,8 +125,8 @@ function gossip_index:gossip(mship)
 		-- it may resume gossip_index:leave
 		local vec, len = self.queue:pop(mship, mship.opts.mtu)
 		if vec and len then
-			-- logger.info('sendgossip', n:address())
-			self.udp:writev(vec, len, n:address())
+			local r = self.udp:writev(vec, len, n:address())
+			-- logger.info('sendgossip', n:address(), r)
 		end
 	end
 end

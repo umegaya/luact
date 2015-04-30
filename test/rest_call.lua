@@ -29,3 +29,5 @@ luact.start({
 	assert(headers:getstr('key') == 'val')
 	resp:fin()
 end)
+
+return true

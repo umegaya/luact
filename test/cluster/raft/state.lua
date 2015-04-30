@@ -210,13 +210,23 @@ local ok,r = xpcall(function ()
 	assert(util.table_equals(fsm, result_fsm), "log should be applied correctly")
 
 	local idxlist = { 8, 12, 16 } -- 4 is removed by snapshot:trim()
-	local count = 0
+	local files = {}
 	for file in fs.opendir(SNAPSHOT_DIR):iter() do
 		if file:match(snapshot.path_pattern) then
-			count = count + 1
-			-- print(count, idxlist[count], fs.path(SNAPSHOT_DIR, file), ffi.string(ss:path_of(idxlist[count])))
-			assert(fs.path(SNAPSHOT_DIR, file) == ffi.string(ss:path_of(idxlist[count])), "snapshot should be created correclty")
+			table.insert(files, file)
 		end
+	end
+	assert(#files == #idxlist)
+	for _, file in ipairs(files) do
+		local found 
+		for _, idx in ipairs(idxlist) do
+			-- print(idx, fs.path(SNAPSHOT_DIR, file), ffi.string(ss:path_of(idx)))
+			if fs.path(SNAPSHOT_DIR, file) == ffi.string(ss:path_of(idx)) then
+				found = true
+				break
+			end
+		end
+		assert(found, "snapshot should be created correclty")
 	end
 
 	local remain_log_start_idx = tonumber(ss:last_index()) - opts.log_compaction_margin + 1

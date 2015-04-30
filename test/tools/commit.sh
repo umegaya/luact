@@ -1,4 +1,11 @@
 #!/bin/bash -eu
+EMAIL=`git config --global user.email`
+NAME=`git config --global user.name`
+if [[ -z $EMAIL || -z $NAME ]]; then
+	git config --global user.email "you@example.com"
+	git config --global user.name "Your Name"
+fi
+
 pushd ./test/deploy/foo
 	git reset --hard 4f4dc0f06330f77e1a7f55db1249d7502ee51f15
 	pushd ./bar

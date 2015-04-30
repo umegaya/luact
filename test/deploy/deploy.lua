@@ -45,7 +45,7 @@ tools.start_luact(1, {
 		last_commit = "HEAD^1",
 	})
 	print(' ==== start wait')
-	luact.clock.sleep(1.0)
+	luact.clock.sleep(4.0)
 	print(' ==== end wait')
 	for i=1,n_act do
 		assert(actors[i]:bar() == 'foo.baz ver3')
