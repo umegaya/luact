@@ -207,7 +207,7 @@ function range_mt:start_replica_set(remote)
 	)
 	-- wait for this node becoming leader
 	while true do
-		if uuid.valid(self.replicas[0]) then
+		if self.replica_available >= _M.NUM_REPLICA then
 			break
 		end
 		luact.clock.sleep(0.5)

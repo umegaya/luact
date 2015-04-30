@@ -108,12 +108,12 @@ function _M.initialize(parent_address, opts)
 	local nodelist = parent_address and {actor.root_of(parent_address, 1)} or nil
 	-- initialize module wide shared variables
 	range_manager = range.get_manager(nodelist, configure_datadir(opts), opts)
-	logger.notice('waiting dht module initialization finished')
 	while not range_manager:initialized() do
 		io.write(pulpo.thread_id); io.stdout:flush()
 		luact.clock.sleep(1)
 	end
 	io.write('\n')
+	logger.notice('waiting dht module initialization finished')
 end
 
 function _M.finalize()
