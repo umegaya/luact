@@ -202,6 +202,8 @@ end
 -- should call after range registered to range manager caches/ranges
 function range_mt:start_replica_set(remote)
 	remote = remote or actor.root_of(nil, luact.thread_id)
+	-- after this arbiter become leader, range_mt:change_replica_set is called, and it starts scanner.
+	-- scanner check number of replica and if short, call add_replica_set to add replica.
 	local a = remote.arbiter(
 		self:arbiter_id(), scanner.range_fsm_factory, { initial_node = true }, self
 	)
