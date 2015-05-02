@@ -1,12 +1,12 @@
 #!/bin/bash
 TYPE=$1
-if [ $# -lt 1 ]; then
-	TYPE=core
+if [ ! -z $TYPE ]; then
+	TYPE=":$TYPE"
 fi
 cp luact/lxc/docker/Dockerfile.$TYPE ./Dockerfile
 docker build --no-cache=true -t umegaya/luact:$TYPE .
 rm Dockerfile
-docker push umegaya/luact:$TYPE
+docker push umegaya/luact$TYPE # if no type is provided, generate digest also.
 
 # remove unused image
 # docker rmi $(docker images | grep "^<none>" | awk "{print \$3}")

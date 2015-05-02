@@ -15,57 +15,67 @@ local default = {
 }
 
 -- deploy methods
-local deploy_methods = {
-	["github.com"] = {
-		buf = ffi.new('char[256]'),
-		filter = function (self, verb, headers, body)
-			if headers["X-GitHub-Event"] ~= "push" then
-				return false
-			end
-			local secret = self.opts.secret
-			if secret then
-				local sig = headers["X-Hub-Signature"]
-				if not sig then
-					logger.info('web hook ignored by not specifiying X-Hub-Signature')
-					return false
-				end
-				local compute_sig = aws_util.hmac(secret, body, 'hex')
-				if sig ~= compute_sig then
-					logger.info('web hook ignored by signature not matched', sig, compute_sig)
-					return false
-				end
-			else
-				return false
-			end
-			body = json:unpack_from_string(body)
-			if not body.repository.full_name:match(self.opts.repository) then
-				return false
-			end
-			for i=1,#self.opts.branches do
-				local b = self.opts.branches[i]
-				if body.ref:match(b) then
-					return body
-				end
-			end
+local github_methods = {
+	buf = ffi.new('char[256]'),	
+}
+
+function github_methods:filter(verb, headers, body)
+	if headers["X-GitHub-Event"] ~= "push" then
+		return false
+	end
+	local secret = self.opts.secret
+	if secret then
+		local sig = headers["X-Hub-Signature"]
+		if not sig then
+			logger.info('web hook ignored by not specifiying X-Hub-Signature')
 			return false
-		end,
-		change_files = function (self, last_commit)
-			-- compute git diff iterate through submodules
-			return mod.diff_recursive(last_commit, 'HEAD', self.opts.diff_base)
-		end,
-		pull = function (self)
-			local p = process.open(('cd %s && git pull'):format(self.opts.diff_base))
-			while true do
-				local ok, r = p:read(self.buf, 256)
-				if not ok then
-					assert(r ~= 0, "fail to git pull:"..tostring(r))
-					break
-				else
-					print('output:', ffi.string(self.buf, ok))
-				end
-			end
-		end,
-	}
+		end
+		local compute_sig = aws_util.hmac(secret, body, 'hex')
+		if sig ~= compute_sig then
+			logger.info('web hook ignored by signature not matched', sig, compute_sig)
+			return false
+		end
+	else
+		return false
+	end
+	body = json:unpack_from_string(body)
+	if not body.repository.full_name:match(self.opts.repository) then
+		return false
+	end
+	for i=1,#self.opts.branches do
+		local b = self.opts.branches[i]
+		if body.ref:match(b) then
+			return body
+		end
+	end
+	return false
+end
+function github_methods:change_files(last_commit)
+	-- compute git diff iterate through submodules
+	return mod.diff_recursive(last_commit, 'HEAD', self.opts.diff_base)
+end
+function github_methods:pull()
+	local p = process.open(('cd %s && git pull'):format(self.opts.diff_base))
+	while true do
+		local ok, r = p:read(self.buf, 256)
+		if not ok then
+			assert(r ~= 0, "fail to git pull:"..tostring(r))
+			break
+		else
+			print('output:', ffi.string(self.buf, ok))
+		end
+	end
+end
+
+local gitlab_methods = util.copy_table(github_methods)
+function gitlab_methods:filter(verb, headers, body)
+	-- alas, from gitlab payload, cannot get anything to verify sender :<
+	return true
+end
+
+local deploy_methods = {
+	["gitlab.com"] = gitlab_methods,
+	["github.com"] = github_methods,
 }
 
 -- deploy src
@@ -101,11 +111,11 @@ function src_mt:run_update(opts)
 		goto AGAIN
 	end
 	mod.gc()
+	self.thread = nil
 end
 function src_mt:update(opts)
 	if not self.thread then
 		self.thread = tentacle(self.run_update, self, opts)
-		self.thread = nil
 	else
 		table.insert(deploy_queue, opts)
 	end
