@@ -1,10 +1,11 @@
 local node = require 'luact.iaas.node'
 local uuid = require 'luact.uuid'
-local json = require 'dkjson'
+local serde = require 'luact.serde'
+local json = serde[serde.kind.json]
 local cmd = arg[1]
 if cmd == "create" then
 	local name, kind = arg[2], arg[3]
-	local config = json.decode(arg[4])
+	local config = json:unpack_from_string(arg[4])
 	local target_conf
 	if #kind == 0 then
 		for k,v in pairs(config) do
