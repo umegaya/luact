@@ -148,6 +148,14 @@ function _M.initialize(opts)
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 
+	-- initialize pulpo io modules
+	require('pulpo.io.ssl').initialize(opts.ssl)
+	require('pulpo.io.process').initialize(_M.clock.alarm)
+	_M.process = pulpo.evloop.io.process
+
+	-- deploy module can initialize after process module is initialized
+	pulpo_package.init_modules(exlib.LUACT_DEPLOY)
+
 	-- initialize other modules
 	uuid.initialize(actor.uuid_metatable, opts.startup_at, opts.local_address)
 	actor.initialize(opts.actor)
@@ -159,12 +167,6 @@ function _M.initialize(opts)
 	_M.dht = vid.dht
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
-
-	-- initialize pulpo io modules
-	require('pulpo.io.ssl').debug = true
-	require('pulpo.io.ssl').initialize(opts.ssl)
-	require('pulpo.io.process').initialize(_M.clock.alarm)
-	_M.process = pulpo.evloop.io.process
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id

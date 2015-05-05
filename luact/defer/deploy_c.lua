@@ -1,3 +1,4 @@
+local luact = require 'luact.init'
 local actor = require 'luact.actor'
 local tentacle = require 'pulpo.tentacle'
 local mod = require 'luact.module'
@@ -6,6 +7,7 @@ local serde = require 'luact.serde'
 local json = serde[serde.kind.json]
 local util = require 'pulpo.util'
 local aws_util = require 'lua-aws.util'
+local process = luact.process
 local _M = (require 'pulpo.package').module('luact.defer.deploy_c')
 
 local actor_dependency = {}
@@ -21,6 +23,7 @@ local github_methods = {
 
 function github_methods:filter(verb, headers, body)
 	if headers["X-GitHub-Event"] ~= "push" then
+		logger.info('web hook ignored by not from github')
 		return false
 	end
 	local secret = self.opts.secret
@@ -50,11 +53,21 @@ function github_methods:filter(verb, headers, body)
 	end
 	return false
 end
-function github_methods:change_files(last_commit)
+function github_methods:change_files()
 	-- compute git diff iterate through submodules
-	return mod.diff_recursive(last_commit, 'HEAD', self.opts.diff_base)
+	return mod.diff_recursive(self.last_commit, 'HEAD', self.opts.diff_base)
 end
-function github_methods:pull()
+function github_methods:pull(last_commit)
+	if last_commit then
+		self.last_commit = last_commit
+	else
+		local ec, output = process.execute(('cd %s && git log -1 --pretty="%%H"'):format(self.opts.diff_base))
+		if ec ~= 0 then
+			logger.warn('get current last commit fails', ec)
+			return
+		end
+		self.last_commit = output
+	end
 	local p = process.open(('cd %s && git pull'):format(self.opts.diff_base))
 	while true do
 		local ok, r = p:read(self.buf, 256)
@@ -62,7 +75,7 @@ function github_methods:pull()
 			assert(r ~= 0, "fail to git pull:"..tostring(r))
 			break
 		else
-			print('output:', ffi.string(self.buf, ok))
+			logger.debug('output:', ffi.string(self.buf, ok))
 		end
 	end
 end
@@ -83,11 +96,9 @@ local src_mt = {}
 src_mt.__index = src_mt
 function src_mt:run_update(opts)
 ::AGAIN::
-	local last_commit = opts.last_commit or 
-		process.execute(('cd %s && git log -1 --pretty="%H"'):format(self.opts.diff_base))
-	self:pull()
+	self:pull(opts.last_commit)
 	mod.invalidate_submodule_cache()
-	local list = mod.compute_change_set(self:change_files(last_commit))
+	local list = mod.compute_change_set(self:change_files())
 	local count = 0
 	for f,_ in pairs(list) do
 		local d = actor_dependency[f]
@@ -126,11 +137,11 @@ end
 function _M.hook_commit(verb, header, body, opts)
 	if _M.deploy_method:filter(verb, header, body) then
 		local tmp = util.copy_table(default)
-		opts = util.merge_table(tmp, opts)
+		opts = opts and util.merge_table(tmp, opts) or tmp
 		_M.deploy_method:update(opts)
 		return true
 	else
-		logger.info('commit payload received but ignores')
+		logger.info('commit payload received but ignored')
 		return false
 	end
 end
