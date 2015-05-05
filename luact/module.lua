@@ -36,6 +36,7 @@ function _M.diff_recursive(prev, next, path, diffs, submods)
 	path = path or "."
 	diffs = diffs or {}
 	submods = submods or {}
+	-- print('cmdl', ("cd %s && git diff --name-only %s %s"):format(path, prev, next))
 	local st, out = process.execute(("cd %s && git diff --name-only %s %s"):format(path, prev, next))
 	if st ~= 0 then
 		error('git diff error:'..tostring(st))

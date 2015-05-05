@@ -66,13 +66,13 @@ function github_methods:pull(last_commit)
 			logger.warn('get current last commit fails', ec)
 			return
 		end
-		self.last_commit = output
+		self.last_commit = output:sub(1, -2)
 	end
 	local p = process.open(('cd %s && git pull'):format(self.opts.diff_base))
 	while true do
 		local ok, r = p:read(self.buf, 256)
 		if not ok then
-			assert(r ~= 0, "fail to git pull:"..tostring(r))
+			assert(r == 0, "fail to git pull:"..tostring(r))
 			break
 		else
 			logger.debug('output:', ffi.string(self.buf, ok))
@@ -96,9 +96,11 @@ local src_mt = {}
 src_mt.__index = src_mt
 function src_mt:run_update(opts)
 ::AGAIN::
+	logger.info('start update task')
 	self:pull(opts.last_commit)
 	mod.invalidate_submodule_cache()
 	local list = mod.compute_change_set(self:change_files())
+	logger.info(#list, 'file(s) changed')
 	local count = 0
 	for f,_ in pairs(list) do
 		local d = actor_dependency[f]
@@ -121,8 +123,10 @@ function src_mt:run_update(opts)
 		end
 		goto AGAIN
 	end
+	logger.info('no more update task in queue. collect unused module table')
 	mod.gc()
 	self.thread = nil
+	logger.info('update done')
 end
 function src_mt:update(opts)
 	if not self.thread then
