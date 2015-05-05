@@ -23,6 +23,7 @@ local vid = require 'luact.vid'
 local peer = require 'luact.peer'
 local common = require 'luact.serde.common'
 local deploy = require 'luact.deploy'
+local mod = require 'luact.module'
 
 local _M = {}
 _M.event = require 'pulpo.event'
@@ -65,28 +66,14 @@ factory = {
 		return fn(...)
 	end,
 	["string"] = function (str, ...)
-		if str:find("/") or str:match("%.lua$") then
-			return factory["file"](str, ...)
-		else
-			return factory["module"](str, ...)
-		end
-	end,
-	["file"] = function (file)
-		local ok, err = loadfile(file)
+		local ok, err = loadfile(str)
 		if err then
 			exception.raise('runtime', err)
 		end
 		return ok()
 	end,
-	["module"] = function (modname)
-		local ok, r = pcall(require, modname)
-		if not ok then
-			exception.raise('runtime', r)
-		end
-		return r
-	end,
 }
-local from_file, from_module = factory["file"], factory["module"]
+local from_file = factory["string"]
 
 -- additional thread startup routines
 -- caution : these routine is re-created on destination thread, so no upvalue can be used.
@@ -215,7 +202,6 @@ function _M.initialize(opts)
 					return false, exception.new('actor_not_found', 'peer', id)
 				end
 			end,
-			["require"] = _M.require,
 			["load"] = _M.load,
 		}
 		return _M.root
@@ -225,10 +211,8 @@ function _M.initialize(opts)
 	deploy.config_method(opts.deploy.method, opts.deploy)
 end
 function _M.load(file, opts)
+	print('actor load')
 	return actor.new(from_file, file, opts)
-end
-function _M.require(module, opts)
-	return actor.new(from_module, module, opts)
 end
 function _M.supervise(target, opts, ...)
 	if type(target) == 'string' then

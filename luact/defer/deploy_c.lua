@@ -100,15 +100,17 @@ function src_mt:run_update(opts)
 	self:pull(opts.last_commit)
 	mod.invalidate_submodule_cache()
 	local list = mod.compute_change_set(self:change_files())
-	logger.info(#list, 'file(s) changed')
-	local count = 0
+	local count, file_count, deploy_count = 0, 0, 0
 	for f,_ in pairs(list) do
+		file_count = file_count + 1
 		local d = actor_dependency[f]
+		logger.info('change file', f, 'dependency', d and #d)
 		if d then
 			for j=#d,1,-1 do
 				actor.destroy(d[j], "update")
 				table.remove(d)
 				count = count + 1
+				deploy_count = deploy_count + 1
 				if count > opts.update_per_resume then
 					clock.sleep(0.1)
 					count = 0
@@ -116,6 +118,7 @@ function src_mt:run_update(opts)
 			end
 		end
 	end
+	logger.info('file changed:', file_count, 'actor updated:', deploy_count)
 	if #deploy_queue > 0 then
 		opts = unpack(table.remove(deploy_queue, 1))
 		for i=1,#deploy_queue do
@@ -160,6 +163,7 @@ function _M.set_actor_dependency(actor, src)
 	if not actor_dependency[src] then
 		actor_dependency[src] = {}
 	end
+	--logger.info('set_actor_dependency', actor, src)
 	table.insert(actor_dependency[src], actor)
 end
 

@@ -15,10 +15,9 @@ _M.LUACT_BUFFER = pulpo_package.create_runlevel({
 _M.LUACT_IO = pulpo_package.create_runlevel({
 	"luact.defer.conn_c", "luact.defer.clock_c",
 })
-
 -- this group depends on clock module
 _M.LUACT_DEPLOY = pulpo_package.create_runlevel({
-	"luact.defer.deploy_c"
+	"luact.defer.deploy_c", "luact.defer.module_c"
 })
 
 return _M

@@ -5,8 +5,9 @@ os.execute('bash ./test/tools/commit.sh --reset')
 tools.start_luact(1, {
 	deploy = {
 		method = "github.com",
-		pull = function (self)
+		pull = function (self, last_commit)
 			print('skip pull')
+			self.last_commit = last_commit
 		end,
 		repository = "foo/test",
 		branches = {

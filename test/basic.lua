@@ -1,5 +1,6 @@
 local luact = require 'luact.init'
 
+print('luact strt')
 luact.start({
 	datadir = "/tmp/luact",
 	n_core = 1, exclusive = true,
@@ -21,21 +22,18 @@ luact.start({
 			logger.report('destroy called')
 		end,			
 	}
+	print('luact run')
 	local a2 = luact.load "./test/tools/test_actor.lua"
-	local a3 = luact.require "serpent"
-
-	print('actors', a1, a2, a3)
+	print('actors', a1, a2)
 
 	assert(a1.hoge(2, nil, false) == 'hoge2')
 	local x, y = a1.recv_nil(nil, 3)
 	assert(x == nil and y == 6)
 	assert(a2:fuga(3) == 4)
-	assert(a3.dump({"remote", "serpent"}) == [[do local _={[1]="remote",[2]="serpent"};return _;end]])
-	luact.kill(a1, a2, a3)
+	luact.kill(a1, a2)
 	assert(_G.g_destroy)
 	local ok, r = pcall(a1.hoge, 2)
 	assert(not ok and (r:is('actor_no_body')))
-	luact.stop()
 end)
 
 return true
