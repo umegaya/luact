@@ -49,5 +49,9 @@ local peer_metatable = {
 function _M.new(peer_id, dest_path)
 	return setmetatable({conn = conn.new_peer(peer_id), path = dest_path}, peer_metatable)
 end
+function _M.close(peer_id)
+	local c = conn.new_peer(peer_id)
+	return c:close()
+end
 
 return _M

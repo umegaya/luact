@@ -202,6 +202,15 @@ function _M.initialize(opts)
 					return false, exception.new('actor_not_found', 'peer', id)
 				end
 			end,
+			close_peer = function (id)
+				local c = conn.get_by_peer_id(id)
+				if c then
+					c:close()
+					return true
+				else
+					return false, exception.new('actor_not_found', 'peer', id)
+				end				
+			end,
 			["load"] = _M.load,
 		}
 		return _M.root
@@ -266,6 +275,10 @@ function _M.peer(dest_path)
 	if not dest_path then exception.raise('invalid', 'peer require destination path') end
 	local id = _M.tentacle.get_context()[router.CONTEXT_PEER_ID]
 	return id and peer.new(id, dest_path)
+end
+function _M.close_peer()
+	local id = _M.tentacle.get_context()[router.CONTEXT_PEER_ID]
+	return id and peer.close(id)
 end
 function _M.monitor(watcher, target)
 	actor.monitor(watcher, target)

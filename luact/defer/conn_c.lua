@@ -745,9 +745,13 @@ local peer_mt = pulpo.util.copy_table(conn_index)
 local peer_free_list = {}
 peer_mt.__index = peer_mt
 function peer_mt:send_and_wait(cmd, serial, method, ctx, ...)
-	ctx[router.CONTEXT_PEER_ID] = nil -- remove peer_id, it no more used.
+	local sent_ctx = util.copy_table(ctx)
+	sent_ctx[router.CONTEXT_PEER_ID] = nil -- remove peer_id, it no more used.
 	return actor.root_of(self.detail.machine_id, self.detail.thread_id).push(self.detail.local_peer_id, 
-		cmd, serial, method, ctx, ...)
+		cmd, serial, method, sent_ctx, ...)
+end
+function peer_mt:close()
+	return actor.root_of(self.detail.machine_id, self.detail.thread_id).close_peer(self.detail.local_peer_id)
 end
 -- rawsend is used for notify_send/call/sys family. so does not contain ctx.
 function peer_mt:rawsend(cmd, ...)
@@ -842,6 +846,9 @@ function _M.get_by_hostname(hostname)
 		c = new_external_conn(hostname, _M.opts)
 	end
 	return c
+end
+function _M.find_by_hostname(hostname)
+	return cmap[hostname]
 end
 function _M.get_by_peer_id(peer_id)
 	return peer_cmap[peer_id]
