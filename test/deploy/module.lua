@@ -10,6 +10,7 @@ pulpo.run({
 }, function ()
 	os.execute('bash ./test/tools/commit.sh --reset')
 
+	local luact = require 'luact.init'
 	local mod = require 'luact.module'
 	local pulpo = require 'pulpo.init'
 	local util = require 'pulpo.util'
@@ -18,7 +19,9 @@ pulpo.run({
 	proc.initialize(function (dur)
 		return clock:alarm(dur)
 	end)
-
+	luact.process = pulpo.evloop.io.process
+	require('luact.defer.module_c')
+	
 	local foomain = require 'test.deploy.foo.main'
 
 	local loaded = {
