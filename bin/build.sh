@@ -6,7 +6,7 @@ if [ ! -z $TYPE ]; then
 	TYPE=":$TYPE"
 fi
 cp luact/lxc/docker/$DOCKERFILE ./Dockerfile
-docker build --no-cache=true -t umegaya/luact:$TYPE .
+docker build --no-cache=true -t umegaya/luact$TYPE .
 rm Dockerfile
 docker push umegaya/luact$TYPE # if no type is provided, generate digest also.
 

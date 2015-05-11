@@ -4,4 +4,4 @@ machine:
 
 test:
   override:
-    - docker run umegaya/luact:latest bash -c "cd /luact && bash ./test/bin/ci_test.sh $CIRCLE_BRANCH"
+    - docker run umegaya/luact:test bash -c "cd /luact && bash ./test/bin/ci_test.sh $CIRCLE_BRANCH"
