@@ -619,8 +619,8 @@ function ext_conn_index:cmapkey()
 end
 function ext_conn_index:destroy(reason)
 	peer_cmap[self:local_peer_key()] = nil	
-	memory.free(self.hostname)
 	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
+	memory.free(self.hostname)
 end
 
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)

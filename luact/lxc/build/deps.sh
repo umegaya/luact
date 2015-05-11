@@ -15,8 +15,8 @@ apt-get -y install ruby
 apt-get -y install wget
 
 # install dependency modules
-# -- jemalloc
-apt-get -y install libjemalloc-dev 
+# -- jemalloc : it appears to be not working well with rocksdb or luajit (it may my fault :<), so disabled now.
+#apt-get -y install libjemalloc-dev 
 # -- openssl 
 apt-get -y install libssl-dev
 pushd /tmp
