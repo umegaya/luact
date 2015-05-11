@@ -1,10 +1,7 @@
 machine:
-  pre:
-    - sudo apt-get update
-    - sudo apt-get install curl
   services:
     - docker
 
 test:
   override:
-    - docker run umegaya/luact:core bash -c "cd /luact && bash ./test/bin/ci_test.sh $CIRCLE_BRANCH"
+    - docker run umegaya/luact:latest bash -c "cd /luact && bash ./test/bin/ci_test.sh $CIRCLE_BRANCH"
