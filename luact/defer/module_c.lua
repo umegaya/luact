@@ -46,7 +46,7 @@ function _M.diff_recursive(prev, next, path, diffs, submods)
 	path = path or "."
 	diffs = diffs or {}
 	submods = submods or {}
-	-- print('cmdl', ("cd %s && git diff --name-only %s %s"):format(path, prev, next))
+	--print('cmdl', ("cd %s && git diff --name-only %s %s"):format(path, prev, next))
 	local st, out = process.execute(("cd %s && git diff --name-only %s %s"):format(path, prev, next))
 	if st ~= 0 then
 		error('git diff error:'..tostring(st))
@@ -56,14 +56,20 @@ function _M.diff_recursive(prev, next, path, diffs, submods)
 		error('git submodule error:'..tostring(st2))
 	end
 	for hash, subpath in out2:gmatch(git_submodule_regex) do
-		submods[path..fs.PATH_SEPS..subpath] = hash
+		submods[subpath] = hash
 	end
 	for file in out:gmatch('[^%c]+') do
-		file = path..fs.PATH_SEPS..file
+		local fullpath = path..fs.PATH_SEPS..file
 		if submods[file] then
-			_M.diff_recursive(prev, next, file, diffs, submods)
+			local ls_st, ls_tree = process.execute(("cd %s && git ls-tree %s %s"):format(path, prev, file))
+			if ls_st ~= 0 then
+				error('git ls-tree error:'..tostring(ls_st))
+			end
+			local prev_hash = ls_tree:match('[^%s]+%s+[^%s]+%s+([%w]+)%s+.*')
+			--print('recusive diff', prev_hash, submods[file], fullpath, diffs, submods)
+			_M.diff_recursive(prev_hash, submods[file], fullpath, diffs, submods)
 		else
-			table.insert(diffs, file)
+			table.insert(diffs, fullpath)
 		end
 	end
 	return diffs, submods

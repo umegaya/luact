@@ -220,7 +220,6 @@ function _M.initialize(opts)
 	deploy.config_method(opts.deploy.method, opts.deploy)
 end
 function _M.load(file, opts)
-	print('actor load')
 	return actor.new(from_file, file, opts)
 end
 function _M.supervise(target, opts, ...)

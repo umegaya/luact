@@ -38,7 +38,7 @@ pulpo.run({
 	end
 
 	os.execute('bash ./test/tools/commit.sh')
-	local list = mod.diff_recursive('HEAD^1', 'HEAD', './test/deploy/foo')
+	local list = mod.diff_recursive('4f4dc0f06330f77e1a7f55db1249d7502ee51f15', 'HEAD', './test/deploy/foo')
 	assert(#list == 1)
 	assert(list[1] == './test/deploy/foo/bar/baz/init.lua')
 	os.execute('bash ./test/tools/commit.sh --reset')
