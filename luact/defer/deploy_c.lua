@@ -68,7 +68,7 @@ function github_methods:pull(last_commit)
 		end
 		self.last_commit = output:sub(1, -2)
 	end
-	local p = process.open(('cd %s && git pull'):format(self.opts.diff_base))
+	local p = process.open(('cd %s && git pull && git submodule update --recursive'):format(self.opts.diff_base))
 	while true do
 		local ok, r = p:read(self.buf, 256)
 		if not ok then
