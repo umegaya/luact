@@ -317,7 +317,7 @@ function serde_mt.unpack_any(ctx, rb, complete)
 		local err = exception.new('json', 'parse_error', 
 			ffi.string(yajl.yajl_get_error(up, 1, rb:curr_p(), rb:available())))
 		yajl.yajl_free(up)
-		return exception.raise(err)
+		exception.raise(err)
 	end
 	yajl.yajl_free(up)
 	local st = get_stack(ctx)
@@ -325,7 +325,7 @@ function serde_mt.unpack_any(ctx, rb, complete)
 		return st[1], ctx.elem_count
 	else
 		-- TODO : indicate caller that new buffer is needed
-		return exception.raise('json', 'unsupported', 'streaming unpack have not supported yet')
+		exception.raise('json', 'unsupported', 'streaming unpack have not supported yet')
 	end
 end
 function serde_mt:end_stream_unpacker(ctx)
@@ -338,6 +338,7 @@ function serde_mt:unpack_packet(ctx)
 	return serde_mt.unpack_any(ctx, ctx.rb)
 end
 function serde_mt:unpack(rb)
+	-- print('unpack:str', ffi.string(rb:curr_p()), debug.traceback())
 	local r, len = serde_mt.unpack_any(shared_context, rb)
 	-- rewind stack
 	stacks[tonumber(shared_context.id)] = {}

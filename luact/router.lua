@@ -76,7 +76,7 @@ end
 
 local function run_request(c, dispatcher, msg, len)
 	tentacle.set_context(msg[CONTEXT])
-	c:resp(msg[MSGID], dispatcher(msg[UUID], msg[METHOD], unpack(msg, ARGS, len)))
+	c:resp(msg[MSGID], c:local_peer_key(), dispatcher(msg[UUID], msg[METHOD], unpack(msg, ARGS, len)))
 end
 
 function _M.internal(connection, message, len)
@@ -115,7 +115,7 @@ function _M.internal(connection, message, len)
 					local msgid = _M.regist(tentacle.running())
 					msg[MSGID] = msgid
 					dc:rawsend(unpack(msg, 1, l))
-					c:resp(resp_msgid, tentacle.yield(msgid))
+					c:resp(resp_msgid, c:local_peer_key(), tentacle.yield(msgid))
 				end, connection, dest_conn, message, len)				
 			end
 		end	
@@ -189,7 +189,7 @@ function _M.external(connection, message, len, from_untrusted)
 	local notice = bit.band(k, NOTICE_MASK) ~= 0
 	if from_untrusted then
 		if message[METHOD][1] == '_' then
-			connection:resp(message[MSGID], false, exception.raise('invalid', 'protected call', method[METHOD]))
+			connection:resp(message[MSGID], connection:local_peer_key(), false, exception.raise('invalid', 'protected call', method[METHOD]))
 			return
 		end
 	end
@@ -205,7 +205,7 @@ function _M.external(connection, message, len, from_untrusted)
 		tentacle(function (c, cmd, msg, l)
 			local ctx = msg[CONTEXT] or context_work
 			ctx[CONTEXT_PEER_ID] = c:peer_id()
-			c:resp(msg[MSGID], vid_call_with_retry(msg[UUID], cmd, msg[METHOD], ctx, unpack(msg, ARGS, l)))
+			c:resp(msg[MSGID], c:local_peer_key(), vid_call_with_retry(msg[UUID], cmd, msg[METHOD], ctx, unpack(msg, ARGS, l)))
 		end, connection, k, message, len)
 	end
 end

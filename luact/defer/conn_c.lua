@@ -124,7 +124,7 @@ function conn_tasks_index:remove(conn)
 	for i=1,#list do
 		local c = list[i]
 		if c == conn then
-			table.remove(i)
+			table.remove(list, i)
 			return
 		end
 	end
@@ -246,7 +246,7 @@ function conn_index:close()
 end
 local function conn_common_destroy(self, reason, map, free_list)
 	if map[self:cmapkey()] and (map[self:cmapkey()] ~= self) then
-		assert(false, "connection not match:"..tostring(self).." and "..tostring(map[self:cmapkey()]).." "..tostring(self:cmapkey()))
+		logger.fatal("connection not match:"..tostring(self).." and "..tostring(map[self:cmapkey()]).." "..tostring(self:cmapkey()))
 	end
 	if not _M.use_connection_cache then
 		map[self:cmapkey()] = nil
@@ -260,7 +260,7 @@ local function conn_common_destroy(self, reason, map, free_list)
 		self.rb:reset()
 		self.wb:reset()
 		table.insert(free_list, self)
-	logger.notice('conn free(cache):', self, self.io)
+	logger.notice('conn free(cache):', self)
 	end
 end
 -- for server push
@@ -290,7 +290,8 @@ function conn_index:is_server()
 	return self.local_peer_id ~= 0 
 end
 function conn_index:destroy(reason)
-	conn_common_destroy(self, reason, cmap, conn_free_list)
+	self.local_peer_id = 0
+	conn_common_destroy(self, reason, cmap, conn_free_list) -- don't touch self after this function.
 end
 function conn_index:machine_id()
 	return self.numeric_ipv4
@@ -349,7 +350,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 		if not buf then break end -- close connection
 		if self:is_server() then
 			local verb, path, headers, body, blen = buf:raw_payload()
-			-- print(path, headers, ffi.string(body, blen))
+			print(path, headers, ffi.string(body, blen))
 			local p, method = path:match('(.*)/([^/]+)/?$')
 			if not headers:is_luact_agent() then
 				-- rest api call from normal web service. parsed is actual payload of rest api call
@@ -515,7 +516,11 @@ function conn_index:notify_sys(serial, method, ...)
 end
 
 -- response family
-function conn_index:resp(msgid, ...)
+function conn_index:resp(msgid, local_peer_key, ...)
+	if local_peer_key ~= self:local_peer_key() then
+		logger.info('peer_id not match: connection closed before response arrived', local_peer_key, self:local_peer_key())
+		return
+	end
 	self:rawsend(router.RESPONSE, msgid, ...)
 end
 
@@ -619,8 +624,9 @@ function ext_conn_index:cmapkey()
 end
 function ext_conn_index:destroy(reason)
 	peer_cmap[self:local_peer_key()] = nil	
-	conn_common_destroy(self, reason, cmap, ext_conn_free_list)
-	memory.free(self.hostname)
+	self.local_peer_id = 0
+	conn_common_destroy(self, reason, cmap, ext_conn_free_list) -- don't touch self after this function.
+	memory.free(h)
 end
 
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)
@@ -713,7 +719,13 @@ function local_conn_index:cmapkey()
 	return tonumber(self.thread_id)
 end
 function local_conn_index:destroy(reason)
-	conn_common_destroy(self, reason, lcmap, local_conn_free_list)
+	conn_common_destroy(self, reason, lcmap, local_conn_free_list) -- after this function don't touch self
+end
+function local_conn_index:peer_id()
+	return 0
+end
+function local_conn_index:local_peer_key()
+	return 0
 end
 function local_conn_index:rawsend(...)
 -- logger.warn('conn:rawsend', self.thread_id, ...)
@@ -811,7 +823,7 @@ function _M.initialize(opts)
 	internal_hostname_buffer[1] = (opts.internal_proto.."://")
 	internal_hostname_buffer[3] = (":"..tostring(opts.internal_port))
 	_M.opts = opts
-	_M.use_connection_cache = opts.use_connection_cache
+	_M.use_connection_cache = true -- opts.use_connection_cache
 	-- open connection for my thread
 	for i=1,tonumber(opts.n_core or util.n_cpu()) do
 		new_local_conn(i, opts)
