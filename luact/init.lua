@@ -167,7 +167,7 @@ function _M.initialize(opts)
 	local int_url = tostring(opts.conn.internal_proto).."://0.0.0.0:"..tostring(opts.conn.internal_port)
 	listener.unprotected_listen(int_url)
 	listener.set_intenral_url(int_url)
-	luact.internal_url = int_url
+	_M.internal_url = int_url
 	-- external port should be declared at each startup routine.
 	-- create initial root actor, which can be accessed only need to know its hostname.
 	_M.root_actor = actor.new_root(function (options)
