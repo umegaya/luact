@@ -175,6 +175,8 @@ function conn_index:start_io(opts, sr, server)
 		wev = tentacle(self.write, self, self.io)
 		if opts.internal then
 			rev = tentacle(self.read_int, self, self.io, sr)
+		elseif opts.trusted then
+			rev = tentacle(self.read_ext, self, self.io, false, sr)
 		else
 			rev = tentacle(self.read_ext, self, self.io, true, sr)
 		end
@@ -386,33 +388,33 @@ function conn_index:read_webext(io, unstrusted, sr)
 			end
 		else -- client. receive response
 			local status, headers, body, blen = buf:raw_payload()
-			if not headers:is_luact_server() then
+			local msgid = fd_msgid_map[io:nfd()]
+			fd_msgid_map[io:nfd()] = nil
+			if msgid then
 				-- reply from normal web service. msgid cannot use.
 				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid
 				-- HTTP 2 : stream_id seems to be able to use as msgid. => TODO
-				local msgid = fd_msgid_map[io:nfd()]
-				fd_msgid_map[io:nfd()] = nil
-				if msgid then
-					local ok = status == 200
-					if ok then
-						r = buf
-					else
-						r = exception.new('http', 'status', status)
-						buf:fin()
-					end
-					local wrapped = {
-						router.RESPONSE,
-						msgid, ok, r
-					}
-					router.external(self, wrapped, 4, untrusted)
+				local ok = status == 200
+				if ok then
+					r = buf
 				else
-					logger.warn('http response received but recepient not found', io:nfd())
+					r = exception.new('http', 'status', status)
+					buf:fin()
 				end
+				local wrapped = {
+					router.RESPONSE,
+					msgid, ok, r
+				}
+				router.external(self, wrapped, 4, untrusted)
 			else
 				rb:from_buffer(body, blen)
-				local parsed, len = sr:unpack(rb)
+				local ok, parsed, len = pcall(sr.unpack, sr, rb)
 				buf:fin()
-				router.external(self, parsed, len, untrusted)
+				if ok then
+					router.external(self, parsed, len, untrusted)
+				else
+					logger.warn("invalid payload received:", ('%q'):format(ffi.string(body, blen)))
+				end
 			end				
 		end
 	end
@@ -548,6 +550,7 @@ function conn_index:rawsend(...)
 					h[1] = verb; h[2] = path..p
 					local _, _, address = _M.parse_hostname(ffi.string(self.hostname))
 					h.host = address
+					h["User-Agent"] = "Luact-No-RPC"
 					if t then -- pack body if any
 						self:serde():pack(self.wb.curr, t)
 					end
