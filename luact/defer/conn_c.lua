@@ -352,7 +352,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 		if not buf then break end -- close connection
 		if self:is_server() then
 			local verb, path, headers, body, blen = buf:raw_payload()
-			print(path, headers, ffi.string(body, blen))
+			-- print(path, headers, ffi.string(body, blen), headers:is_luact_agent())
 			local p, method = path:match('(.*)/([^/]+)/?$')
 			if not headers:is_luact_agent() then
 				-- rest api call from normal web service. parsed is actual payload of rest api call
@@ -376,10 +376,15 @@ function conn_index:read_webext(io, unstrusted, sr)
 						table.insert(parsed, 2, p)
 						table.insert(parsed, 2, method)
 					else
+						local null_context = (parsed[3] == nil)
+						if null_context then
+							parsed[3] = false -- if nil, insert not works correctly
+						end
 						table.insert(parsed, 2, p)
-						table.insert(parsed, 4, false) -- because nil cannot be inserted
 						table.insert(parsed, 4, method)
-						parsed[5] = nil
+						if null_context then
+							parsed[5] = nil -- for full compatible argument with normal actor RPC
+						end
 					end
 					router.external(self, parsed, len + 2, untrusted)
 				else
@@ -563,6 +568,8 @@ function conn_index:rawsend(...)
 					fd_msgid_map[self.io:nfd()] = msgid
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), h)
 				else 
+					-- select(5, ...) unpacks context, arg1, arg2, ...
+					-- select('#', ...) - 2 means whole argument minus UUID and METHOD (which packed as request path)
 					self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
 				end
@@ -760,7 +767,7 @@ local peer_mt = pulpo.util.copy_table(conn_index)
 local peer_free_list = {}
 peer_mt.__index = peer_mt
 function peer_mt:send_and_wait(cmd, serial, method, ctx, ...)
-	local sent_ctx = util.copy_table(ctx)
+	local sent_ctx = ctx and util.copy_table(ctx) or {}
 	sent_ctx[router.CONTEXT_PEER_ID] = nil -- remove peer_id, it no more used.
 	return actor.root_of(self.detail.machine_id, self.detail.thread_id).push(self.detail.local_peer_id, 
 		cmd, serial, method, sent_ctx, ...)

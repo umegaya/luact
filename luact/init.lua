@@ -272,14 +272,18 @@ end
 	returns remote reference to invoke current coroutine execution
 	if calling peer and it returns actor_not_found, this means peer is gone (closed)
 --]]
+-- TODO : more generic peer object (can represent user connection *ANY* time)
 function _M.peer(dest_path)
 	if not dest_path then exception.raise('invalid', 'peer require destination path') end
 	local id = _M.tentacle.get_context()[router.CONTEXT_PEER_ID]
 	return id and peer.new(id, dest_path)
 end
 function _M.close_peer()
-	local id = _M.tentacle.get_context()[router.CONTEXT_PEER_ID]
-	return id and peer.close(id)
+	local ctx = _M.tentacle.get_context()
+	if ctx then
+		local id = ctx[router.CONTEXT_PEER_ID]
+		return id and peer.close(id)
+	end
 end
 function _M.monitor(watcher, target)
 	actor.monitor(watcher, target)

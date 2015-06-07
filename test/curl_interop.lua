@@ -35,7 +35,8 @@ luact.start({
 		}
 	end)
 	local msgid = 111
-	local payload = {1, msgid, "user", nil, 3}
+	-- KIND, MSGID, CONTEXT, ARGS...
+	local payload = {1, msgid, nil, "user", 3}
 	local pbuf = require 'luact.pbuf'
 	local fin_count = 0
 	local function proc(proto, port, sr_kind, bin)
@@ -44,6 +45,7 @@ luact.start({
 		local sr = serde[sr_kind]
 		sr:pack(buf, payload)
 		local cmd
+		-- equivalent to actor.login("user", 3)
 		if bin then
 			cmd = ([[echo %s '%s' | curl -s -k -H 'User-Agent: Luact-RPC' --data-binary @- %s://127.0.0.1:%s/rest/api/login]]):format(
 				ffi.os == "Linux" and "-e" or "", 
