@@ -189,10 +189,6 @@ function conn_index:start_io(opts, sr, server)
 		self.task_processor_id = 0 -- no task
 	end
 end
-function conn_index:sweep()
-	machine_stats[self:machine_id()] = nil
-	conn_tasks:remove(self)
-end
 -- TODO : now tentacle become cancelable, so remove sweeper is possible.
 function conn_index:sweeper(rev, wev)
 	local tp,obj = event.wait(nil, rev, wev)
@@ -281,6 +277,9 @@ function conn_index:assign_local_peer_id()
 	end
 	assert(peer_id_seed > 0)
 	self.local_peer_id = peer_id_seed
+	-- because this connection closed before any newer connection accepted, 
+	-- same peer_id_seed may assigned to different connection.
+	peer_id_seed = peer_id_seed + 1 
 end
 function conn_index:peer_id()
 	return _M.make_id(self.local_peer_id, pulpo.thread_id, uuid.node_address)
@@ -292,6 +291,7 @@ function conn_index:is_server()
 	return self.local_peer_id ~= 0 
 end
 function conn_index:destroy(reason)
+	peer_cmap[self:local_peer_key()] = nil	
 	self.local_peer_id = 0
 	conn_common_destroy(self, reason, cmap, conn_free_list) -- don't touch self after this function.
 end
