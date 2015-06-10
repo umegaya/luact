@@ -14,11 +14,12 @@ luact.start({
 		luact.register('/rest/api', function ()
 			return {
 				close_me = function (v)
-					luact.peer('/recver').you_are_about_to_die(v)
-					luact.tentacle(function ()
+					local p = luact.peer('/recver')
+					p.you_are_about_to_die(v)
+					luact.tentacle(function (c)
 						luact.clock.sleep(0.1)
-						luact.close_peer()
-					end)
+						luact.close_peer(c)
+					end, p)
 				end,
 			}
 		end)

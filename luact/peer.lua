@@ -46,12 +46,20 @@ local peer_metatable = {
 
 
 -- module functions
-function _M.new(peer_id, dest_path)
-	return setmetatable({conn = conn.new_peer(peer_id), path = dest_path}, peer_metatable)
+function _M.new(peer_id)
+	return conn.new_peer(peer_id)
 end
-function _M.close(peer_id)
-	local c = conn.new_peer(peer_id)
-	return c:close()
+function _M.path(peer, path)
+	return setmetatable({conn = peer, path = path}, peer_metatable)
+end
+function _M.close(peer)
+	if type(peer) == 'table' then
+		peer = peer.conn
+	elseif type(peer) ~= 'cdata' then
+		exception.raise('invalid', 'it should not be peer object', type(peer))
+	end
+	peer:close()
+	memory.free(peer)
 end
 
 return _M
