@@ -46,6 +46,9 @@ popd
 rm -rf rocksdb
 popd
 
+# -- docker
+apt-get -y intall docker
+
 # -- docker machine
 DOCKER_MACHINE_URL=https://github.com/docker/machine/releases/download/$DOCKER_MACHINE_VERSION/docker-machine_linux-amd64
 wget $DOCKER_MACHINE_URL -O /usr/local/bin/docker-machine && chmod 755 /usr/local/bin/docker-machine

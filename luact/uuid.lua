@@ -106,6 +106,10 @@ function _M.equals(t, cmp)
 	return t.__tag__.local_id == cmp.__tag__.local_id and t.__tag__.machine_id == cmp.__tag__.machine_id
 end
 
+function _M.epoc()
+	return epoc
+end
+
 function _M.initialize(mt, startup_at, local_address)
 	epoc = startup_at and tonumber(startup_at) or math.floor(clock.get() * 1000) -- current time in millis
 	ffi.metatype('luact_uuid_t', {

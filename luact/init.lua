@@ -111,10 +111,18 @@ local function get_opts(opts)
 				_G.arg[i] = others[i+1]
 			end
 		end
-		return util.merge_table(opts, cmdl, true)
-	else
-		return opts
+		opts = util.merge_table(opts, cmdl, true)
 	end
+	local env = os.getenv('LUACT_OPTIONS')
+	if env then
+		local env_args = {}
+		for token in env:gmatch('[^%s]+') do
+			table.insert(env_args, token)
+		end
+		local cmdl, others = optparse(env_args, opts_defs)
+		opts = util.merge_table(opts, cmdl, true)
+	end
+	return opts
 end
 
 
@@ -133,6 +141,7 @@ function _M.stop()
 	pulpo.stop()
 end
 function _M.initialize(opts)
+	_M.opts = opts
 	-- initialize deferred modules in luact
 	pulpo_package.init_modules(exlib.LUACT_BUFFER, exlib.LUACT_IO)
 
@@ -155,6 +164,7 @@ function _M.initialize(opts)
 	_M.dht = vid.dht
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
+	require('luact.iaas.node').initialize(opts.node)
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id

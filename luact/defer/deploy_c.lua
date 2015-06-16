@@ -153,12 +153,6 @@ function _M.hook_commit(verb, header, body, opts)
 	end
 end
 
-function _M.actor_factory()
-	return {
-		deploy = _M.hook_commit,
-	}
-end
-
 function _M.set_actor_dependency(actor, src)
 	if not actor_dependency[src] then
 		actor_dependency[src] = {}

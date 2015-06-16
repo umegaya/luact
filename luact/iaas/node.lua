@@ -1,60 +1,56 @@
--- thin wrapper of docker-machine
+local luact = require 'luact.init'
+local cmd = require 'luact.iaas.cmd'
+local actor = require 'luact.actor'
+local uuid = require 'luact.uuid'
+local json = require 'luact.serde.json'
+local exception = require 'pulpo.exception'
+local socket = require 'pulpo.socket'
 local pulpo = require 'pulpo.init'
-local memory = require 'pulpo.memory'
 local process = pulpo.evloop.io.process
+local tentacle = require 'pulpo.tentacle'
 local _M = {}
 
-local function build_create_opts(kind, opts)
-	local cmd = ""
-	opts = opts or _M.create_opts
-	for k,v in pairs(opts) do
-		cmd = cmd .. (" --%s-%s=%s"):format(kind, k, v)
-	end
-	return cmd
-end
-
-local buffer = memory.alloc_typed('char', 256)
-local function wait(io, cb)
-	local ret = ""
-	while true do
-		local ok, code = io:read(buffer, 256)
-		if not ok then
-			return code == 0 and ret
-		elseif cb then
-			cb(ptr, ok)
-		else
-			ret = ret .. ffi.string(buffer, ok)
+local function dyn_config_cmdl(ip, opts)
+	local cmdl = {}
+	table.insert(cmdl, "startup_at="..tostring(uuid.epoc()))
+	table.insert(cmdl, "parent_address="..tostring(uuid.node_address))
+	table.insert(cmdl, "local_address="..tostring(ip))
+	table.insert(cmdl, "node.kind="..cmd.kind)
+	table.insert(cmdl, "node.create_opts='"..json:pack_to_string(cmd.create_opts).."'")
+	if opts then
+		for k,v in pairs(opts) do
+			table.insert(cmdl, k.."="..v)
 		end
 	end
+	return "-l "..table.concat(cmdl, "-l ")
 end
 
-local function exec(cmd, opts)
-	if opts.stdout then
-		return print(cmd)
-	elseif opts.open_only then
-		return process.open(cmd)
-	else
-		return tentacle(wait, process.open(cmd), opts.callback)
+function _M.new(image, opts)
+	local code, name, ip, out
+	-- create node for new container
+	code, name = cmd.create()
+	if code == 0 then
+		exception.raise('syscall', 'node create', code)
 	end
+	logger.info('create new node for container', name)
+	-- retrieve new node's ip. it will be
+	code, out = cmd.inspect(nil, name)
+	if code == 0 then
+		exception.raise('syscall', 'get node ip', code)
+	end	
+	ip = json:unpack_from_string(out)["PrivateIPAddress"]
+	-- launch yue container
+	code = process.execute(('MACHINE_CMD=docker-machine yue --daemon --restart -H %s -w / %s %s'):format(name, dyn_config_cmdl(ip, opts), image))
+	if code == 0 then
+		exception.raise('syscall', 'launch container', code, out)
+	end
+	local machine_id = socket.numeric_ipv4_addr_by_host(ip)
+	logger.info('launch new container at', ip, ('%x'):format(machine_id))
+	return actor.root_of(machine_id, 1)
 end
 
-function _M.create(name, exec_opts, kind, opts)
-	local cmd = ("docker-machine create --driver=%s %s %s"):format(kind, build_create_opts(kind, opts), name)
-	return exec(cmd, exec_opts)
-end
-
-function _M.rm(name, exec_opts)
-	return exec(("docker-machine rm %s"):format(name), exec_opts)
-end
-
-function _M.ls(exec_opts)
-	return exec("docker-machine ls", exec_opts)
-end
-_M.exec = exec
-
-function _M.initialize(kind, opts)
-	_M.kind = kind
-	_M.create_opts = opts
+function _M.initialize(opts)
+	cmd.initialize(opts)
 end
 
 return _M

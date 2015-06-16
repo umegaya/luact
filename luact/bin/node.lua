@@ -1,4 +1,4 @@
-local node = require 'luact.iaas.node'
+local node = require 'luact.iaas.cmd'
 local uuid = require 'luact.uuid'
 local serde = require 'luact.serde'
 local json = serde[serde.kind.json]
@@ -16,14 +16,14 @@ if cmd == "create" then
 	else
 		target_conf = assert(config[kind], "not supported provider:"..kind)
 	end
-	node.create(name, {
+	node.create({
 		stdout = true,
-	}, kind, target_conf)
+	}, name, kind, target_conf)
 elseif cmd == "rm" then
 	local name = arg[2]
-	node.rm(name, {
+	node.rm({
 		stdout = true,
-	})
+	}, name)
 elseif cmd == "ls" then
 	node.ls({
 		stdout = true,

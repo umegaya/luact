@@ -38,4 +38,7 @@ return {
 		pubkey = "./luact/ext/pulpo/test/certs/public.key",
 		privkey = "./luact/ext/pulpo/test/certs/private.key",
 	}, 
+	node = {
+
+	}, 
 }
