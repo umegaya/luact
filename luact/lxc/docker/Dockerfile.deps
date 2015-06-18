@@ -2,7 +2,6 @@ FROM ubuntu:14.10
 MAINTAINER Takehiro Iyatomi <iyatomi@gmail.com>
 ENV LUAJIT_VERSION=v2.1 ROCKSDB_VERSION=rocksdb-3.9 
 ENV HTTP_PARSER_VERSION=umegaya/feature/so DOCKER_MACHINE_VERSION=v0.2.0 JSON_VERSION=2.1.0
-RUN apt-get update
 ADD ./luact/lxc /tmp/lxc
 RUN /tmp/lxc/build/deps.sh
 RUN rm -rf /tmp/lxc
