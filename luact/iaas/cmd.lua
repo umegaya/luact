@@ -46,8 +46,8 @@ function _M.inspect(exec_opts, name)
 end
 
 function _M.create(exec_opts, name, kind, opts)
-	if not (opts and _M.create_opts) then
-		exception.raise('invalid', 'not create options')
+	if not (opts or _M.create_opts) then
+		exception.raise('invalid', 'no create options')
 	end
 	if not name then
 		_M.machine_serial = _M.machine_serial + 1

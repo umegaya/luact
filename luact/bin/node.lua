@@ -2,6 +2,7 @@ local node = require 'luact.iaas.cmd'
 local uuid = require 'luact.uuid'
 local serde = require 'luact.serde'
 local json = serde[serde.kind.json]
+local ok, r = pcall(function ()
 local cmd = arg[1]
 if cmd == "create" then
 	local name, kind = arg[2], arg[3]
@@ -9,6 +10,7 @@ if cmd == "create" then
 	local target_conf
 	if #kind == 0 then
 		for k,v in pairs(config) do
+			kind = k
 			target_conf = v
 			break
 		end
@@ -30,5 +32,8 @@ elseif cmd == "ls" then
 	})
 else
 	assert(false, "no such command:"..cmd)
-end
+end)
 
+if not ok then
+	print('node command error:', r)
+end
