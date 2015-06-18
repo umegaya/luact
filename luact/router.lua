@@ -13,7 +13,10 @@ local _M = {}
 local debug_log
 local NOTICE_BIT = 2
 local NOTICE_MASK = bit.lshift(1, NOTICE_BIT)
+local REST_CALL_BIT = 3
+local REST_CALL_MASK = bit.lshift(1, REST_CALL_BIT)
 local KIND_MASK = NOTICE_MASK - 1
+local CALL_MASK = REST_CALL_MASK - 1
 
 local KIND_SYS = 0
 local KIND_CALL = 1
@@ -32,6 +35,8 @@ _M.NOTICE_SYS = bit.bor(KIND_SYS, NOTICE_MASK)
 _M.NOTICE_CALL = bit.bor(KIND_CALL, NOTICE_MASK)
 _M.NOTICE_SEND = bit.bor(KIND_SEND, NOTICE_MASK)
 _M.NOTICE_MASK = NOTICE_MASK
+_M.REST_CALL_MASK = REST_CALL_MASK
+_M.CALL_MASK = CALL_MASK
 
 _M.CONTEXT_PEER_ID = CONTEXT_PEER_ID
 _M.CONTEXT_TIMEOUT = CONTEXT_TIMEOUT
@@ -183,7 +188,7 @@ local function vid_notify(id, cmd, method, ...)
 end
 
 local context_work = {}
-function _M.external(connection, message, len, from_untrusted)
+function _M.external(connection, message, len, from_untrusted, rest_call)
 	-- logger.notice('router_external', unpack(message, 1, len))
 	local k = message[KIND]
 	local notice = bit.band(k, NOTICE_MASK) ~= 0
@@ -201,6 +206,12 @@ function _M.external(connection, message, len, from_untrusted)
 		tentacle(function (cmd, msg, l)
 			vid_notify(msg[NOTIFY_UUID], cmd, msg[NOTIFY_METHOD], unpack(msg, NOTIFY_ARGS, l))
 		end, k, message, len)
+	elseif rest_call then
+		tentacle(function (c, cmd, msg, l)
+			local ctx = msg[CONTEXT] or context_work
+			ctx[CONTEXT_PEER_ID] = c:peer_id()
+			c:http_resp(msg[MSGID], c:local_peer_key(), vid_call_with_retry(msg[UUID], cmd, msg[METHOD], ctx, unpack(msg, ARGS, l)))
+		end, connection, k, message, len)
 	else
 		tentacle(function (c, cmd, msg, l)
 			local ctx = msg[CONTEXT] or context_work

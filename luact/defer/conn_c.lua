@@ -357,7 +357,8 @@ function conn_index:read_webext(io, unstrusted, sr)
 			if not headers:is_luact_agent() then
 				-- rest api call from normal web service. parsed is actual payload of rest api call
 				local wrapped = {
-					router.CALL, 
+					-- add special flag to indicate this is normal call
+					headers:luact_msg_kind() or router.CALL,
 					p, 
 					headers:luact_msgid(), 
 					method,
@@ -366,7 +367,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 					[8] = ffi.string(body, blen),
 				}
 				buf:fin()
-				router.external(self, wrapped, 8, untrusted)
+				router.external(self, wrapped, 8, untrusted, true)
 			else
 				rb:from_buffer(body, blen)
 				local ok, parsed, len = pcall(sr.unpack, sr, rb)
@@ -530,6 +531,13 @@ function conn_index:resp(msgid, local_peer_key, ...)
 	end
 	self:rawsend(router.RESPONSE, msgid, ...)
 end
+function conn_index:http_resp(msgid, local_peer_key, ...)
+	if local_peer_key ~= self:local_peer_key() then
+		logger.info('peer_id not match: connection closed before response arrived', local_peer_key, self:local_peer_key())
+		return
+	end
+	self:rawsend(bit.bor(router.REST_CALL_MASK, router.RESPONSE), msgid, ...)
+end
 
 -- direct send
 function conn_index:rawsend(...)
@@ -537,9 +545,10 @@ function conn_index:rawsend(...)
 	if self.http == 0 then
 		self.wb:send(conn_writer, self:serde(), ...)
 	else
-		local kind = ...
+		local _kind = ...
+		local kind = bit.band(_kind, router.CALL_MASK)
 		self.wb.curr:reset()
-		if kind ~= router.RESPONSE then
+		if bit.band(kind, router.CALL_MASK) ~= router.RESPONSE then
 			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
 				exception.raise('invalid', "TODO: support notification via http by using http2 server push")
 			else
@@ -555,7 +564,7 @@ function conn_index:rawsend(...)
 					h[1] = verb; h[2] = path..p
 					local _, _, address = _M.parse_hostname(ffi.string(self.hostname))
 					h.host = address
-					h["User-Agent"] = "Luact-No-RPC"
+					h["User-Agent"] = "Luact-No-RPC:"..tostring(kind)
 					if t then -- pack body if any
 						self:serde():pack(self.wb.curr, t)
 					end
@@ -573,6 +582,16 @@ function conn_index:rawsend(...)
 					self:serde().pack_vararg(self.wb.curr, {kind, msgid, select(5, ...)}, select('#', ...) - 2)
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), {"POST", path.."/"..method})
 				end
+			end
+		elseif bit.band(_kind, router.REST_CALL_MASK) ~= 0 then
+			-- kind, msgid, result (true/false), arg1, ..., argN
+			local _, _, ok = ...
+			if ok then
+				self:serde().pack_vararg(self.wb.curr, {select(4, ...)}, select('#', ...) - 3)
+				self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
+			else
+				self:serde().pack_vararg(self.wb.curr, {select(4, ...)}, select('#', ...) - 3)
+				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), { 500 })
 			end
 		else
 			self:serde().pack_vararg(self.wb.curr, {kind, select(2, ...)}, select('#', ...))

@@ -78,9 +78,15 @@ luact.start({
 	luact.tentacle(proc, "http", 8081, serde.kind.json)
 	-- [=[
 	luact.tentacle(function ()
+		local sr = serde[serde.kind.json]
+		local buf = luact.memory.alloc_typed('luact_rbuf_t')
 		local ec, out = luact.process.execute(
 			[[curl -s -k -H 'User-Agent: foo' --data @./test/tools/push_body.json https://127.0.0.1:8444/rest/api/push]])
 		assert(payload_received, "payload not received:"..out)
+		buf:fin()
+		buf:from_buffer(ffi.cast('char *', out), #out)
+		local parsed = sr:unpack(buf)
+		assert(parsed[1] == "ok")
 		fin_count = fin_count + 1
 		print('json request finish', fin_count)
 		if fin_count >= 5 then
