@@ -548,7 +548,7 @@ function conn_index:rawsend(...)
 		local _kind = ...
 		local kind = bit.band(_kind, router.CALL_MASK)
 		self.wb.curr:reset()
-		if bit.band(kind, router.CALL_MASK) ~= router.RESPONSE then
+		if kind ~= router.RESPONSE then
 			if bit.band(kind, router.NOTICE_MASK) ~= 0 then
 				exception.raise('invalid', "TODO: support notification via http by using http2 server push")
 			else
@@ -655,7 +655,9 @@ function ext_conn_index:destroy(reason)
 	peer_cmap[self:local_peer_key()] = nil	
 	self.local_peer_id = 0
 	conn_common_destroy(self, reason, cmap, ext_conn_free_list) -- don't touch self after this function.
+	print('h = ', h)
 	memory.free(h)
+	print('h freed')
 end
 
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)
