@@ -652,12 +652,13 @@ function ext_conn_index:cmapkey()
 	return ffi.string(self.hostname)
 end
 function ext_conn_index:destroy(reason)
+	local h = self.hostname
 	peer_cmap[self:local_peer_key()] = nil	
 	self.local_peer_id = 0
 	conn_common_destroy(self, reason, cmap, ext_conn_free_list) -- don't touch self after this function.
-	print('h = ', h)
-	memory.free(h)
-	print('h freed')
+	if h ~= nil then
+		memory.free(h)
+	end
 end
 
 ffi.metatype('luact_ext_conn_t', ext_conn_mt)
