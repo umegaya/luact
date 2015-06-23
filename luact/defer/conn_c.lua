@@ -77,6 +77,7 @@ local AF_INET6 = ffi.defs.AF_INET6
 --]]
 local cmap, lcmap = {}, {}
 local peer_cmap = {}
+local fd_msgid_map = {}
 local conn_free_list = {}
 _M.local_cmap = lcmap -- for external use
 
@@ -238,6 +239,9 @@ function conn_index:serde()
 end
 function conn_index:close()
 	-- _M.stats[self:machine_id()] = nil
+	if self.http ~= 0 then
+		fd_msgid_map[self.io:nfd()] = nil
+	end
 	conn_tasks:remove(self)
 	self.dead = 1
 	self.io:close()
@@ -344,7 +348,6 @@ function conn_index:read_ext(io, unstrusted, sr)
 	sr:end_stream_unpacker(sup)
 end
 local web_rb_work = memory.alloc_typed('luact_rbuf_t')
-local fd_msgid_map = {}
 function conn_index:read_webext(io, unstrusted, sr)
 	local rb = web_rb_work
 	while self:alive() do
@@ -394,13 +397,14 @@ function conn_index:read_webext(io, unstrusted, sr)
 			end
 		else -- client. receive response
 			local status, headers, body, blen = buf:raw_payload()
-			local msgid = fd_msgid_map[io:nfd()]
-			fd_msgid_map[io:nfd()] = nil
-			if msgid then
+			local msgids = fd_msgid_map[io:nfd()]
+			if #msgids > 0 then
+				local msgid = table.remove(msgids, 1)
 				-- reply from normal web service. msgid cannot use.
 				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid
 				-- HTTP 2 : stream_id seems to be able to use as msgid. => TODO
-				local ok = status == 200
+				local ok, r
+				ok = status == 200
 				if ok then
 					r = buf
 				else
@@ -571,10 +575,11 @@ function conn_index:rawsend(...)
 					-- when response is received at read_webext, can lookup msgid from request.
 					-- HTTP 1 => only 1 request per connection at a time. so create fd - msgid map.
 					-- HTTP 2 => set stream_id as msgid (TODO)
-					if fd_msgid_map[self.io:nfd()] then
-						logger.report('connection already send http request?', self.io:nfd(), fd_msgid_map[self.io:nfd()])
+					if not fd_msgid_map[self.io:nfd()] then
+						fd_msgid_map[self.io:nfd()] = {}
+						-- logger.report('connection already send http request?', self.io:nfd(), fd_msgid_map[self.io:nfd()])
 					end
-					fd_msgid_map[self.io:nfd()] = msgid
+					table.insert(fd_msgid_map[self.io:nfd()], msgid)
 					self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), h)
 				else 
 					-- select(5, ...) unpacks context, arg1, arg2, ...
@@ -585,14 +590,8 @@ function conn_index:rawsend(...)
 			end
 		elseif bit.band(_kind, router.REST_CALL_MASK) ~= 0 then
 			-- kind, msgid, result (true/false), arg1, ..., argN
-			local _, _, ok = ...
-			if ok then
-				self:serde().pack_vararg(self.wb.curr, {select(4, ...)}, select('#', ...) - 3)
-				self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
-			else
-				self:serde().pack_vararg(self.wb.curr, {select(4, ...)}, select('#', ...) - 3)
-				self.io:write(self.wb.curr:start_p(), self.wb.curr:available(), { 500 })
-			end
+			self:serde().pack_vararg(self.wb.curr, {select(3, ...)}, select('#', ...) - 2)
+			self.io:write(self.wb.curr:start_p(), self.wb.curr:available())
 		else
 			self:serde().pack_vararg(self.wb.curr, {kind, select(2, ...)}, select('#', ...))
 			self.io:write(self.wb.curr:start_p(), self.wb.curr:available())

@@ -7,6 +7,8 @@ local gen = require 'pulpo.generics'
 
 local _M = (require 'pulpo.package').module('luact.defer.vid_c')
 
+exception.define('vid_registerd')
+
 ffi.cdef(([[
 typedef struct luact_vid_entry {
 	uint32_t n_id:16, refc:%d, multi:1, dead:1, reserved:%d;
@@ -30,14 +32,15 @@ typedef struct luact_vid_manager {
 local vid_ent_mt = {}
 vid_ent_mt.__index = vid_ent_mt
 function vid_ent_mt:init(ctor, ...)
+	self.id = ctor(...)
 	self.n_id = 1
 	self.multi = 0
 	self.dead = 0
 	self.refc = 0
-	self.id = ctor(...)
 end
 local copy_tmp = ffi.new('luact_uuid_t[1]')
 function vid_ent_mt:add(ctor, ...)
+	local a = ctor(...)
 	if self.multi ~= 0 then
 		self:reserve(1)
 	else
@@ -46,7 +49,6 @@ function vid_ent_mt:add(ctor, ...)
 		self.group.ids[0] = copy_tmp[0]
 		assert(self.n_id <= 1)
 	end
-	local a = ctor(...)
 	self.group.ids[self.n_id] = a
 	self.n_id = self.n_id + 1
 	return a
@@ -206,6 +208,10 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 		local ent,exists = data:put(key, function (ent, f, ...)
 			ent.data:init(f, ...)
 		end, ctor, ...)
+		if not ent then
+			logger.report(exists)
+			error(exists)
+		end
 		if prev_size ~= data.size then
 			logger.notice('data allocation changed: refresh cache:', prev_size, data.size)
 			self:refresh_cache(data)
@@ -218,7 +224,7 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 			elseif multi then
 				return ent:add(ctor, ...)
 			else
-				exception.raise('invalid', 'already actor registered', k, ent.id)
+				exception.raise('vid_registered', k, ent.id)
 			end
 		else
 			self:encache(key, ent)

@@ -174,6 +174,7 @@ local function vid_call_with_retry(id, cmd, method, ctx, ...)
 		if idx then
 			a, ridx = dht:get(id)
 			if idx ~= ridx then
+				logger.info('retry', id, r[2])
 				goto RETRY2
 			end
 		end

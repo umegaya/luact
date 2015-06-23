@@ -135,6 +135,12 @@ function gossip_index:probe(mship)
 	local retry = 0
 	local n = mship.nodes:k_random(1)
 ::RESTART::
+	--logger.info('n = ', n)
+	if type(n) == 'table' then
+		for k,v in pairs(n) do
+			logger.info(k, v)
+		end
+	end
 	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.opts.probe_timeout)
 	if not (ok and r) then
 		if retry < 3 and r:is('actor_temporary_fail') then
@@ -595,8 +601,10 @@ function _M.event(port)
 	return gossip_body_map[port].event
 end
 function _M.nodelist(port)
-	logger.warn('nodelist', port, gossip_body_map[port])
 	return gossip_body_map[port].nodes
+end
+function _M.delegate(port)
+	return gossip_body_map[port].delegate
 end
 function _M.destroy(m)
 	m:stop_threads()

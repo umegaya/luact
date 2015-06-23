@@ -71,7 +71,7 @@ factory = {
 		if err then
 			exception.raise('runtime', err)
 		end
-		return ok()
+		return ok(...)
 	end,
 }
 local from_file = factory["string"]
@@ -164,7 +164,8 @@ function _M.initialize(opts)
 	_M.dht = vid.dht
 	conn.initialize(opts.conn)
 	router.initialize(opts.router)
-	require('luact.iaas.node').initialize(opts.node)
+	_M.node = require('luact.iaas.node')
+	_M.node.initialize(opts.node)
 
 	-- initialize node identifier
 	_M.thread_id = pulpo.thread_id

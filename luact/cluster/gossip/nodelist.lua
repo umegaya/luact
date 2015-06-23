@@ -99,6 +99,13 @@ function node_index:set_state(st, nodedata)
 	end
 	return changed
 end
+function node_index:user_state_as(ct)
+	assert(self.user_state_len >= ffi.sizeof(ct))
+	if type(ct) == "string" then
+		ct = ffi.typeof(ct)
+	end
+	return ffi.cast(ffi.typeof('$ *', ct), self.user_state)
+end
 function node_index:is_suspicious() 
 	return self.state == _M.suspect
 end

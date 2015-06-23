@@ -24,10 +24,24 @@ luact.start({
 	ok, resp = pcall(ref.GET, '/status/418')
 	assert((not ok) and resp:is('http') and resp.args[1] == 'status' and resp.args[2] == 418)
 
-	resp = ref.GET('/response-headers?key=val') 
-	status, headers = resp:payload()
-	assert(headers['key'] == 'val')
-	resp:fin()
+	local cnt = 0
+	for key, val in pairs({ 
+		hoge = "fuga",
+		bar = "baz",
+		piyo = "puya",
+	}) do
+		luact.tentacle(function (k, v)
+			local resp = ref.GET('/response-headers?'..k..'='..v) 
+			local status, headers = resp:payload()
+			assert(headers[k] == v, "value for "..tostring(k).." should be "..tostring(v).." but "..tostring(headers[k]))
+			resp:fin()
+			cnt = cnt + 1
+			if cnt >= 3 then
+				luact.stop()
+			end
+		end, key, val)
+	end
+	return true
 end)
 
 return true
