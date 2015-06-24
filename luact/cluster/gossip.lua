@@ -141,6 +141,9 @@ function gossip_index:probe(mship)
 			logger.info(k, v)
 		end
 	end
+	if not n.gossiper then
+		logger.info('n does not have gossiper', type(n), n)
+	end
 	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.opts.probe_timeout)
 	if not (ok and r) then
 		if retry < 3 and r:is('actor_temporary_fail') then

@@ -7,7 +7,7 @@ local gen = require 'pulpo.generics'
 
 local _M = (require 'pulpo.package').module('luact.defer.vid_c')
 
-exception.define('vid_registerd')
+exception.define('vid_registered')
 
 ffi.cdef(([[
 typedef struct luact_vid_entry {
