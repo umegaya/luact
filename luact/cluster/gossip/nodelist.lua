@@ -152,7 +152,11 @@ local nodelist_mt = {
 }
 function nodelist_index:k_random(k)
 	local r = util.random_k_from(self, k, node_index.filter)
-	return k == 1 and r[1] or r
+	if k == 1 then 
+		return r[1]
+	else
+		return r
+	end
 end
 function nodelist_index:debug_num_valid_nodes()
 	local cnt = 0

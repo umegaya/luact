@@ -134,18 +134,19 @@ function gossip_index:probe(mship)
 	local ok, r
 	local retry = 0
 	local n = mship.nodes:k_random(1)
+	if not n then
+		logger.warn('no node to probe', #mship.nodes)
+		for i=1,#mship.nodes do
+			n = mship.nodes[i]
+			logger.info(i, n, n.state)
+		end
+		return
+	end
 ::RESTART::
 	--logger.info('n = ', n)
-	if type(n) == 'table' then
-		for k,v in pairs(n) do
-			logger.info(k, v)
-		end
-	end
-	if not n.gossiper then
-		logger.info('n does not have gossiper', type(n), n)
-	end
-	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.opts.probe_timeout)
+	ok, r = pcall(n:gossiper().timed_ping, n:gossiper(), mship.opts.probe_timeout, cnt)
 	if not (ok and r) then
+		logger.warn('probe timeout')
 		if retry < 3 and r:is('actor_temporary_fail') then
 			retry = retry + 1
 			clock.sleep(retry * 0.5)

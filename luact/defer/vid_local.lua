@@ -31,16 +31,15 @@ typedef struct luact_vid_manager {
 -- luact_vid_entry_t
 local vid_ent_mt = {}
 vid_ent_mt.__index = vid_ent_mt
-function vid_ent_mt:init(ctor, ...)
-	self.id = ctor(...)
+function vid_ent_mt:init(id)
+	self.id = id
 	self.n_id = 1
 	self.multi = 0
 	self.dead = 0
 	self.refc = 0
 end
 local copy_tmp = ffi.new('luact_uuid_t[1]')
-function vid_ent_mt:add(ctor, ...)
-	local a = ctor(...)
+function vid_ent_mt:add(id)
 	if self.multi ~= 0 then
 		self:reserve(1)
 	else
@@ -49,7 +48,7 @@ function vid_ent_mt:add(ctor, ...)
 		self.group.ids[0] = copy_tmp[0]
 		assert(self.n_id <= 1)
 	end
-	self.group.ids[self.n_id] = a
+	self.group.ids[self.n_id] = id
 	self.n_id = self.n_id + 1
 	return a
 end
@@ -97,7 +96,7 @@ function vid_ent_mt:unref()
 	self.refc = self.refc - 1
 	return self.refc <= 0
 end
-function vid_ent_mt:remove(key, id, dtor)
+function vid_ent_mt:remove(key, id)
 	logger.report('vident:remove', self, self.id)
 	if self.multi ~= 0 then
 		local rmidx
@@ -114,25 +113,21 @@ function vid_ent_mt:remove(key, id, dtor)
 				memory.move(self.group.ids + rmidx, self.group.ids + rmidx + 1, 
 					(self.n_id - rmidx - 1) * ffi.sizeof('luact_uuid_t'))
 			end
-			dtor(key, id)
 		end
 	end
 	self.n_id = self.n_id - 1
 	if self.n_id <= 0 then
 		logger.report('vid dead', key)
 		self.dead = 1
+		return true, self
+	else
+		return false, id
 	end
 end
-function vid_ent_mt:remove_all(key, dtor)
-	if self.multi ~= 0 then
-		for i=0,self.n_id-1 do
-			dtor(key, self.group.ids[i])
-		end
-	else
-		dtor(key, self.id)
-	end
+function vid_ent_mt:remove_all(key)
 	logger.report('vid dead', key)
 	self.dead = 1
+	return self
 end
 function vid_ent_mt:fin()
 	if self.multi ~= 0 then
@@ -203,11 +198,16 @@ function vid_manager_mt:getent(k)
 	end, k)
 end
 function vid_manager_mt:put(k, allow_multi, fn, ...)
-	return self.map:touch(function (data, key, multi, ctor, ...) 
+	local entry = self:getent(k)
+	if entry and (not allow_multi) then
+		exception.raise('vid_registered', k, entry.id)
+	end
+	local put_actor = fn(...)
+	return self.map:touch(function (data, key, multi, act) 
 		local prev_size = data.size
-		local ent,exists = data:put(key, function (ent, f, ...)
-			ent.data:init(f, ...)
-		end, ctor, ...)
+		local ent,exists = data:put(key, function (ent, a)
+			ent.data:init(a)
+		end, act)
 		if not ent then
 			logger.report(exists)
 			error(exists)
@@ -219,41 +219,53 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 		if exists then
 			if not ent:alive() then
 				local refc = ent.refc
-				ent:init(ctor, ...)
+				ent:init(act)
 				ent.refc = refc
 			elseif multi then
-				return ent:add(ctor, ...)
+				return ent:add(act)
 			else
+				actor.destroy(act) -- remove actor 'act'
 				exception.raise('vid_registered', k, ent.id)
 			end
 		else
 			self:encache(key, ent)
 		end
 		if multi then
+			-- if returns ent.id directly, it may change by addition of new actor.
 			local tmp = memory.managed_alloc_typed('luact_uuid_t')
 			ffi.copy(tmp, ent.id, ffi.sizeof('luact_uuid_t'))
 			return tmp
 		else
 			return ent.id
 		end
-	end, k, allow_multi, fn, ...)
+	end, k, allow_multi, put_actor)
 end
 function vid_manager_mt:remove(k, id, fn)
 	local c = self:cache()
 	rawset(c, k, nil)
-	self.map:touch(function (data, key, dtor, uid) 
+	local all, obj = self.map:touch(function (data, key, uid) 
 		local ent = data:get(key)
 		if ent then
 			if uid then
-				if ent:remove(key, uid, dtor) then 
+				local rmall, o = ent:remove(key, uid)
+				if rmall then 
 					self:decache(k, ent)
 				end
+				return rmall, o
 			else
-				ent:remove_all(key, dtor)
+				local o = ent:remove_all(key)
 				self:decache(k, ent)
+				return true, o
 			end
 		end
-	end, k, fn, id)
+	end, k, id)
+	if all then
+		for i=0,obj.n_id-1 do
+			fn(key, obj.group.ids[i])
+		end
+	else
+		fn(key, obj)
+	end
 end
 function vid_manager_mt:refresh(k)
 	self:decache(k)
