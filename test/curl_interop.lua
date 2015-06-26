@@ -85,7 +85,7 @@ luact.start({
 		assert(payload_received, "payload not received:"..out)
 		buf:from_buffer(ffi.cast('char *', out), #out)
 		local parsed = sr:unpack(buf)
-		assert(parsed[1] == "ok")
+		assert(parsed[1] == true and parsed[2] == "ok")
 		fin_count = fin_count + 1
 		print('json request finish', fin_count)
 		if fin_count >= 5 then
