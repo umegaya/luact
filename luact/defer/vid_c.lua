@@ -1,4 +1,5 @@
 local _M = (require 'pulpo.package').module('luact.defer.vid_c')
+local util = (require 'luact.init').util
 
 local vid_mt
 
@@ -13,7 +14,7 @@ function _M.initialize_dist(mt, parent_address, dht_opts, vid_opts)
 end
 
 function _M.new(url)
-	local host, path = url:match('([^%+]-%+?[^%+]*://[^/]+)(.*)')
+	local host, path = util.devide_url_into_host_and_path(url)
 	if not path then 
 		return nil 
 	end
@@ -21,7 +22,7 @@ function _M.new(url)
 end
 
 function _M.debug_getent(url)
-	local host, path = url:match('([^%+]-%+?[^%+]*://[^/]+)(.*)')
+	local host, path = util.devide_url_into_host_and_path(url)
 	if not path then 
 		return nil 
 	end

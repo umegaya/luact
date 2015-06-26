@@ -98,8 +98,8 @@ function vid_ent_mt:unref()
 end
 function vid_ent_mt:remove(key, id)
 	logger.report('vident:remove', self, self.id)
+	local rmidx
 	if self.multi ~= 0 then
-		local rmidx
 		for i=0,self.n_id-1 do
 			if not rmidx then
 				if uuid.equals(self.group.ids[i], id) then
@@ -119,15 +119,12 @@ function vid_ent_mt:remove(key, id)
 	if self.n_id <= 0 then
 		logger.report('vid dead', key)
 		self.dead = 1
-		return true, self
-	else
-		return false, id
 	end
+	return rmidx and id or nil
 end
 function vid_ent_mt:remove_all(key)
 	logger.report('vid dead', key)
 	self.dead = 1
-	return self
 end
 function vid_ent_mt:fin()
 	if self.multi ~= 0 then
@@ -203,7 +200,7 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 		exception.raise('vid_registered', k, entry.id)
 	end
 	local put_actor = fn(...)
-	return self.map:touch(function (data, key, multi, act) 
+	local ok, r = pcall(self.map.touch, self.map, function (data, key, multi, act) 
 		local prev_size = data.size
 		local ent,exists = data:put(key, function (ent, a)
 			ent.data:init(a)
@@ -224,7 +221,6 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 			elseif multi then
 				return ent:add(act)
 			else
-				actor.destroy(act) -- remove actor 'act'
 				exception.raise('vid_registered', k, ent.id)
 			end
 		else
@@ -239,32 +235,46 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 			return ent.id
 		end
 	end, k, allow_multi, put_actor)
+	if not ok then
+		actor.destroy(act) -- remove actor 'act'
+	end
+	return r
 end
 function vid_manager_mt:remove(k, id, fn)
 	local c = self:cache()
 	rawset(c, k, nil)
-	local all, obj = self.map:touch(function (data, key, uid) 
+	local ent, multi, obj = self.map:touch(function (data, key, uid) 
 		local ent = data:get(key)
 		if ent then
+			local m = (ent.multi ~= 0)
 			if uid then
-				local rmall, o = ent:remove(key, uid)
-				if rmall then 
-					self:decache(k, ent)
+				local o = ent:remove(key, uid)
+				if not ent:alive() then 
+					self:decache(key, ent)
 				end
-				return rmall, o
+				return false, m, o
 			else
-				local o = ent:remove_all(key)
-				self:decache(k, ent)
-				return true, o
+				ent:remove_all(key)
+				self:decache(key, ent)
+				return true, m, ent
 			end
+		else
+			logger.report('not such vid', key)
 		end
 	end, k, id)
-	if all then
-		for i=0,obj.n_id-1 do
-			fn(key, obj.group.ids[i])
+	--logger.report('remove', multi, obj)
+	if obj then
+		if ent then
+			if multi then
+				for i=0,obj.n_id-1 do
+					fn(k, obj.group.ids[i])
+				end
+			else
+				fn(k, obj.id)
+			end
+		else
+			fn(k, obj)
 		end
-	else
-		fn(key, obj)
 	end
 end
 function vid_manager_mt:refresh(k)
