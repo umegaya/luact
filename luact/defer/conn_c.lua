@@ -398,7 +398,7 @@ function conn_index:read_webext(io, unstrusted, sr)
 		else -- client. receive response
 			local status, headers, body, blen = buf:raw_payload()
 			local msgids = fd_msgid_map[io:nfd()]
-			if #msgids > 0 then
+			if msgids and #msgids > 0 then
 				local msgid = table.remove(msgids, 1)
 				-- reply from normal web service. msgid cannot use.
 				-- HTTP 1.x : only 1 request at a time, so create fd - msgid map to retrieve msgid

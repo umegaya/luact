@@ -144,7 +144,6 @@ local uuid_metatable = {
 		return v
 	end,
 	__gc = function (t)
-		-- print('uuid_gc:', t)
 		uuid.free(t)
 	end,
 }

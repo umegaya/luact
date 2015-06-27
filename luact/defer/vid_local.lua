@@ -1,8 +1,10 @@
 local ffi = require 'ffiex.init'
 local uuid = require 'luact.uuid'
+local actor = require 'luact.actor'
 local memory = require 'pulpo.memory'
 local thread = require 'pulpo.thread'
 local exception = require 'pulpo.exception'
+local wp = require 'pulpo.debug.watchpoint'
 local gen = require 'pulpo.generics'
 
 local _M = (require 'pulpo.package').module('luact.defer.vid_c')
@@ -50,7 +52,7 @@ function vid_ent_mt:add(id)
 	end
 	self.group.ids[self.n_id] = id
 	self.n_id = self.n_id + 1
-	return a
+	return id
 end
 function vid_ent_mt:reserve(sz)
 	if self.multi == 0 then
@@ -97,7 +99,6 @@ function vid_ent_mt:unref()
 	return self.refc <= 0
 end
 function vid_ent_mt:remove(key, id)
-	logger.report('vident:remove', self, self.id)
 	local rmidx
 	if self.multi ~= 0 then
 		for i=0,self.n_id-1 do
@@ -201,9 +202,9 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 	end
 	local put_actor = fn(...)
 	local ok, r = pcall(self.map.touch, self.map, function (data, key, multi, act) 
-		local prev_size = data.size
-		local ent,exists = data:put(key, function (ent, a)
-			ent.data:init(a)
+		local prev_size = tonumber(data.size)
+		local ent,exists = data:put(key, function (e, a)
+			e.data:init(a)
 		end, act)
 		if not ent then
 			logger.report(exists)
@@ -237,6 +238,7 @@ function vid_manager_mt:put(k, allow_multi, fn, ...)
 	end, k, allow_multi, put_actor)
 	if not ok then
 		actor.destroy(act) -- remove actor 'act'
+		error(r)
 	end
 	return r
 end
