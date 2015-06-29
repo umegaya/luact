@@ -4,7 +4,6 @@ local actor = require 'luact.actor'
 local memory = require 'pulpo.memory'
 local thread = require 'pulpo.thread'
 local exception = require 'pulpo.exception'
-local wp = require 'pulpo.debug.watchpoint'
 local gen = require 'pulpo.generics'
 
 local _M = (require 'pulpo.package').module('luact.defer.vid_c')

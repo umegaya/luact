@@ -850,13 +850,13 @@ end
 
 
 -- initialize
-function _M.initialize(opts)
+function _M.initialize(opts, n_core)
 	internal_hostname_buffer[1] = (opts.internal_proto.."://")
 	internal_hostname_buffer[3] = (":"..tostring(opts.internal_port))
 	_M.opts = opts
 	_M.use_connection_cache = true -- opts.use_connection_cache
 	-- open connection for my thread
-	for i=1,tonumber(opts.n_core or util.n_cpu()) do
+	for i=1,tonumber(n_core or util.n_cpu()) do
 		new_local_conn(i, opts)
 	end
 end

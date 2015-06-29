@@ -162,7 +162,7 @@ function _M.initialize(opts)
 		vid.initialize_local(actor.vid_metatable, opts.vid)
 	end
 	_M.dht = vid.dht
-	conn.initialize(opts.conn)
+	conn.initialize(opts.conn, opts.n_core)
 	router.initialize(opts.router)
 	_M.node = require('luact.iaas.node')
 	_M.node.initialize(opts.node)
