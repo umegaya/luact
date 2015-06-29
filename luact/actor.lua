@@ -124,21 +124,15 @@ end
 local uuid_caller_mt = {
 	__call = uuid_caller_proc,
 }
-local methods_cache = {}
+local uuid_methods_cache = {}
 local uuid_metatable = {
 	__index = function (t, k)
 		-- print('uuid__index:', k)
-		local v = rawget(methods_cache, k)
-		if v then
-			if v.id then -- cache exist but in-use
-				-- copy on write
-				v = setmetatable(util.copy_table(v), uuid_caller_mt)
-				rawset(methods_cache, k, v)
-			end
-		else -- cache not exist
+		local v = rawget(uuid_methods_cache, k)
+		if not v then
 			local name, flag = parse_method_name(k)
 			v = setmetatable({method = name, flag = flag}, uuid_caller_mt)
-			rawset(methods_cache, k, v)
+			rawset(uuid_methods_cache, k, v)
 		end
 		v.id = t
 		return v
@@ -159,20 +153,14 @@ end
 local vid_caller_mt = {
 	__call = vid_caller_proc,
 }
+local vid_methods_cache = {}
 local vid_metatable = {
 	__index = function (t, k)
-		local v = rawget(methods_cache, k)
-		-- cache not exist or in-use
-		if v then
-			if v.id then -- cache exist but in-use
-				-- copy on write
-				v = setmetatable(util.copy_table(v), vid_caller_mt)
-				rawset(methods_cache, k, v)
-			end
-		else -- cache not exist
+		local v = rawget(vid_methods_cache, k)
+		if not v then
 			local name, flag = parse_method_name(k)
 			v = setmetatable({method = name, flag = flag}, vid_caller_mt)
-			rawset(methods_cache, k, v)
+			rawset(vid_methods_cache, k, v)
 		end
 		v.id = t
 		return v
