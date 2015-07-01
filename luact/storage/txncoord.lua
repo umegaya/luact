@@ -14,6 +14,7 @@ local key = require 'luact.cluster.dht.key'
 local _M = {}
 
 exception.define('txn_aborted')
+exception.define('txn_committed')
 exception.define('txn_old_retry')
 exception.define('txn_future_ts')
 exception.define('txn_push_fail')

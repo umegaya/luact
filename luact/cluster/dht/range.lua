@@ -268,7 +268,7 @@ function range_mt:is_root_range()
 	return self.kind == _M.KIND_META1
 end
 function range_mt:is_mvcc()
-	return kind_map[self.kind].txnl
+	return kind_map[self.kind].txnl ~= 0
 end
 -- true if start_key <= k, kl < end_key, false otherwise
 function range_mt:include(k, kl)
@@ -509,17 +509,18 @@ function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
 	end
 end
 function range_mt:exec_end_txn(storage, k, kl, ts, txn, commit)
-	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
+	if self:is_mvcc() then exception.raise('invalid', 'operation not allowed for mvcc range') end
 	logger.notice('exec_end_txn', ('%q'):format(ffi.string(k, kl)), commit)
 	local v, vl = storage:backend():rawget(k, kl)
 	-- if txn record exists, make it gc-able. otherwise nil
 	local exist_txn = (v ~= ffi.NULL and ffi.gc(ffi.cast('luact_dht_txn_t *', v), memory.free) or nil)
 	local rtxn = txncoord.end_txn(txn, exist_txn, commit)
 	-- Persist the transaction record with updated status (& possibly timestamp).
-	storage:backend():rawput(k, kl, ffi.cast('char *', rtxn), #rtxn)	
+	storage:backend():rawput(k, kl, ffi.cast('char *', rtxn), #rtxn)
 	return rtxn
 end
 function range_mt:exec_resolve_txn(storage, k, kl, ts, txn, commit)
+	if self:is_mvcc() then exception.raise('invalid', 'operation not allowed for mvcc range') end
 	local txk, txkl = make_metakey(self.kind, k, kl)
 	local v, vl = storage:backend():rawget(txk, txkl)
 	local exist_txn = ffi.gc(ffi.cast('luact_dht_txn_t*', v), memory.free)

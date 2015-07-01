@@ -93,7 +93,7 @@ function cmd_mt:init(name, key, endkey, txn_idx, fn)
 end
 function cmd_mt:wait_completion()
 	if not self.done then
-		print('cmd:exec wait prev', self, self.prev)
+		logger.info('cmd:exec wait prev', self, self.prev)
 		event.wait(nil, self.ev)
 	end
 end
@@ -519,7 +519,7 @@ function history_verifier_mt:run_txn(txn_idx, priority, isolation, cmds, rm)
 			cmds[i].env = env
 			hv:run_cmd(txn_idx, retry, i, cmds, rm, txn)
 		end
-	end, self, priority))
+	end, self, priority), "run_txn fails")
 end
 
 function history_verifier_mt:run_cmd(txn_idx, retry, cmd_idx, cmds, rm, txn)
@@ -536,6 +536,7 @@ function check_concurrency(name, isolations, txns, verify, exp_success, rm)
 	v:run(isolations, rm)
 end
 
+--[[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -577,38 +578,36 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 	}
 	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true, range_manager)
 end)
+-- ]]
+
+-- TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
+-- are subject to the lost update anomaly. This anomaly is prevented
+-- in most cases by using the the READ_COMMITTED ANSI isolation level.
+-- However, only REPEATABLE_READ fully protects against it.
+--
+-- With lost update, the write from txn1 is overwritten by the write
+-- from txn2, and thus txn1's update is lost. Both SI and SSI notice
+-- this write/write conflict and either txn1 or txn2 is aborted,
+-- depending on priority.
+--
+-- Lost update would typically fail with a history such as:
+--   R1(A) R2(A) I1(A) I2(A) C1 C2
+--
+-- However, the following variant will cause a lost update in
+-- READ_COMMITTED and in practice requires REPEATABLE_READ to avoid.
+--   R1(A) R2(A) I1(A) C1 I2(A) C2
+test("TestTxnDBLostUpdateAnomaly", function ()
+	local txn = "R(A) I(A) C"
+	local verify = {
+		history = "R(A)",
+		check = function (env)
+			assert(env["A"] ~= 2, ("expected A=2, got %d"):format(tostring(env["A"])))
+		end,
+	}
+	check_concurrency("lost update", both_isolations, {txn, txn}, verify, true, range_manager)
+end)
 
 --[[
-// TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
-// are subject to the lost update anomaly. This anomaly is prevented
-// in most cases by using the the READ_COMMITTED ANSI isolation level.
-// However, only REPEATABLE_READ fully protects against it.
-//
-// With lost update, the write from txn1 is overwritten by the write
-// from txn2, and thus txn1's update is lost. Both SI and SSI notice
-// this write/write conflict and either txn1 or txn2 is aborted,
-// depending on priority.
-//
-// Lost update would typically fail with a history such as:
-//   R1(A) R2(A) I1(A) I2(A) C1 C2
-//
-// However, the following variant will cause a lost update in
-// READ_COMMITTED and in practice requires REPEATABLE_READ to avoid.
-//   R1(A) R2(A) I1(A) C1 I2(A) C2
-func TestTxnDBLostUpdateAnomaly(t *testing.T) {
-	txn := "R(A) I(A) C"
-	verify := &verifier{
-		history: "R(A)",
-		checkFn: func(env map[string]int64) error {
-			if env["A"] != 2 {
-				return util.Errorf("expected A=2, got %d", env["A"])
-			}
-			return nil
-		},
-	}
-	checkConcurrency("lost update", bothIsolations, []string{txn, txn}, verify, true, t)
-}
-
 // TestTxnDBPhantomReadAnomaly verifies that neither SI nor SSI isolation
 // are subject to the phantom reads anomaly. This anomaly is prevented by
 // the SQL ANSI SERIALIZABLE isolation level, though it's also prevented
@@ -692,7 +691,7 @@ func TestTxnDBWriteSkewAnomaly(t *testing.T) {
 	checkConcurrency("write skew", onlySerializable, []string{txn1, txn2}, verify, true, t)
 	checkConcurrency("write skew", onlySnapshot, []string{txn1, txn2}, verify, false, t)
 }
-]]
+-- ]]
 
 end)
 
