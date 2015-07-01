@@ -101,7 +101,7 @@ function cmd_mt:exec(rm, txn)
 	if self.prev then
 		self.prev:wait_completion()
 	end
-	print('cmd:exec', self)
+	logger.info('cmd:exec', self)
 	local ok, r = pcall(self.fn, self, rm, txn)
 	self.ev:emit('read')
 	self.done = true
@@ -136,8 +136,10 @@ end
 function cmd_mt:read(rm, txn)
 	local v, ts = self:range(rm):get(self:key(), txn)
 	if v then
-		self.env[self.key] = v
+		self.env[self.k] = tonumber(v)
 		self.debug = ("[%d ts=%s]"):format(tonumber(v), ts)
+	else
+		self.debug = ("[nil ts=%s]"):format(ts or g_last_ts)
 	end
 end
 -- deleteRngCmd deletes the range of values from the db from [key, endKey).
@@ -164,7 +166,7 @@ end
 function cmd_mt:inc(rm, txn)
 	local k = self:key()
 	local r = self:range(rm):merge(k, "1", "inc", txn)
-	self.env[self.key] = r
+	self.env[self.k] = tonumber(r)
 	self.debug = ("[%d ts=%s]"):format(r, g_last_ts)
 end
 
@@ -175,14 +177,13 @@ function cmd_mt:sum(rm, txn)
 	for k,v in pairs(self.env) do
 		sum = sum + v
 	end
-	print('sum ===> put', sum)
 	self:range(rm):put(self:key(), tostring(sum), txn)
 	self.debug = ("[%d ts=%s]"):format(sum, g_last_ts)
 end
 
 -- commitCmd commits the transaction.
 function cmd_mt:commit(rm, txn)
-	rm:end_txn(txn, nil, true) -- sync mode
+	rm:end_txn(txn, true)
 	self.debug = ("[ts=%s]"):format(g_last_ts)
 end
 
@@ -477,10 +478,11 @@ function history_verifier_mt:run_history(his_idx, priorities, isolations, histor
 	end
 	-- wait all txn finished
 	event.join(nil, unpack(evs))
-	logger.info('finish all txn sequence', #evs)
 
 	-- Construct string for actual history.
 	local actual_str = table.concat(self.actual, " ")
+
+	logger.info('finish all txn sequence', #evs, actual_str)
 
 	-- Verify history.
 	local verify_strs = {}
@@ -534,7 +536,6 @@ function check_concurrency(name, isolations, txns, verify, exp_success, rm)
 	v:run(isolations, rm)
 end
 
---[[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -571,13 +572,13 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 	local verify = {
 		history = "R(C)",
 		check = function (env)
-			print('env[C]', env["C"])
-			assert(env["C"] == 2 or env["C"] == 0, ("expected C to be either 0 or 2, got %d"):format(env["C"]))
+			assert(env["C"] == 2 or env["C"] == 0, ("expected C to be either 0 or 2, got %s"):format(tostring(env["C"])))
 		end,
 	}
 	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true, range_manager)
 end)
 
+--[[
 // TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
 // are subject to the lost update anomaly. This anomaly is prevented
 // in most cases by using the the READ_COMMITTED ANSI isolation level.

@@ -632,6 +632,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 	if (ts >= meta.timestamp) or same_txn then
 		if meta.txn:valid() and (not (txn and txn:same_origin(meta.txn))) then
 			-- if txn already exists, only same txn can read latest value.
+			logger.warn('txn_exists', txn, meta.txn, txn:same_origin(meta.txn))
 			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
 		end
 		local latest_key, latest_key_len = _M.bytes_codec:encode(k, kl, meta.timestamp)
@@ -692,12 +693,13 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 		-- _M.dump_key(iter:key())
 	end
 	if not iter then
+		-- logger.notice('rawget_internal, not iter', ffi.string(k, kl))
 		return nil
 	end
 
 	value_ts = _M.bytes_codec:timestamp_of(iter)
 	if not value_ts then
-		-- print('value_ts nil')
+		-- logger.notice('rawget_internal, value is nil', ffi.string(k, kl))
 		return nil
 	end
 	-- allocate own memory
@@ -707,6 +709,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 	if vl > 0 then
 		return v, vl, value_ts
 	else
+		-- logger.notice('rawget_internal, value is 0 len', ffi.string(k, kl))
 		return nil
 	end
 end
@@ -745,6 +748,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 	if (not deleted) and (vl <= 0) then
 		exception.raise('mvcc', 'empty_value')
 	end
+	-- logger.warn('rawput_internal', txn)
 	local exists = true
 	-- local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
 
@@ -894,6 +898,7 @@ function mvcc_mt:resolve_version(stats, k, kl, ts, txn, opts)
 end
 local orig_timestamp_work = ffi.new('pulpo_hlc_t')
 function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
+	-- logger.notice('resolve_version_internal', ffi.string(k, kl))
 	if not txn then
 		logger.warn('resolve_version', 'no txn specified')
 		return
@@ -907,7 +912,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- For cases where there's no write intent to resolve, or one exists
 	-- which we can't resolve, this is a noop.
 	if meta == ffi.NULL or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
-		-- print('matadata problem', meta, meta.txn, txn)
+		logger.report('metadata problem', meta, meta.txn, txn, meta.txn:valid(), meta.txn:same_origin(txn))
 		return
 	end
 	local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
@@ -920,9 +925,9 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- timestamp-encoded key) if timestamp changed.
 	local commit = (txn.status == txncoord.STATUS_COMMITTED)
 	local pushed = (txn.status == txncoord.STATUS_PENDING and meta.txn.timestamp < txn.timestamp)
-	-- print('check commit or pushed', commit, pushed, meta.txn.n_retry, txn.n_retry, txn.status)
+	-- logger.info('check commit or pushed', commit, pushed, meta.txn.n_retry, txn.n_retry, txn.status)
 	if (commit or pushed) and meta.txn.n_retry == txn.n_retry then
-		-- print('commit or pushed')
+		-- logger.info('commit or pushed')
 		ffi.copy(orig_timestamp_work, meta.timestamp, ffi.sizeof(meta.timestamp))
 		meta.timestamp = txn.timestamp
 		if pushed then -- keep intent if we're pushing timestamp
@@ -973,7 +978,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- Compute the last possible mvcc value for this key. (ignore boundary)
 	local iter = self:seek_prev(latest_key, latest_key_len, limit_key, limit_key_len, true)
 	if not iter then
-	-- print('no possible key: delete meta')
+	-- print('no possible key: delete meta', ffi.string(k, kl))
 		self.db:rawdelete(mk, mkl, opts)
 	else
 	-- print('possible key exists', _M.dump_key(iter:key()))
@@ -1016,7 +1021,7 @@ end
 function mvcc_mt:resolve_versions_in_range(stats, s, sl, e, el, n, ts, txn, opts)
 	local ctx = { count = n }
 	self:rawscan(s, sl, e, el, opts, self.resolve_version_filter, ctx, stats, ts, txn, opts)
-	dump_db(self.db)
+	-- dump_db(self.db)
 	return n - ctx.count
 end
 local split_key_work = memory.alloc_typed('char', 256)

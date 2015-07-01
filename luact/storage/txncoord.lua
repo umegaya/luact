@@ -198,6 +198,8 @@ serde_common.register_ctype('struct', 'luact_dht_txn', nil, serde_common.LUACT_D
 -- txn coordinator
 local txn_coord_mt = {}
 txn_coord_mt.__index = txn_coord_mt
+txn_coord_mt.range_work1 = memory.alloc_typed('luact_dht_key_range_t')
+txn_coord_mt.range_work2 = memory.alloc_typed('luact_dht_key_range_t')
 function txn_coord_mt:initialize()
 	self:start_heartbeat()
 end
@@ -225,6 +227,7 @@ function txn_coord_mt:start_heartbeat()
 	self.hbt = tentacle(self.heartbeat, self)
 end
 function txn_coord_mt:finish(txn, exist_txn, commit)
+	logger.report('txn_coord_mt:finish', commit, exist_txn)
 	local reply
 	if exist_txn then
 		-- Use the persisted transaction record as final transaction.
@@ -271,7 +274,6 @@ function txn_coord_mt:finish(txn, exist_txn, commit)
 	return reply
 end
 function txn_coord_mt:resolve_version(txn, commit, sync)
-	print('resolve_version')
 	if commit ~= nil then
 		txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
 	end
@@ -279,42 +281,46 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	local txn_data = self.txns[key]
 	self.txns[key] = nil
 	local ranges = {}
-	-- get ranges to send end_txn. (with de-dupe)
+	-- get ranges to send end_txn. (de-dupe is done in txn_coord_mt:add_cmd)
+	-- currently key and end_key of single command should be within one range object.
+	-- that means, if we implement some extensional command like SQL query on this dht system, 
+	-- command of the range should be devided into per-range basis by command invoker. 
+	-- TODO : should we support the case where (key(), end_key()) covers multi-range?
+	local evs = {}
 	for i=1,#txn_data do
 		-- commit each range.
 		local c = txn_data[i]
 		local k, kl, kind = c:key(), c:keylen(), c.kind
 		local rng = _M.range_manager:find(k, kl, kind)
-		local span = ranges[rng]
-		if not span then
-			-- TODO : if this causes GC problem, use pre allocated cdata struct instead of temporary table
-			ranges[rng] = { min = k, minl = kl, max = k, maxl = kl }
-		elseif memory.rawcmp_ex(span.max, span.maxl, k, kl) < 0 then
-			ranges[rng].max, ranges[rng].maxl = k, kl
-		elseif memory.rawcmp_ex(span.min, span.minl, k, kl) > 0 then
-			ranges[rng].min, ranges[rng].minl = k, kl
-		end 
+		table.insert(evs, tentacle(function (r, sk, skl, ek, ekl)
+			local ekstr = ek and ffi.string(ek, ekl) or "[empty]"
+			logger.info('rng:resolve', ffi.string(sk, skl), ekstr)
+			local n = rng:resolve(txn, 0, sk, skl, ek, ekl) -- 0 means all records in the range
+			logger.info('rng:resolve end', n, 'processed between', ffi.string(sk, skl), ekstr)
+		end, rng, k, kl, c:end_key(), c:end_keylen()))
 	end
 	if sync then
-		local evs = {}
-		for rng,span in pairs(ranges) do
-			table.insert(evs, tentacle(function (r, sp)
-				print('resolve_version dispatch', ffi.string(sp.min, sp.minl), ffi.string(sp.max, sp.maxl))
-				rng:resolve(txn, 0, sp.min, sp.minl, sp.max, sp.maxl)
-			end, rng, span))
-		end
 		logger.info('wait all resolve completion')
 		event.join(nil, unpack(evs))
 	else
-		for rng,span in pairs(ranges) do
-		print('resolve_version dispatch', ffi.string(span.min, span.minl), ffi.string(span.max, span.maxl))
-			rng:resolve(txn, 0, span.min, span.minl, span.max, span.maxl)
-		end
+		return evs
 	end
 end
 function txn_coord_mt:add_cmd(txn, cmd)
 	local txn_data = self.txns[txn:as_key()]
-	print('add_cmd', ffi.string(cmd:key(), cmd:keylen()))
+	local keyrng, kr = self.range_work1, self.range_work2
+	keyrng:init(cmd:key(), cmd:keylen(), cmd:end_key(), cmd:end_keylen())
+	local ridx = {}
+	-- de-dupe ranges
+	for i=#txn_data,1,-1 do
+		local c = txn_data[i]
+		kr:init(c:key(), c:keylen(), c:end_key(), c:end_keylen())
+		if keyrng:contains_range(kr) then
+			table.remove(txn_data, i)
+		elseif kr:contains_range(keyrng) then
+			return -- because kr has already removed all range which keyrng can remove.
+		end
+	end
 	table.insert(txn_data, cmd)
 	txn.last_update = util.msec_walltime()
 end
@@ -358,7 +364,6 @@ function _M.run_txn(opts, proc, ...)
 	return util.retry(retry_opts, function (txn, on_commit, proc, ...)
 		txn.status = TXN_STATUS_PENDING
 		local ok, r = pcall(proc, txn, ...)
-		print('run_txn', ok, r)
 		if ok then
 			if txn.status == TXN_STATUS_PENDING then
 				_M.range_manager:end_txn(txn, true)

@@ -21,6 +21,9 @@ typedef struct luact_dht_key {
 		uint8_t p[0];
 	};
 } luact_dht_key_t;
+typedef struct luact_dht_key_range {
+	luact_dht_key_t s, e;
+} luact_dht_key_range_t;
 ]]):format(_M.MAX_LENGTH))
 
 
@@ -69,5 +72,32 @@ function key_mt:make_greater_than_prefix_keys()
 end
 
 ffi.metatype('luact_dht_key_t', key_mt)
+
+local key_range_mt = {}
+key_range_mt.__index = key_range_mt
+function key_range_mt:init(sk, skl, ek, ekl)
+	self.s:init(sk, skl)
+	if ek then
+		self.e:init(ek, ekl)
+	else
+		self.s:next(self.e)
+	end
+	if self.e <= self.s then
+		assert(false, "invalid range:"..tostring(self))
+	end
+end
+function key_range_mt:contains(k)
+	return self.s <= k and k < self.e
+end
+function key_range_mt:contains_range(kr)
+	return self:contains(kr.s) and (kr.e <= self.e)
+end
+function key_range_mt:__tostring()
+	local s = tostring(self.s)
+	s=s.."~~"
+	return s..tostring(self.e)
+end
+
+ffi.metatype('luact_dht_key_range_t', key_range_mt)
 
 return _M

@@ -210,6 +210,7 @@ function _M.create_latch(name, num_thread)
 	end, num_thread)
 end
 
+-- create dummy arbiter for single thread mode
 function _M.use_dummy_arbiter(on_read, on_write)
 	local range_arbiters = {}
 	local consistent_flag

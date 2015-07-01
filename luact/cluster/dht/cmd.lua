@@ -143,8 +143,8 @@ register_ctype('struct', 'luact_dht_cmd_watch', 'luact_dht_cmd_watch_t', serde_c
 register_ctype('struct', 'luact_dht_cmd_split', 'luact_dht_cmd_split_t', serde_common.LUACT_DHT_CMD_SPLIT)
 register_ctype('struct', 'luact_dht_cmd_scan', 'luact_dht_cmd_scan_t', serde_common.LUACT_DHT_CMD_SCAN)
 register_ctype('struct', 'luact_dht_cmd_resolve', 'luact_dht_cmd_resolve_t', serde_common.LUACT_DHT_CMD_RESOLVE)
-register_ctype('struct', 'luact_dht_cmd_resolve_txn', 'luact_dht_cmd_resolve_txn_t', serde_common.LUACT_DHT_CMD_RESOLVE)
-register_ctype('struct', 'luact_dht_cmd_end_txn', 'luact_dht_cmd_end_txn_t', serde_common.LUACT_DHT_CMD_RESOLVE)
+register_ctype('struct', 'luact_dht_cmd_resolve_txn', 'luact_dht_cmd_resolve_txn_t', serde_common.LUACT_DHT_CMD_RESOLVE_TXN)
+register_ctype('struct', 'luact_dht_cmd_end_txn', 'luact_dht_cmd_end_txn_t', serde_common.LUACT_DHT_CMD_END_TXN)
 
 register_ctype('struct', 'luact_dht_gossip_replica_change', 'luact_dht_gossip_replica_change_t', serde_common.LUACT_DHT_GOSSIP_REPLICA_CHANGE)
 register_ctype('struct', 'luact_dht_gossip_range_split', 'luact_dht_gossip_range_split_t', serde_common.LUACT_DHT_GOSSIP_RANGE_SPLIT)
@@ -154,7 +154,7 @@ local base_mt = {}
 base_mt.__gc = memory.free
 function base_mt:set_txn(txn)
 	if txn then
-		ffi.copy(self:txn_p(), txn, ffi.sizeof(txn))
+		ffi.copy(self:txn_p(), txn, ffi.sizeof('luact_dht_txn_t'))
 		self.txn_f = 1
 	else
 		self.txn_f = 0
@@ -180,6 +180,12 @@ function base_mt:keylen()
 end
 function base_mt:key()
 	return self.p
+end
+function base_mt:end_key()
+	return nil
+end
+function base_mt:end_keylen()
+	return 0
 end
 
 -- get command
@@ -358,18 +364,26 @@ function resolve_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn)
 	p.ekl = ekl
 	p.n_process = n or 0
 	ffi.copy(p:key(), k, kl)
-	ffi.copy(p:end_key(), ek, ekl)
+	if ekl > 0 then
+		ffi.copy(p:end_key(), ek, ekl)
+	end
 	return p
 end
 _M.resolve = resolve_mt.new
 function resolve_mt:txn_p()
 	return self.txn
 end
+function resolve_mt:has_txn()
+	return true
+end
 function resolve_mt:set_txn(txn)
 	ffi.copy(self.txn, txn, ffi.sizeof('luact_dht_txn_t'))
 end
 function resolve_mt:end_key()
-	return self.p + self.kl
+	return (self.ekl > 0) and (self.p + self.kl) or nil
+end
+function resolve_mt:end_keylen()
+	return self.ekl
 end
 function resolve_mt:create_versioned_value()
 	return false
@@ -404,6 +418,12 @@ end
 _M.resolve_txn = resolve_txn_mt.new
 function resolve_txn_mt:committed()
 	return self.commit ~= 0 
+end
+function resolve_txn_mt:txn_p()
+	return self.txn
+end
+function resolve_txn_mt:has_txn()
+	return true
 end
 function resolve_txn_mt:set_txn(txn)
 	ffi.copy(self.txn, txn, ffi.sizeof('luact_dht_txn_t'))
@@ -450,7 +470,7 @@ function merge_mt.size(kl, vl, ol, txn)
 	return ffi.sizeof('luact_dht_cmd_merge_t') + kl + vl + ol + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
 function merge_mt.new(kind, k, kl, v, vl, o, ol, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_merge_t*', memory.alloc(get_mt.size(kl, vl, ol, txn)))
+	local p = ffi.cast('luact_dht_cmd_merge_t*', memory.alloc(merge_mt.size(kl, vl, ol, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
@@ -473,7 +493,7 @@ function merge_mt:txn_p()
 	return self.p + self.kl + self.vl + self.ol
 end
 function merge_mt:__len()
-	return cas_mt.size(self.kl, self.vl, self.ol, self:has_txn())
+	return merge_mt.size(self.kl, self.vl, self.ol, self:has_txn())
 end
 function merge_mt:apply_to(storage, range)
 	return range:exec_merge(storage, self:key(), self.kl, self:val(), self.vl, self:op(), self.ol, self.timestamp, self:get_txn())
@@ -535,7 +555,7 @@ function split_mt.size(kl, txn)
 	return ffi.sizeof('luact_dht_cmd_split_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
 function split_mt.new(kind, k, kl, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(kl)))
+	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(kl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl

@@ -426,6 +426,7 @@ function range_mt:resolve(txn, n, s, sl, e, el)
 	end
 end
 function range_mt:end_txn(k, kl, txn, commit, hook, timeout)
+	logger.notice('end_txn', ('%q'):format(ffi.string(k, kl)))
 	return self:write(cmd.end_txn(self.kind, k, kl, range_manager.clock:issue(), txn, commit, hook), txn, timeout)
 end
 function range_mt:resolve_txn(k, kl, txn, commit, timeout)
@@ -433,11 +434,13 @@ function range_mt:resolve_txn(k, kl, txn, commit, timeout)
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn)
+	local v, vl, rts
 	if self:is_mvcc() then
-		return rawget_to_s(storage:rawget(k, kl, ts, txn))
+		v, vl, rts = storage:rawget(k, kl, ts, txn)
 	else
-		return rawget_to_s(storage:backend():rawget(k, kl))
+		v, vl = storage:backend():rawget(k, kl)
 	end
+	return rawget_to_s(v, vl), rts
 end
 function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
 	if self:is_mvcc() then
@@ -501,11 +504,13 @@ function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
 	if el > 0 then
 		return storage:resolve_versions_in_range(self.stats, s, sl, e, el, n, ts, txn)
 	else
-		return storage:resolve_version(self.stats, s, sl, ts, txn)
+		storage:resolve_version(self.stats, s, sl, ts, txn)
+		return 1
 	end
 end
 function range_mt:exec_end_txn(storage, k, kl, ts, txn, commit)
 	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
+	logger.notice('exec_end_txn', ('%q'):format(ffi.string(k, kl)), commit)
 	local v, vl = storage:backend():rawget(k, kl)
 	-- if txn record exists, make it gc-able. otherwise nil
 	local exist_txn = (v ~= ffi.NULL and ffi.gc(ffi.cast('luact_dht_txn_t *', v), memory.free) or nil)
@@ -692,7 +697,7 @@ function range_mt:recover_write_error(command, txn, err)
 	end
 end
 function range_mt:on_writer_finished(command, txn, ok, r)
-	print('on_writer_finished', ok, r, command, command:end_txn())
+	-- logger.info('on_writer_finished', ok, r, command, command:end_txn())
 	if not ok then
 		if txn then
 			self:recover_write_error(command, txn, r)
@@ -705,6 +710,7 @@ function range_mt:on_writer_finished(command, txn, ok, r)
 			exception.raise('fatal', "TODO : start txn on the fly.")
 		end
 	elseif txn then
+		-- if this command modify database, it should added to transaction.
 		if command:create_versioned_value() then
 			txncoord.add_cmd(txn, command)
 		end
@@ -724,7 +730,7 @@ function range_mt:on_writer_finished(command, txn, ok, r)
 				clock.sleep(sleep_ms / 1000)
 			end
 			if r.status ~= txncoord.STATUS_PENDING then
-			-- print('end txn done: resolve version', r.status)
+				-- logger.warn('end txn done: resolve version', r.status)
 				txncoord.resolve_version(r)
 			end
 		end
@@ -758,7 +764,8 @@ function range_mt:metadata()
 end
 function range_mt:fetch_state(k, kl, ts, txn)
 	local p = self:partition()
-	return rawget_to_s(p:rawget(k, kl, ts, txn))
+	local v, vl, ts = p:rawget(k, kl, ts, txn)
+	return rawget_to_s(v, vl), ts
 end
 function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if not uuid.valid(leader) then
