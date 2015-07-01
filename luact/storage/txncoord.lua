@@ -9,6 +9,8 @@ local util = require 'pulpo.util'
 local exception = require 'pulpo.exception'
 local tentacle = require 'pulpo.tentacle'
 
+local key = require 'luact.cluster.dht.key'
+
 local _M = {}
 
 exception.define('txn_aborted')

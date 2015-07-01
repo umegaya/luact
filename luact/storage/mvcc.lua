@@ -632,7 +632,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 	if (ts >= meta.timestamp) or same_txn then
 		if meta.txn:valid() and (not (txn and txn:same_origin(meta.txn))) then
 			-- if txn already exists, only same txn can read latest value.
-			logger.warn('txn_exists', txn, meta.txn, txn:same_origin(meta.txn))
+			logger.warn('txn_exists', txn, meta.txn, txn and txn:same_origin(meta.txn))
 			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
 		end
 		local latest_key, latest_key_len = _M.bytes_codec:encode(k, kl, meta.timestamp)
@@ -912,7 +912,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- For cases where there's no write intent to resolve, or one exists
 	-- which we can't resolve, this is a noop.
 	if meta == ffi.NULL or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
-		logger.report('metadata problem', meta, meta.txn, txn, meta.txn:valid(), meta.txn:same_origin(txn))
+		logger.warn('metadata problem', meta, meta.txn, txn, meta.txn:valid(), meta.txn:same_origin(txn))
 		return
 	end
 	local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
