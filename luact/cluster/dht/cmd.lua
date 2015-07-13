@@ -13,7 +13,7 @@ local _M = {}
 ffi.cdef [[
 typedef struct luact_dht_cmd_get {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, txn_f;
+	uint8_t kind:8, txn_f:1, consistent:1, padd:6;
 	uint16_t kl;
 	char p[0];
 } luact_dht_cmd_get_t;
@@ -70,7 +70,7 @@ typedef struct luact_dht_cmd_split {
 
 typedef struct luact_dht_cmd_scan {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, txn_f;
+	uint8_t kind:8, txn_f:1, consistent:1, padd:6;
 	uint16_t kl, n_process;
 	char p[0];	
 } luact_dht_cmd_scan_t;
@@ -86,18 +86,21 @@ typedef struct luact_dht_cmd_resolve {
 
 typedef struct luact_dht_cmd_resolve_txn {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, commit;
-	uint16_t kl;
-	luact_dht_txn_t txn;
-	char p[0];		
+	pulpo_hlc_t cmd_ts;
+	uint8_t kind, how;
+	luact_dht_txn_t txn, conflict_txn;
 } luact_dht_cmd_resolve_txn_t;
+
+typedef struct luact_dht_cmd_heartbeat_txn {
+	pulpo_hlc_t timestamp;
+	uint8_t kind, padd;
+	luact_dht_txn_t txn;
+} luact_dht_cmd_heartbeat_txn_t;
 
 typedef struct luact_dht_cmd_end_txn {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, commit;
-	uint16_t kl;
+	uint8_t kind, commit, padd[2];
 	luact_dht_txn_t txn;
-	char p[0];			
 } luact_dht_cmd_end_txn_t;
 
 typedef struct luact_dht_gossip_replica_change {
@@ -145,6 +148,7 @@ register_ctype('struct', 'luact_dht_cmd_scan', 'luact_dht_cmd_scan_t', serde_com
 register_ctype('struct', 'luact_dht_cmd_resolve', 'luact_dht_cmd_resolve_t', serde_common.LUACT_DHT_CMD_RESOLVE)
 register_ctype('struct', 'luact_dht_cmd_resolve_txn', 'luact_dht_cmd_resolve_txn_t', serde_common.LUACT_DHT_CMD_RESOLVE_TXN)
 register_ctype('struct', 'luact_dht_cmd_end_txn', 'luact_dht_cmd_end_txn_t', serde_common.LUACT_DHT_CMD_END_TXN)
+register_ctype('struct', 'luact_dht_cmd_heartbeat_txn', 'luact_dht_cmd_heartbeat_txn', serde_common.LUACT_DHT_CMD_HEARTBEAT_TXN)
 
 register_ctype('struct', 'luact_dht_gossip_replica_change', 'luact_dht_gossip_replica_change_t', serde_common.LUACT_DHT_GOSSIP_REPLICA_CHANGE)
 register_ctype('struct', 'luact_dht_gossip_range_split', 'luact_dht_gossip_range_split_t', serde_common.LUACT_DHT_GOSSIP_RANGE_SPLIT)
@@ -194,11 +198,12 @@ get_mt.__index = get_mt
 function get_mt.size(kl, txn)
 	return ffi.sizeof('luact_dht_cmd_get_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function get_mt.new(kind, k, kl, timestamp, txn)
+function get_mt.new(kind, k, kl, timestamp, txn, consistent)
 	local p = ffi.cast('luact_dht_cmd_get_t*', memory.alloc(get_mt.size(kl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
+	p.consistent = consistent and 1 or 0
 	ffi.copy(p:key(), k, kl)
 	p:set_txn(txn)
 	return p
@@ -214,7 +219,7 @@ function get_mt:create_versioned_value()
 	return false
 end
 function get_mt:apply_to(storage, range)
-	return range:exec_get(storage, self:key(), self.kl, self.timestamp, self:get_txn())
+	return range:exec_get(storage, self:key(), self.kl, self.timestamp, self:get_txn(), self.consistent ~= 0)
 end
 ffi.metatype('luact_dht_cmd_get_t', get_mt)
 
@@ -323,12 +328,13 @@ scan_mt.__index = scan_mt
 function scan_mt.size(kl, txn)
 	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function scan_mt.new(kind, k, kl, n, timestamp, txn)
+function scan_mt.new(kind, k, kl, n, timestamp, txn, consistent)
 	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
 	p.n_process = n or 0
+	p.consistent = consistent and 1 or 0
 	ffi.copy(p:key(), k, kl)
 	p:set_txn(txn)
 	return p
@@ -344,7 +350,7 @@ function scan_mt:create_versioned_value()
 	return false
 end
 function scan_mt:apply_to(storage, range)
-	return range:exec_scan(storage, self:key(), self.kl, self.n_process, self.timestamp, self:get_txn())
+	return range:exec_scan(storage, self:key(), self.kl, self.n_process, self.timestamp, self:get_txn(), self.consistent ~= 0)
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 
@@ -359,7 +365,7 @@ function resolve_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_resolve_t*', memory.alloc(resolve_mt.size(kl, ekl)))
 	p.kind = kind
 	p.timestamp = timestamp
-	p.txn = txn
+	p:set_txn(txn)
 	p.kl = kl
 	p.ekl = ekl
 	p.n_process = n or 0
@@ -402,22 +408,25 @@ ffi.metatype('luact_dht_cmd_resolve_t', resolve_mt)
 -- resolve_txn command
 local resolve_txn_mt = util.copy_table(base_mt)
 resolve_txn_mt.__index = resolve_txn_mt
-function resolve_txn_mt.size(kl)
-	return ffi.sizeof('luact_dht_cmd_resolve_txn_t') + kl
+function resolve_txn_mt.size()
+	return ffi.sizeof('luact_dht_cmd_resolve_txn_t')
 end
-function resolve_txn_mt.new(kind, k, kl, timestamp, txn, commit)
-	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size(kl)))
+function resolve_txn_mt.new(kind, timestamp, txn, conflict_txn, how, cmd_ts)
+	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size()))
 	p.kind = kind
 	p.timestamp = timestamp
+	p.cmd_ts = cmd_ts
 	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
-	p.commit = commit and 1 or 0
-	p.kl = kl
-	ffi.copy(p:key(), k, kl)
+	ffi.copy(p.conflict_txn, conflict_txn, ffi.sizeof('luact_dht_txn_t'))
+	p.how = how
 	return p
 end
 _M.resolve_txn = resolve_txn_mt.new
-function resolve_txn_mt:committed()
-	return self.commit ~= 0 
+function resolve_txn_mt:key()
+	return nil
+end
+function resolve_txn_mt:keylen()
+	return 0
 end
 function resolve_txn_mt:txn_p()
 	return self.txn
@@ -432,33 +441,51 @@ function resolve_txn_mt:create_versioned_value()
 	return false
 end
 function resolve_txn_mt:__len()
-	return resolve_txn_mt.size(self.kl)
+	return resolve_txn_mt.size()
 end
 function resolve_txn_mt:apply_to(storage, range)
-	return range:exec_resolve_txn(storage, self:key(), self.kl, self.timestamp, self.txn, self:committed())
+	return range:exec_resolve_txn(storage, self.timestamp, self.txn, self.conflict_txn, self.how, self.cmd_ts)
 end
 ffi.metatype('luact_dht_cmd_resolve_txn_t', resolve_txn_mt)
 
 
 -- end_txn command
+local heartbeat_txn_mt = util.copy_table(resolve_txn_mt)
+heartbeat_txn_mt.__index = heartbeat_txn_mt
+function heartbeat_txn_mt.new(kind, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_heartbeat_txn_t*', memory.alloc(heartbeat_txn_mt.size()))
+	p.kind = kind
+	p.timestamp = timestamp
+	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
+	return p
+end
+_M.heartbeat_txn = heartbeat_txn_mt.new
+function heartbeat_txn_mt:apply_to(storage, range)
+	return range:exec_heartbeat_txn(storage, self.timestamp, self.txn)
+end
+ffi.metatype('luact_dht_cmd_heartbeat_txn_t', heartbeat_txn_mt)
+
+
+-- end_txn command
 local end_txn_mt = util.copy_table(resolve_txn_mt)
 end_txn_mt.__index = end_txn_mt
-function end_txn_mt.new(kind, k, kl, timestamp, txn, commit)
-	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(kl)))
+function end_txn_mt.new(kind, timestamp, txn, commit)
+	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size()))
 	p.kind = kind
 	p.timestamp = timestamp
 	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
 	p.commit = commit and 1 or 0
-	p.kl = kl
-	ffi.copy(p:key(), k, kl)
 	return p
 end
 _M.end_txn = end_txn_mt.new
+function end_txn_mt:committed()
+	return self.commit ~= 0 
+end
 function end_txn_mt:end_txn()
 	return true
 end
 function end_txn_mt:apply_to(storage, range)
-	return range:exec_end_txn(storage, self:key(), self.kl, self.timestamp, self.txn, self:committed())
+	return range:exec_end_txn(storage, self.timestamp, self.txn, self:committed())
 end
 ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
 

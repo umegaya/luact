@@ -4,6 +4,9 @@ local tools = require 'test.tools.cluster'
 tools.start_luact(1, nil, function ()
 
 local luact = require 'luact.init'
+luact.util.msec_walltime = function ()
+	return 0
+end
 local range = require 'luact.cluster.dht.range'
 local txncoord = require 'luact.storage.txncoord'
 local tools = require 'test.tools.cluster'
@@ -35,23 +38,38 @@ mvcc.register_merger("inc", function (key, key_length,
 end)
 
 
+-- verbose logger
+local verbose = false
+local function vlog(...)
+	if verbose then
+		logger.warn(...)
+	end
+end
+
+
 -- use dummy arbiter
 local g_last_ts 
-tools.use_dummy_arbiter(nil, function (actor, log, timeout, dectatorial)
-	g_last_ts = log[1].timestamp
-end)
 
 -- init range manager
-fs.rmdir("/tmp/luact/range_test")
-local range_manager = range.get_manager(nil, "/tmp/luact/range_test", { 
-	n_replica = 1, -- allow single node quorum
-	storage = "rocksdb",
-	datadir = luact.DEFAULT_ROOT_DIR,
-	range_size_max = 64 * 1024 * 1024
-})
+local range_manager
+local function init_range_manager()
+	tools.use_dummy_arbiter(nil, function (actor, log, timeout, dectatorial)
+		g_last_ts = log[1].timestamp
+	end)
+	range.destroy_manager()
+	fs.rmdir("/tmp/luact/range_test")
+	range_manager = range.get_manager(nil, "/tmp/luact/range_test", { 
+		n_replica = 1, -- allow single node quorum
+		storage = "rocksdb",
+		datadir = luact.DEFAULT_ROOT_DIR,
+		range_size_max = 64 * 1024 * 1024
+	})
 
--- init txn coordinator
-txncoord.initialize(range_manager)
+	-- init txn coordinator
+	txncoord.initialize(range_manager, {
+		max_clock_skew = 0,
+	})
+end
 
 -- setCorrectnessRetryOptions sets client for aggressive retries with a
 -- limit on number of attempts so we don't get stuck behind indefinite
@@ -91,20 +109,41 @@ function cmd_mt:init(name, key, endkey, txn_idx, fn)
 	self.ev = event.new()
 	self.txn_idx = txn_idx
 end
-function cmd_mt:wait_completion()
+function cmd_mt:reset()
+	if self.emitter then
+		tentacle.cancel(self.emitter)
+		self.emitter = nil
+	end
+	self.prev = false
+	self.done = false
+end
+local function delay_emit(ev, delay, event_name, cmd)
+	if delay > 0 then
+		luact.clock.sleep(delay)
+	end
+	ev:emit(event_name)
+	cmd.emitter = nil
+end
+function cmd_mt:mark_complete()
+	-- self.emitter = tentacle(delay_emit, self.ev, 0.01, 'read', self)
+	self.ev:emit('read')
+	self.done = true
+end
+function cmd_mt:wait_completion(waiter)
 	if not self.done then
-		logger.info('cmd:exec wait prev', self, self.prev)
+		-- logger.info('cmd:wait', waiter, self, self.ev)
 		event.wait(nil, self.ev)
+		-- logger.info('cmd:wait end', waiter, self, self.ev)
 	end
 end
 function cmd_mt:exec(rm, txn)
 	if self.prev then
-		self.prev:wait_completion()
+		self.prev:wait_completion(self)
 	end
-	logger.info('cmd:exec', self)
+	vlog('cmd:exec', self, self.prev)
 	local ok, r = pcall(self.fn, self, rm, txn)
-	self.ev:emit('read')
-	self.done = true
+	self:mark_complete()
+	-- logger.notice('cmd:done', self)
 	if #self.k > 0 and #self.ek > 0 then
 		return ("%s%%d.%%d(%s-%s)%s"):format(self.name, self.k, self.ek, self.debug), ok or r
 	end
@@ -134,7 +173,7 @@ function cmd_mt:range(rm)
 end
 -- readCmd reads a value from the db and stores it in the env.
 function cmd_mt:read(rm, txn)
-	local v, ts = self:range(rm):get(self:key(), txn)
+	local v, ts = self:range(rm):get(self:key(), txn, true)
 	if v then
 		self.env[self.k] = tonumber(v)
 		self.debug = ("[%d ts=%s]"):format(tonumber(v), ts)
@@ -437,7 +476,7 @@ function history_verifier_mt:run(isolations, rm)
 			for _, h in ipairs(enum_his) do
 				local ok, r = pcall(self.run_history, self, history_idx, p, i, h, rm)
 				if not ok then
-					logger.report('err', r)
+					logger.report('run history err', r)
 					table.insert(failures, r)
 				end
 				history_idx = history_idx + 1
@@ -453,7 +492,8 @@ function history_verifier_mt:run(isolations, rm)
 end
 function history_verifier_mt:run_history(his_idx, priorities, isolations, history, rm)
 	local planstr = make_history_string(history)
-	logger.info("attempting", planstr)--, table.concat(priorities, ":"), table.concat(isolations, ":"))
+	vlog('========================================================================================')
+	vlog("attempting", planstr)--, table.concat(priorities, ":"), table.concat(isolations, ":"))
 
 	local txns = {}
 	for i=1,#history do
@@ -471,18 +511,36 @@ function history_verifier_mt:run_history(his_idx, priorities, isolations, histor
 	self.actual = {}
 	local evs = {}
 	for i=1,#txns do
-		logger.info('start txn sequence', i)
-		table.insert(evs, tentacle(function (hv, idx, his)
-			hv:run_txn(idx, priorities[idx], isolations[idx], his, rm)
-		end, self, i, txns[i]))
+		vlog('start txn sequence', i, 'prio', priorities[i], 'iso', isolations[i])
+		table.insert(evs, tentacle(self.run_txn, self, i, priorities[i], isolations[i], txns[i], rm))
 	end
 	-- wait all txn finished
-	event.join(nil, unpack(evs))
+	local results = event.join(nil, unpack(evs))
+
+	-- cleanup sequence specific values
+	for i=1,#txns do
+		for j=1,#txns[i] do
+			txns[i][j]:reset()
+		end
+	end
 
 	-- Construct string for actual history.
 	local actual_str = table.concat(self.actual, " ")
 
-	logger.info('finish all txn sequence', #evs, actual_str)
+	vlog('finish all txn sequence', #evs, actual_str)
+
+	-- check result
+	for _,tuple in ipairs(results) do
+		if not tuple[3] then
+			logger.report('run_txn fails', _, tuple[4])
+			os.exit(-2)
+			error(tuple[4]) -- temporary causes error
+		end
+	end
+	if not self.actual[#self.actual]:match("^C") then
+		logger.report('last execution is not commit (C)')
+		os.exit(-1)
+	end
 
 	-- Verify history.
 	local verify_strs = {}
@@ -501,9 +559,8 @@ end
 function history_verifier_mt:run_txn(txn_idx, priority, isolation, cmds, rm)
 	local retry = 0
 	local txn_name = ("txn%d"):format(txn_idx)
-	assert(txncoord.run_txn({isolation = isolation}, function (txn, hv, pri)
-		txn.priority = 1000 - pri
-
+	assert(txncoord.run_txn({isolation = isolation}, function (txn, hv, prio)
+		txn:debug_set_priority(prio)
 		local env = {}
 		-- TODO(spencer): restarts must create additional histories. They
 		-- look like: given the current partial history and a restart on
@@ -513,30 +570,45 @@ function history_verifier_mt:run_txn(txn_idx, priority, isolation, cmds, rm)
 
 		retry = retry + 1
 		if retry >= 2 then
-			logger.info(txn_name, "retry", retry)
+			vlog(txn_name, "retry", retry, txn)
+			for i=1,#cmds do
+				cmds[i]:mark_complete()
+			end
 		end
+		local evs = {}
 		for i=1,#cmds do
 			cmds[i].env = env
+			-- table.insert(evs, tentacle(hv.run_cmd, hv, txn_idx, retry, i, cmds, rm, txn))
 			hv:run_cmd(txn_idx, retry, i, cmds, rm, txn)
 		end
+		--[[
+		local results = event.join(nil, unpack(evs))
+		for _,tuple in ipairs(results) do
+			if not tuple[3] then
+				-- logger.warn('run_cmd fails', _, tuple[4])
+				error(tuple[4]) -- may cause restart entire transaction, or quitting
+			end
+		end
+		]]
 	end, self, priority), "run_txn fails")
 end
 
 function history_verifier_mt:run_cmd(txn_idx, retry, cmd_idx, cmds, rm, txn)
 	local report, err = cmds[cmd_idx]:exec(rm, txn)
-	if err ~= true then error(err) end
+	if err and (err ~= true) then error(err) end
 	local cmdstr = report:format(txn_idx, retry)
 	table.insert(self.actual, cmdstr)
 end
 
 -- checkConcurrency creates a history verifier, starts a new database
 -- and runs the verifier.
-function check_concurrency(name, isolations, txns, verify, exp_success, rm)
+function check_concurrency(name, isolations, txns, verify, exp_success)
+	init_range_manager()
 	local v = history_verifier_mt.new(name, txns, verify, exp_success)
-	v:run(isolations, rm)
+	v:run(isolations, range_manager)
 end
 
---[[
+-- [[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -576,10 +648,11 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 			assert(env["C"] == 2 or env["C"] == 0, ("expected C to be either 0 or 2, got %s"):format(tostring(env["C"])))
 		end,
 	}
-	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true, range_manager)
+	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true)
 end)
 -- ]]
 
+-- [[
 -- TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
 -- are subject to the lost update anomaly. This anomaly is prevented
 -- in most cases by using the the READ_COMMITTED ANSI isolation level.
@@ -601,11 +674,12 @@ test("TestTxnDBLostUpdateAnomaly", function ()
 	local verify = {
 		history = "R(A)",
 		check = function (env)
-			assert(env["A"] ~= 2, ("expected A=2, got %d"):format(tostring(env["A"])))
+			assert(env["A"] == 2, ("expected A=2, got %s"):format(tostring(env["A"])))
 		end,
 	}
-	check_concurrency("lost update", both_isolations, {txn, txn}, verify, true, range_manager)
+	check_concurrency("lost update", both_isolations, {txn, txn}, verify, true)
 end)
+-- ]]
 
 --[[
 // TestTxnDBPhantomReadAnomaly verifies that neither SI nor SSI isolation

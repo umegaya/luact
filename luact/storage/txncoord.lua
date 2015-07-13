@@ -13,12 +13,13 @@ local key = require 'luact.cluster.dht.key'
 
 local _M = {}
 
-exception.define('txn_aborted')
-exception.define('txn_committed')
-exception.define('txn_old_retry')
-exception.define('txn_future_ts')
-exception.define('txn_push_fail')
-exception.define('txn_need_retry')
+exception.define('txn_aborted', { recoverable = true })
+exception.define('txn_committed', { recoverable = true })
+exception.define('txn_old_retry', { recoverable = true })
+exception.define('txn_future_ts', { recoverable = true })
+exception.define('txn_push_fail', { recoverable = true })
+exception.define('txn_invalid', { recoverable = true })
+exception.define('txn_need_retry', { recoverable = true })
 
 -- cdefs
 ffi.cdef [[
@@ -38,14 +39,16 @@ typedef struct luact_dht_txn {
 	luact_uuid_t coord;
 	uint16_t n_retry;
 	uint8_t status, isolation;
-	uint32_t priority;
-	pulpo_walltime_t last_update;
+	luact_uuid_t id;
+	uint32_t priority; //txn priority. lower value == higher priority
 	pulpo_hlc_t timestamp; //proposed timestamp
 	pulpo_hlc_t start_at; //current txn start timestamp
 	pulpo_hlc_t max_ts; //start_at + maximum clock skew
-	pulpo_hlc_t init_at; //transaction creation timestamp. never changed afterward
+	pulpo_hlc_t init_at;
+	pulpo_hlc_t last_update;
 } luact_dht_txn_t;
 ]]
+assert(ffi.offsetof('luact_dht_txn_t', 'last_update') == 64)
 local TXN_STATUS_PENDING = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_PENDING')
 local TXN_STATUS_ABORTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_ABORTED')
 local TXN_STATUS_COMMITTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_COMMITTED')
@@ -60,6 +63,8 @@ _M.SNAPSHOT = SNAPSHOT
 _M.SERIALIZABLE = SERIALIZABLE
 _M.LINEARIZABLE = LINEARIZABLE
 
+_M.DEFAULT_PRIORITY = 1
+
 -- const
 -- TxnRetryOptions sets the retry options for handling write conflicts.
 local retry_opts = {
@@ -68,6 +73,7 @@ local retry_opts = {
 	wait_multiplier = 2,
 	max_attempt = 0, -- infinite
 }
+_M.retry_opts = retry_opts
 
 
 -- txn
@@ -80,21 +86,21 @@ function txn_mt.alloc()
 	end
 	return memory.alloc_typed('luact_dht_txn_t')
 end
-function txn_mt.new(coord, isolation, debug_opts)
+function txn_mt.new(coord, priority, isolation, debug_opts)
 	local p = txn_mt.alloc()
-	p:init(coord, isolation, debug_opts)
+	p:init(coord, priority, isolation, debug_opts)
 	return p
 end
-function txn_mt:init(coord, isolation, debug_opts)
+function txn_mt:init(coord, priority, isolation, debug_opts)
 	local ts = _M.clock:issue()
 	self.coord = coord
-	self.init_at = ts
+	self.id = uuid.new()
 	self.start_at = ts
 	self:refresh_timestamp(ts)
 	self.isolation = isolation or SERIALIZABLE
 	self.status = TXN_STATUS_PENDING
-	self.last_update = 0
-	self.priority = 0
+	self.last_update:init()
+	self.priority = priority and _M.make_priority(priority) or _M.DEFAULT_PRIORITY
 	self.n_retry = 0
 	if debug_opts then
 		for k,v in pairs(debug_opts) do
@@ -103,44 +109,51 @@ function txn_mt:init(coord, isolation, debug_opts)
 		end
 	end
 end
+function txn_mt:storage_key()
+	return ffi.cast('char *', self.id), ffi.sizeof('luact_uuid_t')
+end
 function txn_mt:fin()
 	self:invalidate()
 	table.insert(txn_mt.cache, self)
 end
 txn_mt.__gc = txn_mt.fin
 function txn_mt:__eq(txn)
+	if ffi.cast('void *', txn) == nil then
+		return ffi.cast('void *', self) == nil
+	end
 	return memory.cmp(self, txn, ffi.sizeof('luact_dht_txn_t'))
 end
 function txn_mt:__len()
 	return ffi.sizeof('luact_dht_txn_t')
 end
+-- [[
 function txn_mt:__tostring()
-	return ("txn(%s):%s:%s,sts(%s),ts(%s),max_ts(%s),st(%d),n(%d)"):format(
+	return ("txn(%s):%s,sts(%s),ts(%s),max_ts(%s),st(%d),n(%d),p(%d)"):format(
 		tostring(ffi.cast('void *', self)),
-		tostring(self.coord),
-		tostring(self.init_at),
+		tostring(self.id),
 		tostring(self.start_at),
 		tostring(self.timestamp),
 		tostring(self.max_ts),
-		self.status, self.n_retry
+		self.status, self.n_retry, self.priority
 	)
 end
+--]]
 function txn_mt:clone(debug_opts)
 	if not debug_opts then
 		local p = txn_mt.alloc()
 		ffi.copy(p, self, ffi.sizeof(self))
 		return p
 	else
-		for _, key in ipairs({"init_at", "start_at", "timestamp", "status", "max_ts", "n_retry", "last_update"}) do
+		for _, key in ipairs({"start_at", "timestamp", "status", "max_ts", "n_retry", "last_update", "priority", "id"}) do
 			if not debug_opts[key] then
 				debug_opts[key] = self[key]
 			end
 		end
-		return txn_mt.new(self.coord, self.isolation, debug_opts)
+		return txn_mt.new(self.coord, self.priority, self.isolation, debug_opts)
 	end
 end
 function txn_mt:same_origin(txn)
-	return uuid.equals(self.coord, txn.coord) and (self.init_at == txn.init_at)
+	return txn and uuid.equals(self.id, txn.id)
 end
 function txn_mt:max_timestamp()
 	return self.max_ts
@@ -148,33 +161,35 @@ end
 function txn_mt:refresh_timestamp(at)
 	local ts = at or _M.clock:issue()
 	self.timestamp = ts
-	self.max_ts = ts:add_walltime(_M.opts.max_clock_skew)
+	ts:copy_to(self.max_ts)
+	self.max_ts:add_walltime(_M.max_clock_skew())
 end
 function txn_mt:valid()
 	--print('txn:valid', self, self.coord)
-	return uuid.valid(self.coord)
+	return uuid.valid(self.id)
 end
 function txn_mt:invalidate()
-	uuid.invalidate(self.coord)
+	uuid.invalidate(self.id)
 end
-function txn_mt:as_key()
-	return self.init_at:as_byte_string()
+function txn_mt:local_key()
+	return ffi.string(self:storage_key())
 end
 function txn_mt:restart(priority, timestamp)
+	self.n_retry = self.n_retry + 1 -- add retry count
 	if self.timestamp < timestamp then
 		self.timestamp = timestamp
 	end
 	self.start_at = self.timestamp
-	if self.priority < priority then
-		self.priority = priority
-	end
+	self:upgrade_priority(priority)
+	-- logger.report('txn restart', self)
 end
 function txn_mt:update_with(txn)
 	if not txn then 
 		return
 	end
-	if not txn:valid() then
-		self:invalidate()
+	if not self:valid() then
+		ffi.copy(self, txn, ffi.sizeof('luact_dht_txn_t'))
+		return
 	end
 	if txn.status ~= TXN_STATUS_PENDING then
 		self.status = txn.status
@@ -193,6 +208,14 @@ function txn_mt:update_with(txn)
 	end
 	self.max_ts = txn.max_ts
 end
+function txn_mt:upgrade_priority(minimum_priority)
+	if minimum_priority > self.priority then
+		self.priority = minimum_priority
+	end
+end
+function txn_mt:debug_set_priority(priority)
+	self.priority = priority
+end
 ffi.metatype('luact_dht_txn_t', txn_mt)
 serde_common.register_ctype('struct', 'luact_dht_txn', nil, serde_common.LUACT_DHT_TXN)
 
@@ -204,33 +227,40 @@ txn_coord_mt.__index = txn_coord_mt
 txn_coord_mt.range_work1 = memory.alloc_typed('luact_dht_key_range_t')
 txn_coord_mt.range_work2 = memory.alloc_typed('luact_dht_key_range_t')
 function txn_coord_mt:initialize()
-	self:start_heartbeat()
+end
+function txn_coord_mt:__actor_destroy__()
 end
 function txn_coord_mt:start(txn)
-	local k = txn:as_key()
+	local k = txn:local_key()
 	if self.txns[k] then
 		exception.raise('fatal', 'txn already exists', txn.start_at)
 	end
-	self.txns[k] = {txn = txn, keys = {}}
+	local th = self:start_heartbeat(txn)
+	assert(th, "thread create fails")
+	self.txns[k] = {txn = txn, th = th}
 end
-function txn_coord_mt:heartbeat()
-	for k, txn_data in pairs(self.txns) do
-		local k, kl, txn = txn_data[1]:key(), txn_data[1]:keylen(), txn_data.txn
-		local ok, r = pcall(_M.range_manager.heartbeat_txn, _M.range_manager, k, kl, txn)
+function txn_coord_mt:heartbeat(txn)
+	while true do
+		local ok, r = pcall(_M.range_manager.heartbeat_txn, _M.range_manager, txn)
 		if ok then -- transaction finished by other process (maybe max timestamp exceed)
 			if r.status ~= TXN_STATUS_PENDING then
-				_M.resolve_version(r) -- 
+				logger.info('txn seems finished', r)
+				ok, r = pcall(_M.resolve_version, r)
+				if not ok then
+					logger.error('resolve txn fails', r)
+				end
 			end
 		else
-			logger.warn('heartbeat_txn error', r)
+			logger.error('heartbeat_txn error', txn, r)
 		end
+		luact.clock.sleep(self.opts.txn_heartbeat_interval)
 	end
 end
-function txn_coord_mt:start_heartbeat()
-	self.hbt = tentacle(self.heartbeat, self)
+function txn_coord_mt:start_heartbeat(txn)
+	return tentacle(self.heartbeat, self, txn)
 end
 function txn_coord_mt:finish(txn, exist_txn, commit)
-	logger.report('txn_coord_mt:finish', commit, exist_txn)
+	-- logger.report('txn_coord_mt:finish', commit, exist_txn)
 	local reply
 	if exist_txn then
 		-- Use the persisted transaction record as final transaction.
@@ -241,11 +271,11 @@ function txn_coord_mt:finish(txn, exist_txn, commit)
 			exception.raise('txn_aborted', reply)
 		elseif txn.n_retry < reply.n_retry then
 			exception.raise('txn_old_retry', txn.n_retry, reply.n_retry, reply)
-		elseif reply.timestamp < txn.timestamp then
+		elseif reply.timestamp < txn.start_at then
 			-- The transaction record can only ever be pushed forward, so it's an
 			-- error if somehow the transaction record has an earlier timestamp
 			-- than the transaction timestamp.
-			exception.raise('txn_future_ts', txn.timestamp, reply.timestamp, reply)
+			exception.raise('txn_future_ts', txn.start_at, reply.timestamp, reply)
 		end
 		-- Take max of requested epoch and existing epoch. The requester
 		-- may have incremented the epoch on retries.
@@ -266,7 +296,8 @@ function txn_coord_mt:finish(txn, exist_txn, commit)
 		-- If the isolation level is SERIALIZABLE, return a transaction
 		-- retry error if the commit timestamp isn't equal to the txn
 		-- timestamp.
-		if txn.isolation == SERIALIZE and reply.timestamp == txn.start_at then
+		-- logger.info('iso', txn.isolation == SERIALIZABLE, reply.timestamp, txn.start_at)
+		if txn.isolation == SERIALIZABLE and reply.timestamp ~= txn.start_at then
 			exception.raise('txn_need_retry', reply)
 		end
 		reply.status = TXN_STATUS_COMMITTED
@@ -280,8 +311,9 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	if commit ~= nil then
 		txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
 	end
-	local key = txn:as_key()	
+	local key = txn:local_key()	
 	local txn_data = self.txns[key]
+	tentacle.cancel(txn_data.th) -- stop heartbeat
 	self.txns[key] = nil
 	local ranges = {}
 	-- get ranges to send end_txn. (de-dupe is done in txn_coord_mt:add_cmd)
@@ -293,14 +325,13 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	for i=1,#txn_data do
 		-- commit each range.
 		local c = txn_data[i]
-		local k, kl, kind = c:key(), c:keylen(), c.kind
-		local rng = _M.range_manager:find(k, kl, kind)
-		table.insert(evs, tentacle(function (r, sk, skl, ek, ekl)
-			local ekstr = ek and ffi.string(ek, ekl) or "[empty]"
-			logger.info('rng:resolve', ffi.string(sk, skl), ekstr)
-			local n = rng:resolve(txn, 0, sk, skl, ek, ekl) -- 0 means all records in the range
-			logger.info('rng:resolve end', n, 'processed between', ffi.string(sk, skl), ekstr)
-		end, rng, k, kl, c:end_key(), c:end_keylen()))
+		table.insert(evs, tentacle(function (rm, k, kl, kind, ek, ekl)
+			local rng = rm:find(k, kl, kind)
+			-- local ekstr = ek and ffi.string(ek, ekl) or "[empty]"
+			-- logger.info('rng:resolve', ffi.string(k, kl), ekstr)
+			local n = rng:resolve(txn, 0, k, kl, ek, ekl) -- 0 means all records in the range
+			-- logger.info('rng:resolve end', n, 'processed between', ffi.string(k, kl), ekstr)
+		end, _M.range_manager, c:key(), c:keylen(), c.kind, c:end_key(), c:end_keylen()))
 	end
 	if sync then
 		logger.info('wait all resolve completion')
@@ -310,7 +341,11 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	end
 end
 function txn_coord_mt:add_cmd(txn, cmd)
-	local txn_data = self.txns[txn:as_key()]
+	local txn_data = self.txns[txn:local_key()]
+	if not txn_data then
+		txn_data = {}
+		self.txns[txn:local_key()] = txn_data
+	end
 	local keyrng, kr = self.range_work1, self.range_work2
 	keyrng:init(cmd:key(), cmd:keylen(), cmd:end_key(), cmd:end_keylen())
 	local ridx = {}
@@ -325,16 +360,6 @@ function txn_coord_mt:add_cmd(txn, cmd)
 		end
 	end
 	table.insert(txn_data, cmd)
-	txn.last_update = util.msec_walltime()
-end
-function txn_coord_mt:txn_key(txn)
-	local txn_data = self.txns[txn:as_key()]
-	if (not txn_data) or (#txn_data <= 0) then
-		print('txn_key, no commands')
-		return 
-	end
-	local c = txn_data[1]
-	return c:key(), c:keylen()
 end
 
 
@@ -342,28 +367,34 @@ end
 local default_opts = {
 	max_clock_skew = 0.25, -- 250 msec
 	linearizable = false, -- no linearizability
+	txn_heartbeat_interval = 5.0, -- 5sec
+	batch_size = 100,
 }
 function _M.initialize(rm, opts)
 	_M.range_manager = rm
 	_M.clock = rm.clock
 	_M.opts = util.merge_table(default_opts, opts or {})
+	if _M.coord_actor then
+		luact.kill(_M.coord_actor)
+		_M.coord_actor = nil
+	end
 	_M.coordinator = setmetatable({
+		opts = _M.opts,
 		txns = {},
 	}, txn_coord_mt)
 	_M.coordinator:initialize()
 	_M.coord_actor = luact(_M.coordinator)
 end
-function _M.new_txn(isolation, txn)
+function _M.new_txn(priority, isolation, txn)
 	if txn then
-		txn:initialize(_M.coord_actor, isolation)
+		txn:init(_M.coord_actor, priority, isolation)
 	else
-		txn = txn_mt.new(_M.coord_actor, isolation)
+		txn = txn_mt.new(_M.coord_actor, priority, isolation)
 	end
 	_M.coordinator:start(txn)
 	return txn
 end
-function _M.run_txn(opts, proc, ...)
-	opts = opts or {}
+function _M.run_txn(opts, fn, ...)
 	return util.retry(retry_opts, function (txn, on_commit, proc, ...)
 		txn.status = TXN_STATUS_PENDING
 		local ok, r = pcall(proc, txn, ...)
@@ -373,10 +404,10 @@ function _M.run_txn(opts, proc, ...)
 				if on_commit then on_commit(...) end
 			end
 			return util.retry_pattern.STOP
-		elseif r:is('mvcc') then
-			if r.args[1] == 'txn_ts_uncertainty' then
-				return util.retry_pattern.RESTART
-			end
+		elseif r:is('actor_no_body') then
+			return util.retry_pattern.RESTART
+		elseif r:is('txn_ts_uncertainty') then
+			return util.retry_pattern.RESTART
 		elseif r:is('txn_aborted') then
 			return util.retry_pattern.CONTINUE
 		elseif r:is('txn_push_fail') then
@@ -384,8 +415,10 @@ function _M.run_txn(opts, proc, ...)
 		elseif r:is('txn_need_retry') then
 			return util.retry_pattern.RESTART
 		end
+		logger.warn('txn aborted by error', r)
+		_M.range_manager:end_txn(txn, false)
 		return util.retry_pattern.ABORT
-	end, _M.new_txn(opts.isolation), opts.on_commit, proc, ...)
+	end, _M.new_txn(opts.priority, opts.isolation), opts.on_commit, fn, ...)
 end
 function _M.resolve_version(txn, commit, sync)
 	_M.coordinator:resolve_version(txn, commit, sync)
@@ -395,6 +428,23 @@ function _M.end_txn(txn, exist_txn, commit)
 end
 function _M.add_cmd(txn, cmd, kind)
 	_M.coordinator:add_cmd(txn, cmd)
+end
+-- TODO : max clock skew should be change according to cluster environment, so measure it.
+function _M.max_clock_skew()
+	return _M.opts.max_clock_skew
+end
+function _M.storage_key(txn)
+	-- TODO : cockroach use first key which handled by this txn, as prefix. is it effective?
+	-- because UUID itself is enough for identification of each transaction.
+	-- local c = _M.coordinator.txns[txn:local_key()]
+	-- print('c', c, #c)
+	-- if (not c) or (#c < 1) then return nil end
+	-- local k = ffi.string(c:key(), c:keylen())..txn:storage_key()
+	-- return k, #k
+	if not txn then
+		logger.error('txn null')
+	end
+	return txn:storage_key()
 end
 -- MakePriority generates a random priority value, biased by the
 -- specified userPriority. If userPriority=100, the resulting
@@ -423,12 +473,9 @@ function _M.make_priority(user_priority)
 	--   ...etc
 	return 0xFFFFFFFF - math.random(0xFFFFFFFF/user_priority)
 end
-function _M.txn_key(txn)
-	return _M.coordinator:txn_key(txn)
-end
 
 function _M.debug_make_txn(debug_opts)
-	return txn_mt.new(_M.coord_actor, nil, debug_opts)[0]
+	return txn_mt.new(_M.coord_actor, nil, nil, debug_opts)[0]
 end
 
 return _M

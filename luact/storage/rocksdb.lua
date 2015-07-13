@@ -201,7 +201,7 @@ local luact_rocksdb_mt = {
 function luact_rocksdb_index:fin()
 	for i=0,tonumber(self.cfused)-1 do
 		if self.handles[i].refc > 0 then
-			logger.warn('rocksdb', 'column_family leak', self.names[i])
+			logger.warn('rocksdb', 'column_family leak', ffi.string(self.names[i]))
 		end
 		-- only when database itself finished, column family can destroy.
 		-- otherwise we never be able to re-create it.

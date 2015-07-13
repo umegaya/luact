@@ -66,7 +66,7 @@ function gossip_index:run(mship)
 		clock.sleep(cooldown)
 		cooldown = cooldown * 2
 		if cooldown > opts.startup_timeout then
-			ev:emit('error', exception.new('timeout', 'gossip start up', startup_timeout))
+			ev:emit('error', exception.new('actor_timeout', 'gossip start up', startup_timeout))
 			return
 		end
 	end

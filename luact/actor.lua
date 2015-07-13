@@ -20,8 +20,8 @@ exception.define('actor_not_found')
 exception.define('actor_no_body')
 exception.define('actor_no_method')
 exception.define('actor_error')
-exception.define('actor_runtime_error')
-exception.define('actor_timeout')
+exception.define('actor_runtime_error', { recoverable = true })
+exception.define('actor_timeout', { recoverable = true })
 exception.define('actor_temporary_fail')
 
 
@@ -311,7 +311,7 @@ local function process_retval(ok, ...)
 	end
 end
 function _M.is_fatal_error(e)
-	return not (e:is('runtime') or e:is('actor_runtime_error') or e:is('actor_timeout'))
+	return not e.recoverable
 end
 function _M.dispatch_send(local_id, method, ...)
 	local s = uuid.serial_from_local_id(local_id)

@@ -48,15 +48,21 @@ function util.retry(opts, fn, ...)
 			elseif r == retry_pattern.CONTINUE then
 				n_fail = n_fail + 1
 			elseif r == retry_pattern.ABORT then
+				logger.report('retry abort')
 				return false
 			else
 				return true, ret
 			end
-			if n_fail < opts.max_attempt then
+			if n_fail > 0 then	
+				if opts.max_attempt > 0 and n_fail >= opts.max_attempt then
+					logger.info('reach to max atempt', n_fail, opts.max_attempt)
+					return false
+				end	
 				clock.sleep(wait_sec)
 				wait_sec = math.min(opts.max_wait, wait_sec * opts.wait_multiplier)
 			end
 		else
+			-- logger.report('retry fails', r)
 			return false, r
 		end
 	end

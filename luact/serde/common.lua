@@ -110,6 +110,7 @@ local map_ctype_id = {
 local map_id_ctype = {}
 local map_id_ctype_ptr = {}
 -- reserve system ctype id
+-- TODO : this should be move to independent file
 _M.LUACT_UUID = 1
 _M.LUACT_GOSSIP_NODELIST = 2
 _M.LUACT_RAFT_SNAPSHOT_HEADER = 3
@@ -132,6 +133,7 @@ _M.LUACT_DHT_CMD_RESOLVE = 19
 _M.LUACT_DHT_TXN = 20
 _M.LUACT_DHT_CMD_RESOLVE_TXN = 21
 _M.LUACT_DHT_CMD_END_TXN = 22
+_M.LUACT_DHT_CMD_HEARTBEAT_TXN = 23
 
 -- packer maps
 _M.serpent_packer = {}

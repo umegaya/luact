@@ -57,9 +57,9 @@ local MVCC_KEY_VERSIONED = ffi.cast('luact_mvcc_key_type_t', 'MVCC_KEY_VERSIONED
 
 -- exception
 exception.define('mvcc')
-exception.define('txn_exists')
-exception.define('txn_ts_uncertainty')
-exception.define('txn_write_too_old')
+exception.define('txn_exists', { recoverable = true })
+exception.define('txn_ts_uncertainty', { recoverable = true })
+exception.define('txn_write_too_old', { recoverable = true })
 
 
 -- local functions
@@ -194,6 +194,15 @@ function mvcc_meta_mt:set_txn(txn)
 	else
 		self.txn:invalidate()
 	end
+end
+function mvcc_meta_mt:valid_txn(txn)
+	return txn and (ffi.cast('void *', txn) ~= nil)
+end
+function mvcc_meta_mt:txn_conflicts_with(txn)
+	return self.txn:valid() and ((not self:valid_txn(txn)) or (not self.txn:same_origin(txn)))
+end
+function mvcc_meta_mt:txn_equals_to(txn)
+	return self.txn:valid() and self:valid_txn(txn) and self.txn:same_origin(txn)
 end
 function mvcc_meta_mt:set_current_kv_len(kl, vl)
 	self.key_len, self.val_len = kl, vl
@@ -394,8 +403,8 @@ end
 function mvcc_mt:column_family(name, opts)
 	exception.raise('mvcc', 'not_support', 'please implement it properly for each kind of mvcc')
 end
-function mvcc_mt:default_filter(k, kl, v, vl, ts, txn, opts, n, results)
-	local value, value_len, value_ts = self:rawget_internal(k, kl, v, vl, ts, txn, opts)
+function mvcc_mt:default_filter(k, kl, v, vl, ts, txn, consistent, opts, n, results)
+	local value, value_len, value_ts = self:rawget_internal(k, kl, v, vl, ts, txn, consistent, opts)
 	-- print('filter', pstr(v, vl), ts, value, value_len)
 	if value then
 		-- print(n, pstr(k, kl), pstr(value, value_len))
@@ -447,17 +456,17 @@ function mvcc_mt:committed_filter(k, kl, v, vl, fn, options, it)
 		end
 	end
 end
-function mvcc_mt:scan_internal(s, sl, e, el, n, boundary, ts, txn, opts)
+function mvcc_mt:scan_internal(s, sl, e, el, n, boundary, ts, txn, consistent, opts)
 	local results = {}
-	local it = self:rawscan_internal(s, sl, e, el, opts, self.default_filter, boundary, ts, txn, opts, n, results)
+	local it = self:rawscan_internal(s, sl, e, el, opts, self.default_filter, boundary, ts, txn, consistent, opts, n, results)
 	if #results > 0 then 
 		-- hold iterator to retain memory block from it
 		results[0] = it
 	end
 	return results -- after results gc'ed, it will be freed.
 end
-function mvcc_mt:scan(s, sl, e, el, n, ts, txn, opts)
-	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_ge, ts, txn, opts)
+function mvcc_mt:scan(s, sl, e, el, n, ts, txn, consistent, opts)
+	return self:scan_internal(s, sl, e, el, n, mvcc_mt.break_if_ge, ts, txn, consistent, opts)
 end
 function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
 	local iter = self.db:iterator(opts)
@@ -576,8 +585,8 @@ function mvcc_mt:seek_next(k, kl, until_k, until_kl, reject_boundary)
 		end
 	end
 end	
-function mvcc_mt:get(k, ts, txn, opts)
-	local v, vl, value_ts = self:rawget(k, #k, ts, txn, opts)
+function mvcc_mt:get(k, ts, txn, consistent, opts)
+	local v, vl, value_ts = self:rawget(k, #k, ts, txn, consistent, opts)
 	if v then
 		local s = ffi.string(v, vl)
 		memory.free(v)
@@ -586,6 +595,9 @@ function mvcc_mt:get(k, ts, txn, opts)
 end
 --[[
 get 
+
+meta.timestamp => commitされた最新の値のtimestamp
+
 1. 確定した値の時刻以降の値を読みたい場合
 transactionが進行中のキーは、そのtransactionからの読み取りである場合を除き、最後に確定した値の時刻以降の値を読むことはできないのでエラー
 そのtransactionの読み取りである場合、リトライが発生したと考えられる場合は、最新のキーはそのtransaction自体の書き込みであるので、そのtransaction自身にも見えてはいけない値。よってその１つ前のキーを使う(たぶんtransactionによる新しい値の書き込みは最大１つまでにputInternalで制限されている)
@@ -600,16 +612,17 @@ txnの時刻の最大誤差より最後に確定した値の時刻が前の場�
 そのまま与えられた時刻を使って、それよりも昔のキーの内最新のものを取得する。
 
 ]]
-function mvcc_mt:rawget(k, kl, ts, txn, opts)
+function mvcc_mt:rawget(k, kl, ts, txn, consistent, opts)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local meta, ml = self.db:rawget(mk, mkl, opts)
 	if meta == ffi.NULL then
+		-- logger.info('meta data not exists:', pstr(k, kl))
 		return nil
 	end
 	if ml ~= ffi.sizeof('luact_mvcc_metadata_t') then
 		exception.raise('fatal', 'invalid metadata size', ml, ffi.sizeof('luact_mvcc_metadata_t'))
 	end
-	local ok, v, vl, ts = pcall(self.rawget_internal, self, k, kl, meta, ml, ts, txn, opts)
+	local ok, v, vl, ts = pcall(self.rawget_internal, self, k, kl, meta, ml, ts, txn, consistent, opts)
 	memory.free(meta)
 	if ok then 
 		return v, vl, ts
@@ -617,7 +630,8 @@ function mvcc_mt:rawget(k, kl, ts, txn, opts)
 		error(v)
 	end
 end
-function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
+function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
+	-- logger.report('rawget_internal', ffi.string(k, kl))
 	local iter, v, vl, value_ts
 	-- metadata sanity check
 	meta = ffi.cast('luact_mvcc_metadata_t*', meta)
@@ -626,25 +640,46 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 		return meta.value, meta.vlen, ts
 	end
 
-	-- First case: Our read timestamp is ahead of the latest write, or the
-	-- latest write and current read are within the same transaction.
-	local same_txn = meta.txn:valid() and txn and (txn == meta.txn)
-	if (ts >= meta.timestamp) or same_txn then
-		if meta.txn:valid() and (not (txn and txn:same_origin(meta.txn))) then
-			-- if txn already exists, only same txn can read latest value.
-			logger.warn('txn_exists', txn, meta.txn, txn and txn:same_origin(meta.txn))
-			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
-		end
+	-- local ignoredIntents = {}
+	if (not consistent) and meta.txn:valid() and (ts >= meta.timestamp) then
+		-- If we're doing inconsistent reads and there's an intent, we
+		-- ignore the intent by insisting that the timestamp we're reading
+		-- at is a historical timestamp < the intent timestamp. However, we
+		-- TODO : return the intent separately; the caller may want to resolve it.
+		-- ignoredIntents = append(ignoredIntents, proto.Intent{Key: key, Txn: *meta.Txn})
+		ts:most_lesser_of(meta.timestamp)
+		assert(ts < meta.timestamp)
+	end
+
+	local same_txn = meta:txn_equals_to(txn)
+	-- logger.warn('rawget_internal', ts, meta.timestamp, txn and txn.max_ts, meta.txn)	
+	if (ts >= meta.timestamp) and meta:txn_conflicts_with(txn) then
+		-- if txn already exists, only same txn can read latest value.
+		-- logger.warn('txn_exists', txn, meta.txn, txn and txn:same_origin(meta.txn))
+		exception.raise('txn_exists', pstr(k, kl), meta.txn:clone())
+	-- because trying to read latest value from different txn (if meta.txn:valid()), should cause error on above. so timestamp check *or* same_txn is ok.
+	elseif ts >= meta.timestamp or same_txn then
+		-- logger.warn('read uncommited value:', ts, meta.timestamp, txn, meta.txn, same_txn)
+		-- We are reading the latest value, which is either an intent written
+		-- by this transaction or not an intent at all (so there's no
+		-- conflict). Note that when reading the own intent, the timestamp
+		-- specified is irrelevant; we always want to see the intent (see
+		-- TestMVCCReadWithPushedTimestamp).
 		local latest_key, latest_key_len = _M.bytes_codec:encode(k, kl, meta.timestamp)
 
-		if meta.txn:valid() and (txn.n_retry ~= meta.txn.n_retry) then
+		-- Check for case where we're reading our own txn's intent
+		-- but it's got a different epoch. This can happen if the
+		-- txn was restarted and an earlier iteration wrote the value
+		-- we're now reading. In this case, we skip the intent.
+		if same_txn and (txn.n_retry ~= meta.txn.n_retry) then
 			-- same txn but it retrying transaction. so current latest value may be written by previous (failed) txn.
 			-- in this case, we seek just before version of latest value to ignore it.
 			local key, key_len = _M.bytes_codec:encode(k, kl)
 			-- ignore boundary
 			iter = self:seek_prev(latest_key, latest_key_len, key, key_len, true) 
 		else
-			-- latest write and read in the same txn (no retry is possible). then use latest version of value.
+			-- latest write and read in the same txn or no txn exists in this key, no retry is possible. 
+			-- then use latest version of value.
 			-- dump_db(self.db)
 			-- _M.dump_key(latest_key, latest_key_len)
 			v, vl = self.db:rawget(latest_key, latest_key_len, opts)
@@ -709,7 +744,6 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, opts)
 	if vl > 0 then
 		return v, vl, value_ts
 	else
-		-- logger.notice('rawget_internal, value is 0 len', ffi.string(k, kl))
 		return nil
 	end
 end
@@ -753,6 +787,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 	-- local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
 
 	if meta == ffi.NULL then
+		-- logger.info('meta data not exists create new:', pstr(k, kl))
 		meta = ffi.new('luact_mvcc_metadata_t')
 		exists = false
 	else
@@ -784,7 +819,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- This should not happen since range should check the existing
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
-			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone(), txn)
+			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone())
 		end
 
 		-- We can update the current metadata only if both the timestamp
@@ -864,7 +899,7 @@ function mvcc_mt:rawmerge(stats, k, kl, v, vl, merge_op, ts, txn, opts)
 	if not mergers[merge_op] then
 		exception.raise('not_found', 'no merger', merge_op)
 	end
-	local cv, cvl = self:rawget(k, kl, ts, txn, opts)
+	local cv, cvl = self:rawget(k, kl, lamport.MAX_HLC, txn, true, opts)
 	local r = {mergers[merge_op](k, kl, cv, cvl, v, vl, pvl_work)}
 	if r[1] then
 		if pvl_work[0] > 0 then
@@ -911,8 +946,8 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	ffi.copy(prev_meta_work, meta, ffi.sizeof('luact_mvcc_metadata_t'))
 	-- For cases where there's no write intent to resolve, or one exists
 	-- which we can't resolve, this is a noop.
-	if meta == ffi.NULL or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
-		logger.warn('metadata problem', meta, meta.txn, txn, meta.txn:valid(), meta.txn:same_origin(txn))
+	if meta == nil or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
+		--logger.warn('resolve_version: txn no need to resolve', meta, meta.txn, txn, meta.txn:valid(), meta.txn:same_origin(txn))
 		return
 	end
 	local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
@@ -925,13 +960,13 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- timestamp-encoded key) if timestamp changed.
 	local commit = (txn.status == txncoord.STATUS_COMMITTED)
 	local pushed = (txn.status == txncoord.STATUS_PENDING and meta.txn.timestamp < txn.timestamp)
-	-- logger.info('check commit or pushed', commit, pushed, meta.txn.n_retry, txn.n_retry, txn.status)
+	-- logger.info('check commit or pushed', commit, pushed, meta.txn.n_retry, txn.n_retry, txn.status, meta.txn.timestamp, txn.timestamp)
 	if (commit or pushed) and meta.txn.n_retry == txn.n_retry then
 		-- logger.info('commit or pushed')
 		ffi.copy(orig_timestamp_work, meta.timestamp, ffi.sizeof(meta.timestamp))
 		meta.timestamp = txn.timestamp
 		if pushed then -- keep intent if we're pushing timestamp
-			meta.txn = txn
+			meta:set_txn(txn)
 		else
 			meta.txn:invalidate()
 		end
@@ -956,7 +991,8 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 
 	-- This method shouldn't be called with this instance, but there's
 	-- nothing to do if the epochs match and the state is still PENDING.
-	if txn.status == txncoord.STATUS_PENDING and meta.txn.n_retry == txn.n_retry then
+	if txn.status == txncoord.STATUS_PENDING and meta.txn.n_retry >= txn.n_retry then
+		logger.warn('resolve_version: retry count old and status pending')
 		return
 	end
 
@@ -1000,6 +1036,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 		meta.txn:invalidate()
 		meta:set_current_kv_len(prev_kl, prev_vl)
 		-- meta:set_deleted()
+		logger.info('delete version:', meta.txn)
 		self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
 		local restoredAgeSeconds = math.floor((ts:walltime() - timestamp:walltime())/1000)
 

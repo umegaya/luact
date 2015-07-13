@@ -99,6 +99,9 @@ function _M.serial(t) -- local_id without thread_id
 	return bit.bor(bit.lshift(_M.timestamp(t), _M.SERIAL_BIT_SIZE), t.__detail__.serial)
 end
 function _M.addr(t) 
+	if not t then
+		logger.error('t null')
+	end
 	return t.__tag__.machine_id 
 end
 _M.machine_id = _M.addr
@@ -191,10 +194,6 @@ function _M.owner_machine_of(uuid)
 end
 local uuid_work = ffi.new('luact_uuid_t')
 _M.uuid_work = uuid_work
-function _M.owner_thread_of(uuid_local_id)
-	uuid_work.__tag__.local_id = uuid_local_id
-	return _M.thread_id(uuid_work) == pulpo.thread_id
-end
 function _M.serial_from_local_id(uuid_local_id)
 	uuid_work.__tag__.local_id = uuid_local_id
 	return _M.serial(uuid_work)
@@ -214,6 +213,7 @@ function _M.valid(uuid)
 	return _M.addr(uuid) ~= 0
 end
 function _M.invalidate(uuid)
+	-- logger.error('invalidate', uuid)
 	uuid.__detail__.machine_id = 0
 end
 function _M.debug_create_id(machine_id, thread_id, buffer)

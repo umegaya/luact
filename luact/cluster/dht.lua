@@ -92,10 +92,9 @@ local default_opts = {
 	root_range_send_interval = 30,
 	replica_maintain_interval = 1.0,
 	collect_garbage_interval = 60 * 60,
-	txn_heartbeat_interval = 3.0,
 	range_size_max = 64 * 1024 * 1024,
 	gossip_port = 8008,
-	range_prefetch = 8,
+	range_prefetch_count = 8,
 }
 local function configure_datadir(opts)
 	if not opts.datadir then
@@ -113,6 +112,7 @@ function _M.initialize(parent_address, opts)
 		luact.clock.sleep(1)
 	end
 	io.write('\n')
+	txncoord.initialize(range_manager, opts.txncoord)
 	logger.notice('waiting dht module initialization finished')
 end
 

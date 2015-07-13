@@ -10,6 +10,9 @@ local _M = {}
 local cache_mt = {}
 cache_mt.__index = cache_mt
 function cache_mt:find(k, kl)
+	if not k then
+		logger.error('invalid key:', k)
+	end
 	kl = kl or #k
 	for i=1,#self do
 		-- logger.info('cache search', self[i].start_key, self[i]:include(k, kl))
@@ -57,6 +60,15 @@ function cache_mt:each_belongs_to(node, block, ...)
 	for i=1,#self do
 		if self[i]:belongs_to(node) then
 			block(self[i], ...)
+		end
+	end
+end
+function cache_mt:clear(dtor)
+	for i=#self,1,-1 do
+		local c = self[i]
+		table.remove(self, i)
+		if dtor then
+			dtor(c)
 		end
 	end
 end

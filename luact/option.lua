@@ -26,6 +26,7 @@ return {
 		timeout_resolution = 1, -- 1 sec
 	},
 	dht = {
+		txncoord = {},
 	}, 
 	vid = {
 

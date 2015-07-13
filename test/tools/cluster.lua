@@ -222,13 +222,11 @@ function _M.use_dummy_arbiter(on_read, on_write)
 		if not a then
 			a = luact({
 				read = function (self, timeout, ...)
-				--print('range:read', ...)
 					if on_read then on_read(self, timeout, ...) end
-					return rng:exec_get(storage, ...)
+					return rng:fetch_state(...)
 				end,
 				write = function (self, logs, timeout, dictatorial)
 					if on_write then on_write(self, logs, timeout, dictatorial) end
-					--logger.info('write', logs, timeout, dictatorial)
 					return rng:apply(logs[1])
 				end,
 			})
