@@ -70,8 +70,8 @@ typedef struct luact_dht_cmd_split {
 
 typedef struct luact_dht_cmd_scan {
 	pulpo_hlc_t timestamp;
-	uint8_t kind:8, txn_f:1, consistent:1, padd:6;
-	uint16_t kl, n_process;
+	uint8_t kind:8, txn_f:1, consistent:1, scan_type:4, padd:2;
+	uint16_t kl, ekl, n_process;
 	char p[0];	
 } luact_dht_cmd_scan_t;
 
@@ -325,32 +325,43 @@ ffi.metatype('luact_dht_cmd_cas_t', cas_mt)
 -- scan command
 local scan_mt = util.copy_table(base_mt)
 scan_mt.__index = scan_mt
-function scan_mt.size(kl, txn)
-	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+function scan_mt.size(kl, ekl, txn)
+	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + ekl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
 end
-function scan_mt.new(kind, k, kl, n, timestamp, txn, consistent)
-	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl, txn)))
+function scan_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn, consistent, scan_type)
+	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl, ekl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.kl = kl
+	p.ekl = ekl
+	p.scan_type = scan_type or _M.SCAN_TYPE_NORMAL
 	p.n_process = n or 0
 	p.consistent = consistent and 1 or 0
 	ffi.copy(p:key(), k, kl)
+	if ekl > 0 then
+		ffi.copy(p:endkey(), ek, ekl)
+	end
 	p:set_txn(txn)
 	return p
 end
 _M.scan = scan_mt.new
+_M.SCAN_TYPE_NORMAL = 0
+_M.SCAN_TYPE_RANGE = 1
 function scan_mt:txn_p()
-	return self.k + self.kl
+	return self.p + self.kl + self.ekl
 end
 function scan_mt:__len()
-	return scan_mt.size(self.kl, self:has_txn())
+	return scan_mt.size(self.kl, self.ekl, self:has_txn())
 end
 function scan_mt:create_versioned_value()
 	return false
 end
+function scan_mt:endkey() 
+	return self.p + self.kl
+end
 function scan_mt:apply_to(storage, range)
-	return range:exec_scan(storage, self:key(), self.kl, self.n_process, self.timestamp, self:get_txn(), self.consistent ~= 0)
+	return range:exec_scan(storage, self:key(), self.kl, self:endkey(), self.ekl, 
+		self.n_process, self.timestamp, self:get_txn(), self.consistent ~= 0, self.scan_type)
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 

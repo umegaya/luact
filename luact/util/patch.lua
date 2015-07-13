@@ -48,7 +48,6 @@ function util.retry(opts, fn, ...)
 			elseif r == retry_pattern.CONTINUE then
 				n_fail = n_fail + 1
 			elseif r == retry_pattern.ABORT then
-				logger.report('retry abort')
 				return false
 			else
 				return true, ret

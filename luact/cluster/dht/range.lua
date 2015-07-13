@@ -420,10 +420,12 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 	-- return normal retval
 	return ...
 end
-function range_mt:txn_retryer(command, fn, ...)
+function range_mt:txn_retryer(command, txn, fn, ...)
 	-- If this call is part of a transaction...
-	local txn = command:get_txn()
 	if txn then
+		if txncoord.start_txn(txn) then
+			command:get_txn():update_with(txn)
+		end
 		-- Set the timestamp to the original timestamp for read-only
 		-- commands and to the transaction timestamp for read/write
 		-- commands.
@@ -436,27 +438,29 @@ function range_mt:txn_retryer(command, fn, ...)
 	local success, ret = util.retry(txncoord.retry_opts, function (c, f, replica, ...)
 		f.id = replica -- because f is callable table object and value "id" will reset once called, we set id on every call
 		local r = {pcall(f, replica, ...)}
-		if not r[1] then
-			--logger.info('txn_retryer', unpack(r))
-		end
 		if r[1] then
 			return util.retry_pattern.STOP, r
+		elseif type(r[2]) ~= 'table' then
+			exception.raise('runtime', 'txn_retryer', r[2])
 		elseif r[2]:is('txn_exists') then
-			local conflict_txn = r[2].args[2]
-			-- logger.info('conflict_txn', conflict_txn)
-			local how = c:create_versioned_value() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
-			local ok, res_txn = pcall(range_manager.resolve_txn, range_manager, c:get_txn(), conflict_txn, how, c.timestamp)
-			if ok then
-				-- logger.info('success to resolve: then resolve version', res_txn)
-				range_manager:resolve(c:key(), c:keylen(), c.kind, nil, 0, 0, res_txn.timestamp, res_txn) 
-				-- logger.info('success to resolve: then resolve version end')
-				return util.retry_pattern.RESTART
-			elseif res_txn:is('txn_push_fail') then
-				error(res_txn) -- abort writer side retry (will restart entire transaction)
-			else
-				logger.report('resolve_txn error', res_txn)
-				c:get_txn().timestamp:least_greater_of(conflict_txn.timestamp)
-				return util.retry_pattern.CONTINUE
+			for idx=0,(#r[2].args)-1,2 do
+				local conflict_key = r[2].args[idx+1]
+				local conflict_txn = r[2].args[idx+2]
+				-- logger.info('conflict_txn', conflict_key, conflict_txn)
+				local how = c:create_versioned_value() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
+				local ok, res_txn = pcall(range_manager.resolve_txn, range_manager, c:get_txn(), conflict_txn, how, c.timestamp)
+				if ok then
+					-- logger.info('success to resolve: then resolve version', res_txn)
+					range_manager:resolve(conflict_key, #conflict_key, c.kind, nil, 0, 0, res_txn.timestamp, res_txn) 
+					-- logger.info('success to resolve: then resolve version end')
+					return util.retry_pattern.RESTART
+				elseif res_txn:is('txn_push_fail') then
+					error(res_txn) -- abort writer side retry (will restart entire transaction)
+				else
+					logger.report('resolve_txn error', res_txn)
+					c:get_txn().timestamp:least_greater_of(conflict_txn.timestamp)
+					return util.retry_pattern.CONTINUE
+				end
 			end
 		elseif r[2]:is('txn_write_too_old') then
 			local exist_ts = r[2].args[2]
@@ -479,8 +483,7 @@ function range_mt:write(command, txn, timeout, dictatorial)
 		self:check_replica()
 	end
 	local replica = self.replicas[0]
-	--logger.info('write', command, txn)
-	return self:on_cmd_finished(command, txn, util.msec_walltime(), self:txn_retryer(command, replica.write, replica, {command}, timeout, dictatorial))
+	return self:on_cmd_finished(command, txn, util.msec_walltime(), self:txn_retryer(command, txn, replica.write, replica, {command}, timeout, dictatorial))
 end
 function range_mt:read(k, kl, ts, txn, consistent, timeout)
 	local command = cmd.get(self.kind, k, kl, ts, txn, consistent)
@@ -489,7 +492,7 @@ function range_mt:read(k, kl, ts, txn, consistent, timeout)
 	else
 		self:check_replica()
 		local replica = self.replicas[0]
-		return self:on_cmd_finished(command, txn, self:txn_retryer(command, replica.read, replica, timeout, command))
+		return self:on_cmd_finished(command, txn, self:txn_retryer(command, txn, replica.read, replica, timeout, command))
 	end
 end
 -- operation to range
@@ -543,8 +546,8 @@ function range_mt:split(at, txn, timeout)
 end
 function range_mt:merge_hook()
 end
-function range_mt:scan(k, kl, n, txn, consistent, timeout)
-	return self:write(cmd.scan(self.kind, k, kl, n, range_manager.clock:issue(), txn, consistent), txn, timeout)
+function range_mt:scan(k, kl, ek, ekl, n, txn, consistent, scan_type, timeout)
+	return self:write(cmd.scan(self.kind, k, kl, ek, ekl, n, range_manager.clock:issue(), txn, consistent, scan_type), txn, timeout)
 end
 function range_mt:resolve(txn, n, s, sl, e, el, timeout)
 	-- does not wait for reply
@@ -580,7 +583,6 @@ function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
 		storage:rawput(self.stats, k, kl, v, vl, ts, txn)
 		self:on_write_replica_finished()
 	else
-		logger.notice('exec_put')
 		storage:backend():rawput(k, kl, v, vl)
 	end
 end
@@ -616,9 +618,7 @@ end
 -- make last key of this kind by increment last byte of prefix
 local scan_end_key_work = memory.alloc_typed('char', 1)
 function range_mt:scan_end_key(k, kl)
-	if self.kind >= _M.NON_METADATA_KIND_START then
-		exception.raise('invalid', 'this range, should not scanned', self)
-	elseif self.kind == _M.KIND_META1 then
+	if self.kind == _M.KIND_META1 then
 		return _M.META2_SCAN_END_KEYSTR, #(_M.META2_SCAN_END_KEYSTR) 
 	else -- range data for actual data (DATA_FAMILY)
 		ffi.copy(scan_end_key_work, k, 1)
@@ -626,12 +626,18 @@ function range_mt:scan_end_key(k, kl)
 		return scan_end_key_work, 1
 	end
 end
-function range_mt:exec_scan(storage, k, kl, n, ts, txn, consistent)
+function range_mt:exec_scan(storage, k, kl, ek, ekl, n, ts, txn, consistent, scan_type)
 	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
-	local ek, ekl = self:scan_end_key(k, kl)
-	logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)))
-	range_scan_filter_count = n
-	return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn, consistent)
+	if ekl <= 0 then
+		ek, ekl = self:scan_end_key(k, kl)
+	end
+	logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)), scan_type)
+	if scan_type == cmd.SCAN_TYPE_NORMAL then
+		return storage:scan(k, kl, ek, ekl, n, ts, txn, consistent)		
+	elseif scan_type == cmd.SCAN_TYPE_RANGE then
+		range_scan_filter_count = n
+		return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn, consistent)
+	end
 end
 function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
 	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
@@ -1085,7 +1091,7 @@ function range_manager_mt:find(k, kl, kind)
 			-- find range from meta ranges
 			r = self:find(mk, mkl, _M.NON_METADATA_KIND_START - 1)
 			if r then
-				r = r:scan(mk, mkl, prefetch)
+				r = r:scan(mk, mkl, "", 0, prefetch, nil, true, cmd.SCAN_TYPE_RANGE)
 			end
 		end
 	elseif kind > _M.ROOT_METADATA_KIND then
@@ -1094,7 +1100,7 @@ function range_manager_mt:find(k, kl, kind)
 			-- find range from top level meta ranges
 			r = self:find(k, kl, kind - 1)
 			if r then
-				r = r:scan(k, kl, prefetch)
+				r = r:scan(k, kl, "", 0, prefetch, nil, true, cmd.SCAN_TYPE_RANGE)
 			end
 		end
 	else -- KIND_META1

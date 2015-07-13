@@ -405,12 +405,13 @@ function mvcc_mt:column_family(name, opts)
 end
 function mvcc_mt:default_filter(k, kl, v, vl, ts, txn, consistent, opts, n, results)
 	local value, value_len, value_ts = self:rawget_internal(k, kl, v, vl, ts, txn, consistent, opts)
-	-- print('filter', pstr(v, vl), ts, value, value_len)
+	-- print('filter', ffi.cast('luact_mvcc_metadata_t*', v).txn, ts, txn, value and ffi.string(value, value_len))
 	if value then
 		-- print(n, pstr(k, kl), pstr(value, value_len))
 		if type(n) == 'number' then
 			local ks = ffi.string(k, kl)
-			table.insert(results, {ks, #ks, memory.smart(value), value_len, value_ts})
+			local vs = ffi.string(value, value_len)
+			table.insert(results, {ks, kl, vs, value_len, value_ts})
 			if n > 0 and #results >= n then
 				return true
 			end
@@ -474,12 +475,11 @@ function mvcc_mt:scan_committed(s, sl, e, el, cb, opts)
 end
 -- scan and apply iterator for the meta key in {(s, sl) <= {key} < {e, el}} and its value.
 function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
-	--dump_db(self.db)
+	-- dump_db(self.db)
 	local it = self.db:iterator(opts)
 	it:seek(_M.bytes_codec:encode(s, sl)) --> seek to the smallest of bigger key
 	while it:valid() do
 		local k, kl, ts = _M.bytes_codec:decode(it:key())
-		-- logger.warn('rawscan_internal', pstr(k, kl), pstr(e, el), ts, kl, el)
 		if ts then
 			exception.raise('mvcc', 'invalid_key', 'start key should not be versioned key', pstr(s, sl), ts)
 		end
@@ -487,11 +487,13 @@ function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
 		if boundary(e, el, k, kl) then
 			break
 		end
+		logger.warn('rawscan_internal', pstr(s, sl), pstr(k, kl), pstr(e, el), kl, el, it:valid())
 		local v, vl = it:val()
 		if cb(self, k, kl, v, vl, ...) == true then
 			break
 		end
 		k, kl = _M.bytes_codec:next_of(k, kl)
+		logger.warn('rawscan_internal next:', pstr(k, kl))
 		it:seek(_M.bytes_codec:encode(k, kl)) -- effectively skip all versioned key
 	end
 	return it
@@ -546,11 +548,20 @@ function mvcc_mt:rawscan_all(s, sl, e, el, opts, cb, ...)
 	end
 	return it
 end
--- seek first key which is from_k, from_kl <=/< (key) <=/< k, kl
+-- seek biggest key which satisfies from_k, from_kl <=/< (key) <=/< k, kl.
+-- seeking starts from k, kl to from_k, from_kl
 -- (reject_boundry false/true, respectively)
 function mvcc_mt:seek_prev(k, kl, from_k, from_kl, reject_boundary)
 	local it = self.db:iterator()
 	it:seek(k, kl)
+	--[[
+key:(17)cdata<const char *>: 0x020620c0:34:32:2e:42 @ 0:1241
+key:(17)cdata<char *>: 0x00202970:34:32:2e:42 @ 0:1239
+key:(7)cdata<char *>: 0x00202a70:34:32:2e:42:00
+_M.dump_key(it:key())
+_M.dump_key(k, kl)
+_M.dump_key(from_k, from_kl)
+	]]
 	if not it:valid() then
 		it:last()
 	elseif reject_boundary then
@@ -652,11 +663,11 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 	end
 
 	local same_txn = meta:txn_equals_to(txn)
-	-- logger.warn('rawget_internal', ts, meta.timestamp, txn and txn.max_ts, meta.txn)	
+	-- logger.warn('rawget_internal', ts, meta.timestamp, txn and txn.max_ts, meta.txn, same_txn, meta:txn_conflicts_with(txn))	
 	if (ts >= meta.timestamp) and meta:txn_conflicts_with(txn) then
 		-- if txn already exists, only same txn can read latest value.
 		-- logger.warn('txn_exists', txn, meta.txn, txn and txn:same_origin(meta.txn))
-		exception.raise('txn_exists', pstr(k, kl), meta.txn:clone())
+		exception.raise('txn_exists', ffi.string(k, kl), meta.txn:clone())
 	-- because trying to read latest value from different txn (if meta.txn:valid()), should cause error on above. so timestamp check *or* same_txn is ok.
 	elseif ts >= meta.timestamp or same_txn then
 		-- logger.warn('read uncommited value:', ts, meta.timestamp, txn, meta.txn, same_txn)
@@ -675,7 +686,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 			-- same txn but it retrying transaction. so current latest value may be written by previous (failed) txn.
 			-- in this case, we seek just before version of latest value to ignore it.
 			local key, key_len = _M.bytes_codec:encode(k, kl)
-			-- ignore boundary
+			-- k is meta-key, and we exclude latest_key, so ignore boundary.
 			iter = self:seek_prev(latest_key, latest_key_len, key, key_len, true) 
 		else
 			-- latest write and read in the same txn or no txn exists in this key, no retry is possible. 
@@ -697,13 +708,16 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 			-- absolute time if the writer had a fast clock.
 			-- The reader should try again with a later timestamp than the
 			-- one given below.
-			exception.raise('txn_ts_uncertainty', pstr(k, kl), meta.timestamp:clone(true), txn:max_timestamp())
+			-- (read_ts < meta.timestamp < txn.max_ts)
+			exception.raise('txn_ts_uncertainty', ffi.string(k, kl), meta.timestamp:clone(true), txn:max_timestamp())
 		end
 
+		-- (read_ts < txn.max_ts < meta.timestamp)
 		-- We want to know if anything has been written ahead of timestamp, but
-		-- before MaxTimestamp.
+		-- before MaxTimestamp. (target which is like read_ts < *target* < txn.max_ts)
 		local newest_key, newest_key_len = _M.bytes_codec:encode(k, kl, txn:max_timestamp())
-		iter = self:seek_prev(newest_key, newest_key_len, _M.bytes_codec:encode(k, kl))
+		-- we want to exclude read_ts and txn.max_ts, so ignore boundary
+		iter = self:seek_prev(newest_key, newest_key_len, _M.bytes_codec:encode(k, kl), true)
 		if iter then
 			local newest_ts = _M.bytes_codec:timestamp_of(iter)
 			if newest_ts and (newest_ts > ts) then
@@ -711,7 +725,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 				-- value, but there is another previous write with the same issues
 				-- as in the second case, so the reader will have to come again
 				-- with a higher read timestamp.
-				exception.raise('txn_ts_uncertainty', pstr(k, kl), newest_ts, ts)
+				exception.raise('txn_ts_uncertainty', ffi.string(k, kl), newest_ts, ts)
 			end
 		end
 		-- Fourth case: There's no value in our future up to MaxTimestamp, and
@@ -722,10 +736,12 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 		-- a transaction, or in the absence of future versions that clock
 		-- uncertainty would apply to.
 		local cur_key, cur_key_len = _M.bytes_codec:encode(k, kl, ts)
-		iter = self:seek_prev(cur_key, cur_key_len, _M.bytes_codec:encode(k, kl))
+		-- we exclude metakey but not for cur_key. so use next_of(encode(k, kl)) and include boundary
+		iter = self:seek_prev(cur_key, cur_key_len, _M.bytes_codec:encode(_M.bytes_codec:next_of(k, kl)))
 		-- print('iter', iter)
 		-- _M.dump_key(cur_key, cur_key_len)
 		-- _M.dump_key(iter:key())
+		-- dump_db(self.db)
 	end
 	if not iter then
 		-- logger.notice('rawget_internal, not iter', ffi.string(k, kl))
@@ -734,7 +750,8 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 
 	value_ts = _M.bytes_codec:timestamp_of(iter)
 	if not value_ts then
-		-- logger.notice('rawget_internal, value is nil', ffi.string(k, kl))
+		logger.notice('rawget_internal, no value_ts', ffi.string(k, kl))
+		-- dump_db(self.db)
 		return nil
 	end
 	-- allocate own memory
@@ -819,7 +836,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- This should not happen since range should check the existing
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
-			exception.raise('txn_exists', pstr(k, kl), meta.txn:clone())
+			exception.raise('txn_exists', ffi.string(k, kl), meta.txn:clone())
 		end
 
 		-- We can update the current metadata only if both the timestamp
@@ -841,7 +858,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		elseif (meta.timestamp > ts) and (not meta.txn:valid()) then
 			-- If we receive a Put request to write before an already-
 			-- committed version, send write too old error.
-			exception.raise('txn_write_too_old', pstr(k, kl), meta.timestamp:clone(true), ts)
+			exception.raise('txn_write_too_old', ffi.string(k, kl), meta.timestamp:clone(true), ts)
 		else
 			-- Otherwise, its an old write to the current transaction. Just ignore.
 			return
@@ -928,7 +945,7 @@ function mvcc_mt:resolve_version(stats, k, kl, ts, txn, opts)
 			error(r)
 		end
 	else
-		print('meta not exists', _M.inspect_key(mk, mkl))
+		logger.report('resolve_version: meta not exists', _M.inspect_key(mk, mkl))
 	end
 end
 local orig_timestamp_work = ffi.new('pulpo_hlc_t')
@@ -1011,7 +1028,9 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- _M.dump_key(latest_key, latest_key_len)
 	-- _M.dump_key(limit_key, limit_key_len)
 	-- dump_db(self.db)
-	-- Compute the last possible mvcc value for this key. (ignore boundary)
+	-- Compute the last possible mvcc value for this key. 
+	-- limit_key is meta-key, and the value corresponding to latest_key is already deleted, 
+	-- we ignore boundary
 	local iter = self:seek_prev(latest_key, latest_key_len, limit_key, limit_key_len, true)
 	if not iter then
 	-- print('no possible key: delete meta', ffi.string(k, kl))
@@ -1147,6 +1166,7 @@ function mvcc_mt:gc(stats, keys, opts)
 		-- First, check whether all values of the key are being deleted.
 		if limit_ts >= meta.timestamp then
 			local nk, nkl = _M.bytes_codec:encode(_M.bytes_codec:next_of(k, kl))
+			-- meta-key <= value <= next key of k (gc_key's non-version part)
 			local it_latest_val = self:seek_prev(nk, nkl, mk, mkl)
 			if not it_latest_val then
 				exception.raise('not_found', 'last versioned key', _M.inspect_key(lk, lkl))

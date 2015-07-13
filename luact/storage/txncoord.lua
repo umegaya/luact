@@ -92,11 +92,11 @@ function txn_mt.new(coord, priority, isolation, debug_opts)
 	return p
 end
 function txn_mt:init(coord, priority, isolation, debug_opts)
-	local ts = _M.clock:issue()
 	self.coord = coord
 	self.id = uuid.new()
-	self.start_at = ts
-	self:refresh_timestamp(ts)
+	self.start_at = lamport.ZERO_HLC
+	self.timestamp = lamport.ZERO_HLC
+	self.max_ts = lamport.ZERO_HLC
 	self.isolation = isolation or SERIALIZABLE
 	self.status = TXN_STATUS_PENDING
 	self.last_update:init()
@@ -158,8 +158,12 @@ end
 function txn_mt:max_timestamp()
 	return self.max_ts
 end
-function txn_mt:refresh_timestamp(at)
+function txn_mt:init_timestamp(at)
 	local ts = at or _M.clock:issue()
+	self.start_at = ts
+	self:refresh_timestamp(ts)
+end
+function txn_mt:refresh_timestamp(ts)
 	self.timestamp = ts
 	ts:copy_to(self.max_ts)
 	self.max_ts:add_walltime(_M.max_clock_skew())
@@ -231,6 +235,7 @@ end
 function txn_coord_mt:__actor_destroy__()
 end
 function txn_coord_mt:start(txn)
+	txn:init_timestamp()
 	local k = txn:local_key()
 	if self.txns[k] then
 		exception.raise('fatal', 'txn already exists', txn.start_at)
@@ -391,8 +396,14 @@ function _M.new_txn(priority, isolation, txn)
 	else
 		txn = txn_mt.new(_M.coord_actor, priority, isolation)
 	end
-	_M.coordinator:start(txn)
 	return txn
+end
+function _M.start_txn(txn)
+	if txn and txn.start_at:is_zero() then
+		_M.coordinator:start(txn)
+		assert(not txn.start_at:is_zero())
+		return true
+	end
 end
 function _M.run_txn(opts, fn, ...)
 	return util.retry(retry_opts, function (txn, on_commit, proc, ...)
@@ -404,6 +415,10 @@ function _M.run_txn(opts, fn, ...)
 				if on_commit then on_commit(...) end
 			end
 			return util.retry_pattern.STOP
+		elseif type(r) == 'string' then
+			logger.warn('txn aborted by error', r)
+			_M.range_manager:end_txn(txn, false)
+			return util.retry_pattern.ABORT			
 		elseif r:is('actor_no_body') then
 			return util.retry_pattern.RESTART
 		elseif r:is('txn_ts_uncertainty') then

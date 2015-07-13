@@ -39,7 +39,7 @@ end)
 
 
 -- verbose logger
-local verbose = false
+local verbose = true
 local function vlog(...)
 	if verbose then
 		logger.warn(...)
@@ -136,12 +136,20 @@ function cmd_mt:wait_completion(waiter)
 		-- logger.info('cmd:wait end', waiter, self, self.ev)
 	end
 end
+local function callback(e)
+	if type(e) == 'table' and e.is then
+		e:set_bt()
+	else
+		e = exception.new_with_bt('runtime', debug.traceback(), e)
+	end
+	return e
+end
 function cmd_mt:exec(rm, txn)
 	if self.prev then
 		self.prev:wait_completion(self)
 	end
 	vlog('cmd:exec', self, self.prev)
-	local ok, r = pcall(self.fn, self, rm, txn)
+	local ok, r = xpcall(self.fn, callback, self, rm, txn)
 	self:mark_complete()
 	-- logger.notice('cmd:done', self)
 	if #self.k > 0 and #self.ek > 0 then
@@ -187,17 +195,18 @@ function cmd_mt:delete(rm, txn)
 end
 -- scanCmd reads the values from the db from [key, endKey).
 function cmd_mt:scan(rm, txn)
-	local k = self:key()
-	local rows = self:range(rm):scan(k, #k, 0, txn)
+	local k, ek = self:key(), self:endkey()
+	local rows = self:range(rm):scan(k, #k, ek, #ek, 0, txn, true)
 	local vals = {}
 	local keypfx = tostring(self.history_idx).."."
 	for _, row in ipairs(rows) do
-		local key = rows[1]:sub(#keypfx)
-		local v = tonumber(ffi.string(unpack(rows, 3, 4)))
+		local ks, _, vs, _, ts = unpack(row)
+		local key = ks:sub(#keypfx + 1)
+		local v = tonumber(vs)
 		self.env[key] = v
-		table.insert(vals, v)
+		table.insert(vals, ("%s=%s"):format(key,v))
 	end
-	c.debug = ("[%s ts=%s]"):format(table.concat(vals, " "), g_last_ts)
+	self.debug = ("[{%s} ts=%s]"):format(table.concat(vals, ","), g_last_ts)
 end
 
 -- incCmd adds one to the value of c.key in the env and writes
@@ -546,7 +555,7 @@ function history_verifier_mt:run_history(his_idx, priorities, isolations, histor
 	local verify_strs = {}
 	local verify_env = {}
 	for idx, c in ipairs(self.verify_cmds) do
-		c.history_idx = idx
+		c.history_idx = his_idx
 		c.env = verify_env
 		local report, err = c:exec(rm, nil)
 		if err ~= true then error(err) end
@@ -559,7 +568,7 @@ end
 function history_verifier_mt:run_txn(txn_idx, priority, isolation, cmds, rm)
 	local retry = 0
 	local txn_name = ("txn%d"):format(txn_idx)
-	assert(txncoord.run_txn({isolation = isolation}, function (txn, hv, prio)
+	local ok, r = txncoord.run_txn({isolation = isolation}, function (txn, hv, prio)
 		txn:debug_set_priority(prio)
 		local env = {}
 		-- TODO(spencer): restarts must create additional histories. They
@@ -590,7 +599,11 @@ function history_verifier_mt:run_txn(txn_idx, priority, isolation, cmds, rm)
 			end
 		end
 		]]
-	end, self, priority), "run_txn fails")
+	end, self, priority)
+	if not ok then
+		logger.report(r)
+		os.exit(-3)
+	end
 end
 
 function history_verifier_mt:run_cmd(txn_idx, retry, cmd_idx, cmds, rm, txn)
@@ -608,7 +621,7 @@ function check_concurrency(name, isolations, txns, verify, exp_success)
 	v:run(isolations, range_manager)
 end
 
--- [[
+--[[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -650,9 +663,7 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 	}
 	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true)
 end)
--- ]]
 
--- [[
 -- TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
 -- are subject to the lost update anomaly. This anomaly is prevented
 -- in most cases by using the the READ_COMMITTED ANSI isolation level.
@@ -681,34 +692,33 @@ test("TestTxnDBLostUpdateAnomaly", function ()
 end)
 -- ]]
 
---[[
-// TestTxnDBPhantomReadAnomaly verifies that neither SI nor SSI isolation
-// are subject to the phantom reads anomaly. This anomaly is prevented by
-// the SQL ANSI SERIALIZABLE isolation level, though it's also prevented
-// by snapshot isolation (i.e. Oracle's traditional "serializable").
-//
-// Phantom reads occur when a single txn does two identical queries but
-// ends up reading different results. This is a variant of non-repeatable
-// reads, but is special because it requires the database to be aware of
-// ranges when settling concurrency issues.
-//
-// Phantom reads would typically fail with a history such as:
-//   SC1(A-C) I2(B) C2 SC1(A-C) C1
-func TestTxnDBPhantomReadAnomaly(t *testing.T) {
-	txn1 := "SC(A-C) SUM(D) SC(A-C) SUM(E) C"
-	txn2 := "I(B) C"
-	verify := &verifier{
-		history: "R(D) R(E)",
-		checkFn: func(env map[string]int64) error {
-			if env["D"] != env["E"] {
-				return util.Errorf("expected first SUM == second SUM (%d != %d)", env["D"], env["E"])
-			}
-			return nil
-		},
+-- TestTxnDBPhantomReadAnomaly verifies that neither SI nor SSI isolation
+-- are subject to the phantom reads anomaly. This anomaly is prevented by
+-- the SQL ANSI SERIALIZABLE isolation level, though it's also prevented
+-- by snapshot isolation (i.e. Oracle's traditional "serializable").
+-- 
+-- Phantom reads occur when a single txn does two identical queries but
+-- ends up reading different results. This is a variant of non-repeatable
+-- reads, but is special because it requires the database to be aware of
+-- ranges when settling concurrency issues.
+-- 
+-- Phantom reads would typically fail with a history such as:
+--   SC1(A-C) I2(B) C2 SC1(A-C) C1
+test("TestTxnDBPhantomReadAnomaly", function ()
+	local txn1 = "SC(A-C) SUM(D) SC(A-C) SUM(E) C"
+	local txn2 = "I(B) C"
+	local verify = {
+		history = "R(D) R(E)",
+		check = function (env)
+			if env["D"] ~= env["E"] then
+				assert(env["D"] == env["E"], ("expected first SUM == second SUM (%s != %s)"):format(tostring(env["D"]), tostring(env["E"])))
+			end
+		end,
 	}
-	checkConcurrency("phantom read", bothIsolations, []string{txn1, txn2}, verify, true, t)
-}
+	check_concurrency("phantom read", both_isolations, {txn1, txn2}, verify, true)
+end)
 
+--[[
 // TestTxnDBPhantomDeleteAnomaly verifies that neither SI nor SSI
 // isolation are subject to the phantom deletion anomaly; this is
 // similar to phantom reads, but verifies the delete range
