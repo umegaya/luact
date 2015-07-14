@@ -377,11 +377,10 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 		elseif txn then
 			self:recover_write_error(command, txn, err)
 			if err:is('txn_aborted') then
-				-- abort this txn
+				-- abort this txn by resolving version with aborting status.
 				txncoord.resolve_version(txn)
-				txncoord.new_txn(txn.priority, txn.isolation, txn) -- reinitialize this txn
 			end
-		elseif err:is('txn_required') then -- without txn, this should be checked.
+		elseif err:is('txn_required') then -- without txn, thenis should be checked.
 			exception.raise('fatal', "TODO : start txn on the fly.")
 		end
 		error(err)
@@ -415,7 +414,7 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 			end
 		end
 		-- update with returned transaction (its timestamp may change with retry)
-		txn:update_with(rtxn)
+		txn:update_with(rtxn, true)
 	end
 	-- return normal retval
 	return ...
@@ -631,7 +630,7 @@ function range_mt:exec_scan(storage, k, kl, ek, ekl, n, ts, txn, consistent, sca
 	if ekl <= 0 then
 		ek, ekl = self:scan_end_key(k, kl)
 	end
-	logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)), scan_type)
+	-- logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)), scan_type)
 	if scan_type == cmd.SCAN_TYPE_NORMAL then
 		return storage:scan(k, kl, ek, ekl, n, ts, txn, consistent)		
 	elseif scan_type == cmd.SCAN_TYPE_RANGE then
@@ -665,7 +664,7 @@ function range_mt:exec_heartbeat_txn(storage, ts, txn)
 	local txk, txkl = txncoord.storage_key(txn)
 	local v, vl = storage:backend():rawget(txk, txkl)
 	-- If no existing transaction record was found, initialize
-	-- to the transaction in the request header.
+	-- to the transaction in the request.
 	local exist_txn = (v ~= nil and ffi.gc(ffi.cast('luact_dht_txn_t*', v), memory.free) or txn)
 	if exist_txn.status == txncoord.STATUS_PENDING then
 		if txn.last_update < ts then

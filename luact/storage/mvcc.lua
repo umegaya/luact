@@ -487,13 +487,13 @@ function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
 		if boundary(e, el, k, kl) then
 			break
 		end
-		logger.warn('rawscan_internal', pstr(s, sl), pstr(k, kl), pstr(e, el), kl, el, it:valid())
+		-- logger.warn('rawscan_internal', pstr(s, sl), pstr(k, kl), pstr(e, el), kl, el, it:valid())
 		local v, vl = it:val()
 		if cb(self, k, kl, v, vl, ...) == true then
 			break
 		end
 		k, kl = _M.bytes_codec:next_of(k, kl)
-		logger.warn('rawscan_internal next:', pstr(k, kl))
+		-- logger.warn('rawscan_internal next:', pstr(k, kl))
 		it:seek(_M.bytes_codec:encode(k, kl)) -- effectively skip all versioned key
 	end
 	return it

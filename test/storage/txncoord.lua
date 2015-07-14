@@ -39,7 +39,7 @@ end)
 
 
 -- verbose logger
-local verbose = true
+local verbose = false
 local function vlog(...)
 	if verbose then
 		logger.warn(...)
@@ -621,7 +621,7 @@ function check_concurrency(name, isolations, txns, verify, exp_success)
 	v:run(isolations, range_manager)
 end
 
---[[
+-- [[
 -- The following tests for concurrency anomalies include documentation
 -- taken from the "Concurrency Control Chapter" from the Handbook of
 -- Database Technology, written by Patrick O'Neil <poneil@cs.umb.edu>:
@@ -690,8 +690,8 @@ test("TestTxnDBLostUpdateAnomaly", function ()
 	}
 	check_concurrency("lost update", both_isolations, {txn, txn}, verify, true)
 end)
--- ]]
 
+-- [[
 -- TestTxnDBPhantomReadAnomaly verifies that neither SI nor SSI isolation
 -- are subject to the phantom reads anomaly. This anomaly is prevented by
 -- the SQL ANSI SERIALIZABLE isolation level, though it's also prevented

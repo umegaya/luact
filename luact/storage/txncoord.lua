@@ -44,11 +44,10 @@ typedef struct luact_dht_txn {
 	pulpo_hlc_t timestamp; //proposed timestamp
 	pulpo_hlc_t start_at; //current txn start timestamp
 	pulpo_hlc_t max_ts; //start_at + maximum clock skew
-	pulpo_hlc_t init_at;
 	pulpo_hlc_t last_update;
 } luact_dht_txn_t;
 ]]
-assert(ffi.offsetof('luact_dht_txn_t', 'last_update') == 64)
+assert(ffi.offsetof('luact_dht_txn_t', 'last_update') == 56)
 local TXN_STATUS_PENDING = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_PENDING')
 local TXN_STATUS_ABORTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_ABORTED')
 local TXN_STATUS_COMMITTED = ffi.cast('luact_dht_txn_status_t', 'TXN_STATUS_COMMITTED')
@@ -93,7 +92,7 @@ function txn_mt.new(coord, priority, isolation, debug_opts)
 end
 function txn_mt:init(coord, priority, isolation, debug_opts)
 	self.coord = coord
-	self.id = uuid.new()
+	uuid.invalidate(self.id)
 	self.start_at = lamport.ZERO_HLC
 	self.timestamp = lamport.ZERO_HLC
 	self.max_ts = lamport.ZERO_HLC
@@ -113,6 +112,7 @@ function txn_mt:storage_key()
 	return ffi.cast('char *', self.id), ffi.sizeof('luact_uuid_t')
 end
 function txn_mt:fin()
+	--logger.report('txn_mt:fin', self)
 	self:invalidate()
 	table.insert(txn_mt.cache, self)
 end
@@ -187,11 +187,14 @@ function txn_mt:restart(priority, timestamp)
 	self:upgrade_priority(priority)
 	-- logger.report('txn restart', self)
 end
-function txn_mt:update_with(txn)
+function txn_mt:update_with(txn, report_overwrite)
 	if not txn then 
 		return
 	end
 	if not self:valid() then
+		if report_overwrite then
+			logger.report('copy to invalid txn', self, txn)
+		end
 		ffi.copy(self, txn, ffi.sizeof('luact_dht_txn_t'))
 		return
 	end
@@ -235,14 +238,8 @@ end
 function txn_coord_mt:__actor_destroy__()
 end
 function txn_coord_mt:start(txn)
+	txn.id = uuid.new()
 	txn:init_timestamp()
-	local k = txn:local_key()
-	if self.txns[k] then
-		exception.raise('fatal', 'txn already exists', txn.start_at)
-	end
-	local th = self:start_heartbeat(txn)
-	assert(th, "thread create fails")
-	self.txns[k] = {txn = txn, th = th}
 end
 function txn_coord_mt:heartbeat(txn)
 	while true do
@@ -250,8 +247,10 @@ function txn_coord_mt:heartbeat(txn)
 		if ok then -- transaction finished by other process (maybe max timestamp exceed)
 			if r.status ~= TXN_STATUS_PENDING then
 				logger.info('txn seems finished', r)
-				ok, r = pcall(_M.resolve_version, r)
-				if not ok then
+				ok, r = pcall(_M.resolve_version, r, nil, false, true)
+				if ok then
+					return -- stop hearbbeat for this txn
+				else
 					logger.error('resolve txn fails', r)
 				end
 			end
@@ -312,13 +311,15 @@ function txn_coord_mt:finish(txn, exist_txn, commit)
 
 	return reply
 end
-function txn_coord_mt:resolve_version(txn, commit, sync)
-	if commit ~= nil then
+function txn_coord_mt:resolve_version(txn, commit, sync, keep_hb)
+	if commit ~= nil then -- force set txn status
 		txn.status = commit and TXN_STATUS_COMMITTED or TXN_STATUS_ABORTED
 	end
 	local key = txn:local_key()	
 	local txn_data = self.txns[key]
-	tentacle.cancel(txn_data.th) -- stop heartbeat
+	if not keep_hb then
+		tentacle.cancel(txn_data.th) -- stop heartbeat
+	end
 	self.txns[key] = nil
 	local ranges = {}
 	-- get ranges to send end_txn. (de-dupe is done in txn_coord_mt:add_cmd)
@@ -330,13 +331,13 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	for i=1,#txn_data do
 		-- commit each range.
 		local c = txn_data[i]
-		table.insert(evs, tentacle(function (rm, k, kl, kind, ek, ekl)
+		table.insert(evs, tentacle(function (rm, _txn, k, kl, kind, ek, ekl)
 			local rng = rm:find(k, kl, kind)
 			-- local ekstr = ek and ffi.string(ek, ekl) or "[empty]"
 			-- logger.info('rng:resolve', ffi.string(k, kl), ekstr)
-			local n = rng:resolve(txn, 0, k, kl, ek, ekl) -- 0 means all records in the range
+			local n = rng:resolve(_txn, 0, k, kl, ek, ekl) -- 0 means all records in the range
 			-- logger.info('rng:resolve end', n, 'processed between', ffi.string(k, kl), ekstr)
-		end, _M.range_manager, c:key(), c:keylen(), c.kind, c:end_key(), c:end_keylen()))
+		end, _M.range_manager, txn, c:key(), c:keylen(), c.kind, c:end_key(), c:end_keylen()))
 	end
 	if sync then
 		logger.info('wait all resolve completion')
@@ -346,10 +347,13 @@ function txn_coord_mt:resolve_version(txn, commit, sync)
 	end
 end
 function txn_coord_mt:add_cmd(txn, cmd)
-	local txn_data = self.txns[txn:local_key()]
+	local k = txn:local_key()
+	local txn_data = self.txns[k]
 	if not txn_data then
-		txn_data = {}
-		self.txns[txn:local_key()] = txn_data
+		local th = self:start_heartbeat(txn)
+		assert(th, "thread create fails")
+		txn_data = {txn = txn, th = th}
+		self.txns[k] = txn_data
 	end
 	local keyrng, kr = self.range_work1, self.range_work2
 	keyrng:init(cmd:key(), cmd:keylen(), cmd:end_key(), cmd:end_keylen())
@@ -399,14 +403,15 @@ function _M.new_txn(priority, isolation, txn)
 	return txn
 end
 function _M.start_txn(txn)
-	if txn and txn.start_at:is_zero() then
+	if txn and (not uuid.valid(txn.id)) then
 		_M.coordinator:start(txn)
-		assert(not txn.start_at:is_zero())
+		assert(uuid.valid(txn.id))
 		return true
 	end
 end
 function _M.run_txn(opts, fn, ...)
-	return util.retry(retry_opts, function (txn, on_commit, proc, ...)
+	return util.retry(retry_opts, function (ptxn, on_commit, proc, ...)
+		local txn = ptxn[1]
 		txn.status = TXN_STATUS_PENDING
 		local ok, r = pcall(proc, txn, ...)
 		if ok then
@@ -420,10 +425,12 @@ function _M.run_txn(opts, fn, ...)
 			_M.range_manager:end_txn(txn, false)
 			return util.retry_pattern.ABORT			
 		elseif r:is('actor_no_body') then
-			return util.retry_pattern.RESTART
+			return util.retry_pattern.CONTINUE
 		elseif r:is('txn_ts_uncertainty') then
 			return util.retry_pattern.RESTART
 		elseif r:is('txn_aborted') then
+			-- create new transaction
+			ptxn[1] = _M.new_txn(txn.priority, txn.isolation) 
 			return util.retry_pattern.CONTINUE
 		elseif r:is('txn_push_fail') then
 			return util.retry_pattern.CONTINUE
@@ -433,10 +440,10 @@ function _M.run_txn(opts, fn, ...)
 		logger.warn('txn aborted by error', r)
 		_M.range_manager:end_txn(txn, false)
 		return util.retry_pattern.ABORT
-	end, _M.new_txn(opts.priority, opts.isolation), opts.on_commit, fn, ...)
+	end, {_M.new_txn(opts.priority, opts.isolation)}, opts.on_commit, fn, ...)
 end
-function _M.resolve_version(txn, commit, sync)
-	_M.coordinator:resolve_version(txn, commit, sync)
+function _M.resolve_version(txn, commit, sync, keep_hb)
+	_M.coordinator:resolve_version(txn, commit, sync, keep_hb)
 end
 function _M.end_txn(txn, exist_txn, commit)
 	return _M.coordinator:finish(txn, exist_txn, commit)
