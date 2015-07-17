@@ -5,7 +5,7 @@ tools.start_luact(1, nil, function ()
 
 local luact = require 'luact.init'
 luact.util.msec_walltime = function ()
-	return 0
+	return 10 * 1000
 end
 local range = require 'luact.cluster.dht.range'
 local txncoord = require 'luact.storage.txncoord'
@@ -39,7 +39,7 @@ end)
 
 
 -- verbose logger
-local verbose = false
+local verbose = false 
 local function vlog(...)
 	if verbose then
 		logger.warn(...)
@@ -62,13 +62,15 @@ local function init_range_manager()
 		n_replica = 1, -- allow single node quorum
 		storage = "rocksdb",
 		datadir = luact.DEFAULT_ROOT_DIR,
-		range_size_max = 64 * 1024 * 1024
+		range_size_max = 64 * 1024 * 1024,
+		max_clock_skew = 0,
+		ts_cache_duration = 10.0,
+		txn_heartbeat_interval = 5.0,
 	})
 
 	-- init txn coordinator
-	txncoord.initialize(range_manager, {
-		max_clock_skew = 0,
-	})
+	txncoord.initialize(range_manager, {})
+	assert(txncoord.opts)
 end
 
 -- setCorrectnessRetryOptions sets client for aggressive retries with a
@@ -191,12 +193,14 @@ function cmd_mt:read(rm, txn)
 end
 -- deleteRngCmd deletes the range of values from the db from [key, endKey).
 function cmd_mt:delete(rm, txn) 
-	self:range(rm):delete(self:key(), txn)
+	local k, ek = self:key(), self:endkey()
+	local n = rm:delete_range(range.KIND_STATE, k, #k, ek, #ek, 0, txn)
+	self.debug = ("[%d]"):format(n)
 end
 -- scanCmd reads the values from the db from [key, endKey).
 function cmd_mt:scan(rm, txn)
 	local k, ek = self:key(), self:endkey()
-	local rows = self:range(rm):scan(k, #k, ek, #ek, 0, txn, true)
+	local rows = rm:scan(range.KIND_STATE, k, #k, ek, #ek, 0, txn, true)
 	local vals = {}
 	local keypfx = tostring(self.history_idx).."."
 	for _, row in ipairs(rows) do
@@ -213,7 +217,8 @@ end
 -- it to the db. If c.key isn't in the db, writes 1.
 function cmd_mt:inc(rm, txn)
 	local k = self:key()
-	local r = self:range(rm):merge(k, "1", "inc", txn)
+	local ok, r = self:range(rm):merge(k, "1", "inc", txn)
+	assert(ok, r)
 	self.env[self.k] = tonumber(r)
 	self.debug = ("[%d ts=%s]"):format(r, g_last_ts)
 end
@@ -221,11 +226,15 @@ end
 -- sumCmd sums the values of all keys read during the transaction
 -- and writes the result to the db.
 function cmd_mt:sum(rm, txn)
+	local key = self.k
 	local sum = 0
 	for k,v in pairs(self.env) do
-		sum = sum + v
+		if k ~= key then
+			sum = sum + v
+		end
 	end
-	self:range(rm):put(self:key(), tostring(sum), txn)
+	local ok, r = self:range(rm):merge(self:key(), tostring(sum), "inc", txn)
+	assert(ok, r)
 	self.debug = ("[%d ts=%s]"):format(sum, g_last_ts)
 end
 
@@ -485,8 +494,11 @@ function history_verifier_mt:run(isolations, rm)
 			for _, h in ipairs(enum_his) do
 				local ok, r = pcall(self.run_history, self, history_idx, p, i, h, rm)
 				if not ok then
-					logger.report('run history err', r)
+					if self.exp_success then
+						logger.report('run history err', r)
+					end
 					table.insert(failures, r)
+					-- os.exit(-1)
 				end
 				history_idx = history_idx + 1
 			end
@@ -663,6 +675,8 @@ test("TestTxnDBInconsistentAnalysisAnomaly", function ()
 	}
 	check_concurrency("inconsistent analysis", both_isolations, {txn1, txn2}, verify, true)
 end)
+-- ]]
+
 
 -- TestTxnDBLostUpdateAnomaly verifies that neither SI nor SSI isolation
 -- are subject to the lost update anomaly. This anomaly is prevented
@@ -718,63 +732,62 @@ test("TestTxnDBPhantomReadAnomaly", function ()
 	check_concurrency("phantom read", both_isolations, {txn1, txn2}, verify, true)
 end)
 
---[[
-// TestTxnDBPhantomDeleteAnomaly verifies that neither SI nor SSI
-// isolation are subject to the phantom deletion anomaly; this is
-// similar to phantom reads, but verifies the delete range
-// functionality causes read/write conflicts.
-//
-// Phantom deletes would typically fail with a history such as:
-//   DR1(A-C) I2(B) C2 SC1(A-C) C1
-func TestTxnDBPhantomDeleteAnomaly(t *testing.T) {
-	txn1 := "DR(A-C) SC(A-C) SUM(D) C"
-	txn2 := "I(B) C"
-	verify := &verifier{
-		history: "R(D)",
-		checkFn: func(env map[string]int64) error {
-			if env["D"] != 0 {
-				return util.Errorf("expected delete range to yield an empty scan of same range, sum=%d", env["D"])
-			}
-			return nil
-		},
+-- TestTxnDBPhantomDeleteAnomaly verifies that neither SI nor SSI
+-- isolation are subject to the phantom deletion anomaly; this is
+-- similar to phantom reads, but verifies the delete range
+-- functionality causes read/write conflicts.
+-- 
+-- Phantom deletes would typically fail with a history such as:
+--   DR1(A-C) I2(B) C2 SC1(A-C) C1
+test("TestTxnDBPhantomDeleteAnomaly", function ()
+	local txn1 = "DR(A-C) SC(A-C) SUM(D) C"
+	local txn2 = "I(B) C"
+	local verify = {
+		history = "R(D)",
+		check = function (env)
+			if env["D"] ~= 0 then
+				logger.report(("expected delete range to yield an empty scan of same range, sum=%d"):format(tostring(env["D"])))
+				os.exit(-1)
+			end
+			assert(env["D"] == 0, ("expected delete range to yield an empty scan of same range, sum=%d"):format(tostring(env["D"])))
+		end,
 	}
-	checkConcurrency("phantom delete", bothIsolations, []string{txn1, txn2}, verify, true, t)
-}
+	check_concurrency("phantom delete", both_isolations, {txn1, txn2}, verify, true)
+end)
 
-// TestTxnDBWriteSkewAnomaly verifies that SI suffers from the write
-// skew anomaly but not SSI. The write skew anamoly is a condition which
-// illustrates that snapshot isolation is not serializable in practice.
-//
-// With write skew, two transactions both read values from A and B
-// respectively, but each writes to either A or B only. Thus there are
-// no write/write conflicts but a cycle of dependencies which result in
-// "skew". Only serializable isolation prevents this anomaly.
-//
-// Write skew would typically fail with a history such as:
-//   SC1(A-C) SC2(A-C) I1(A) SUM1(A) I2(B) SUM2(B)
-//
-// In the test below, each txn reads A and B and increments one by 1.
-// The read values and increment are then summed and written either to
-// A or B. If we have serializable isolation, then the final value of
-// A + B must be equal to 3 (the first txn sets A or B to 1, the
-// second sets the other value to 2, so the total should be
-// 3). Snapshot isolation, however, may not notice any conflict (see
-// history above) and may set A=1, B=1.
-func TestTxnDBWriteSkewAnomaly(t *testing.T) {
-	txn1 := "SC(A-C) I(A) SUM(A) C"
-	txn2 := "SC(A-C) I(B) SUM(B) C"
-	verify := &verifier{
-		history: "R(A) R(B)",
-		checkFn: func(env map[string]int64) error {
-			if !((env["A"] == 1 && env["B"] == 2) || (env["A"] == 2 && env["B"] == 1)) {
-				return util.Errorf("expected either A=1, B=2 -or- A=2, B=1, but have A=%d, B=%d", env["A"], env["B"])
-			}
-			return nil
-		},
+-- [[
+-- TestTxnDBWriteSkewAnomaly verifies that SI suffers from the write
+-- skew anomaly but not SSI. The write skew anamoly is a condition which
+-- illustrates that snapshot isolation is not serializable in practice.
+--
+-- With write skew, two transactions both read values from A and B
+-- respectively, but each writes to either A or B only. Thus there are
+-- no write/write conflicts but a cycle of dependencies which result in
+-- "skew". Only serializable isolation prevents this anomaly.
+--
+-- Write skew would typically fail with a history such as:
+--   SC1(A-C) SC2(A-C) I1(A) SUM1(A) I2(B) SUM2(B)
+--
+-- In the test below, each txn reads A and B and increments one by 1.
+-- The read values and increment are then summed and written either to
+-- A or B. If we have serializable isolation, then the final value of
+-- A + B must be equal to 3 (the first txn sets A or B to 1, the
+-- second sets the other value to 2, so the total should be
+-- 3). Snapshot isolation, however, may not notice any conflict (see
+-- history above) and may set A=1, B=1.
+test("TestTxnDBWriteSkewAnomaly", function ()
+	local txn1 = "SC(A-C) I(A) SUM(A) C"
+	local txn2 = "SC(A-C) I(B) SUM(B) C"
+	local verify = {
+		history = "R(A) R(B)",
+		check = function (env)
+			assert((env["A"] == 1 and env["B"] == 2) or (env["A"] == 2 and env["B"] == 1), 
+				("expected either A=1, B=2 -or- A=2, B=1, but have A=%d, B=%d"):format(tostring(env["A"]), tostring(env["B"])))
+		end,
 	}
-	checkConcurrency("write skew", onlySerializable, []string{txn1, txn2}, verify, true, t)
-	checkConcurrency("write skew", onlySnapshot, []string{txn1, txn2}, verify, false, t)
-}
+	check_concurrency("write skew", only_serializable, {txn1, txn2}, verify, true)
+	check_concurrency("write skew", only_snapshot, {txn1, txn2}, verify, false)
+end)
 -- ]]
 
 end)

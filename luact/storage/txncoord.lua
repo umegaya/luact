@@ -166,11 +166,14 @@ end
 function txn_mt:refresh_timestamp(ts)
 	self.timestamp = ts
 	ts:copy_to(self.max_ts)
-	self.max_ts:add_walltime(_M.max_clock_skew())
+	self.max_ts:add_walltime(_M.range_manager:max_clock_skew())
 end
 function txn_mt:valid()
 	--print('txn:valid', self, self.coord)
 	return uuid.valid(self.id)
+end
+function txn_mt:uuid()
+	return self.id
 end
 function txn_mt:invalidate()
 	uuid.invalidate(self.id)
@@ -240,6 +243,7 @@ end
 function txn_coord_mt:start(txn)
 	txn.id = uuid.new()
 	txn:init_timestamp()
+	-- logger.info('txn_coord_start', txn)
 end
 function txn_coord_mt:heartbeat(txn)
 	while true do
@@ -257,14 +261,16 @@ function txn_coord_mt:heartbeat(txn)
 		else
 			logger.error('heartbeat_txn error', txn, r)
 		end
-		luact.clock.sleep(self.opts.txn_heartbeat_interval)
+		luact.clock.sleep(_M.range_manager.opts.txn_heartbeat_interval)
 	end
 end
 function txn_coord_mt:start_heartbeat(txn)
 	return tentacle(self.heartbeat, self, txn)
 end
+-- resolve all transactional state and finish it.
+-- causion : this logic may execute on different node from calling end_txn.
 function txn_coord_mt:finish(txn, exist_txn, commit)
-	-- logger.report('txn_coord_mt:finish', commit, exist_txn)
+-- logger.report('txn_coord_mt:finish', commit, exist_txn)
 	local reply
 	if exist_txn then
 		-- Use the persisted transaction record as final transaction.
@@ -335,7 +341,7 @@ function txn_coord_mt:resolve_version(txn, commit, sync, keep_hb)
 			local rng = rm:find(k, kl, kind)
 			-- local ekstr = ek and ffi.string(ek, ekl) or "[empty]"
 			-- logger.info('rng:resolve', ffi.string(k, kl), ekstr)
-			local n = rng:resolve(_txn, 0, k, kl, ek, ekl) -- 0 means all records in the range
+			local n = rng:resolve(_txn, 0, k, kl, ek, ekl, _txn.timestamp) -- 0 means all records in the range
 			-- logger.info('rng:resolve end', n, 'processed between', ffi.string(k, kl), ekstr)
 		end, _M.range_manager, txn, c:key(), c:keylen(), c.kind, c:end_key(), c:end_keylen()))
 	end
@@ -374,9 +380,7 @@ end
 
 -- module functions
 local default_opts = {
-	max_clock_skew = 0.25, -- 250 msec
 	linearizable = false, -- no linearizability
-	txn_heartbeat_interval = 5.0, -- 5sec
 	batch_size = 100,
 }
 function _M.initialize(rm, opts)
@@ -414,6 +418,9 @@ function _M.run_txn(opts, fn, ...)
 		local txn = ptxn[1]
 		txn.status = TXN_STATUS_PENDING
 		local ok, r = pcall(proc, txn, ...)
+		if not ok then
+			-- logger.report('run_Txn error', r)
+		end
 		if ok then
 			if txn.status == TXN_STATUS_PENDING then
 				_M.range_manager:end_txn(txn, true)
@@ -450,10 +457,6 @@ function _M.end_txn(txn, exist_txn, commit)
 end
 function _M.add_cmd(txn, cmd, kind)
 	_M.coordinator:add_cmd(txn, cmd)
-end
--- TODO : max clock skew should be change according to cluster environment, so measure it.
-function _M.max_clock_skew()
-	return _M.opts.max_clock_skew
 end
 function _M.storage_key(txn)
 	-- TODO : cockroach use first key which handled by this txn, as prefix. is it effective?

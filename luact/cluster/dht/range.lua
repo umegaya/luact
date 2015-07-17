@@ -36,10 +36,16 @@ local range_manager
 _M.DEFAULT_REPLICA = 3
 _M.META1_FAMILY_NAME = '__dht.meta1__'
 _M.META2_FAMILY_NAME = '__dht.meta2__'
-_M.DATA_FAMILY_NAME = '__dht.data__'
+_M.TXN_FAMILY_NAME = '__dht.txn__'
+_M.VID_FAMILY_NAME = '__dht.vid__'
+_M.STATE_FAMILY_NAME = '__dht.state__'
 _M.META2_MAX_KEY = memory.alloc_typed('luact_dht_key_t')[0]
 _M.META2_MAX_KEY:init(string.char(0xFF), 1)
 _M.META2_SCAN_END_KEYSTR = string.char(0xFF, 0xFF)
+_M.NON_META_MAX_KEY = memory.alloc_typed('luact_dht_key_t')[0]
+-- -1 for 1byte prefix when it convert to meta2 range key
+_M.NON_META_MAX_KEY:init((string.char(0xFF)):rep(key.MAX_LENGTH - 1), key.MAX_LENGTH - 1)
+
 -- data category
 _M.KIND_META1 = 1
 _M.ROOT_METADATA_KIND = _M.KIND_META1
@@ -92,9 +98,9 @@ typedef struct luact_dht_kind {
 
 ### [\1, \40) : splittable system keys => 数の多いconfiguration, あるいはtxnのいらないユーザーデータ 
 ```
-[\1, \2 ) : txn (分散トランザクションの管理情報) のmeta2 ranges \1\0 + key, non-transactional
-[\2, \3 ) : vid (仮想アクターのidと物理アドレスのマッピング) のmeta2 ranges \1\1 + key, non-transactional
-[\3, \4 ) : vid state (仮想アクターの永続化される状態,{vid+key}と{value}のマッピング) のmeta2 ranges \1\2 + key, transactional
+[\1, \2 ) : txn (分散トランザクションの管理情報) のmeta2 ranges \1 + key, non-transactional
+[\2, \3 ) : vid (仮想アクターのidと物理アドレスのマッピング) のmeta2 ranges \2 + key, non-transactional
+[\3, \4 ) : vid state (仮想アクターの永続化される状態,{vid+key}と{value}のマッピング) のmeta2 ranges \3 + key, transactional
 [\4, \40) : reserved
 ```
 
@@ -127,7 +133,7 @@ local n_data_kind = 0
 -- *caution* txnl==false does not means split does not need transaction. 
 -- range data of txnl == false still need txn to split. 
 local function create_kind(id, txnl)
-	kind_map[id] = new_kind(string.char(2, id), _M.DATA_FAMILY, txnl)
+	kind_map[id] = new_kind(string.char(id), txnl)
 end
 
 
@@ -246,6 +252,9 @@ end
 function range_mt:arbiter_id()
 	return make_arbiter_id(self.kind, self.end_key:as_slice())
 end
+function range_mt:ts_cache()
+	return range_manager:ts_cache_by_range(self)
+end
 function range_mt:metakey()
 	return make_metakey(self.kind, self.end_key:as_slice())
 end
@@ -306,13 +315,17 @@ function range_mt:find_replica_by(node, check_thread_id)
 		end
 	end
 end
-function range_mt:recover_write_error(command, txn, err)
-	-- Move txn timestamp forward to response timestamp if applicable.
-	if txn.timestamp < command.timestamp then
-		logger.info('recover_write_error ts fwd', txn.timestamp, command.timestamp, command)
-		txn.timestamp = command.timestamp
+function range_mt:update_txn_by_response(command, txn, ok, r, r2)
+	-- if no transactional, nothing to do.
+	if not txn then return end
+	-- Move txn timestamp forward to response timestamp. because it will change with timestamp cache.
+	if ok and txn.timestamp < r2 then
+ 		-- logger.info('update_txn_by_response ts fwd', txn.timestamp, r2, command)
+ 		txn.timestamp = r2
 	end
-
+	 -- no error, change is not possible
+	if ok then return end 
+	local err = r
 	-- Take action on various errors.
 	if err:is('txn_ts_uncertainty') then
 		-- TODO: Mark the host as certain. certain node skips timestamp check
@@ -355,10 +368,11 @@ function range_mt:recover_write_error(command, txn, err)
 		txn:restart(exist_txn.priority, txn.timestamp)
 	end
 end
-function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
+function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, r2, ...)
 	-- if you change txn in this function, the change will propagate to caller. 
 	-- note that command:get_txn() is copied txn object, so any change will not affect caller's txn object. 
-	-- logger.info('on_cmd_finished', command, txn, ok, r)
+	-- logger.info('on_cmd_finished', command, txn, ok, r, r2, 'realret:', ...)
+	self:update_txn_by_response(command, txn, ok, r, r2)
 	if not ok then
 		local err = r
 		if err:is('actor_no_body') then
@@ -375,7 +389,6 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 				end
 			end
 		elseif txn then
-			self:recover_write_error(command, txn, err)
 			if err:is('txn_aborted') then
 				-- abort this txn by resolving version with aborting status.
 				txncoord.resolve_version(txn)
@@ -387,7 +400,7 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 	elseif txn then
 		local rtxn = r
 		-- if this command modify database, it should added to transaction.
-		if command:create_versioned_value() then
+		if command:is_start_txn() then
 			txncoord.add_cmd(txn, command)
 		end
 		if command:end_txn() then
@@ -403,9 +416,9 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 
 			-- here, r should be transaction
 			local wt = math.min(rtxn.timestamp:walltime(), cmd_start_msec)
-			local sleep_ms = txncoord.max_clock_skew() - (util.msec_walltime() - wt)
+			local sleep_ms = range_manager:max_clock_skew() - (util.msec_walltime() - wt)
 			if txncoord.opts.linearizable and sleep_ms > 0 then
-				log.info(rtxn, ("waiting %d msec on EndTransaction for linearizability"):format(sleep_ms))
+				logger.info(rtxn, ("waiting %d msec on EndTransaction for linearizability"):format(sleep_ms))
 				clock.sleep(sleep_ms / 1000)
 			end
 			if rtxn.status ~= txncoord.STATUS_PENDING then
@@ -416,7 +429,6 @@ function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, ...)
 		-- update with returned transaction (its timestamp may change with retry)
 		txn:update_with(rtxn, true)
 	end
-	-- return normal retval
 	return ...
 end
 function range_mt:txn_retryer(command, txn, fn, ...)
@@ -428,53 +440,68 @@ function range_mt:txn_retryer(command, txn, fn, ...)
 		-- Set the timestamp to the original timestamp for read-only
 		-- commands and to the transaction timestamp for read/write
 		-- commands.
-		if not command:create_versioned_value() then
+		if command:is_readonly() then
 			command.timestamp = txn.start_at
 		else
 			command.timestamp = txn.timestamp
 		end
 	end
+	-- system clock should be update before tweaking by range's ts cache.
+	range_manager:update_clock(command.timestamp)
+	-- write raft log with retry
 	local success, ret = util.retry(txncoord.retry_opts, function (c, f, replica, ...)
 		f.id = replica -- because f is callable table object and value "id" will reset once called, we set id on every call
+		-- r == raft status, command status or raft error, returned transaction or command error, returned timestamp, { return values}
 		local r = {pcall(f, replica, ...)}
-		if r[1] then
-			return util.retry_pattern.STOP, r
-		elseif type(r[2]) ~= 'table' then
-			exception.raise('runtime', 'txn_retryer', r[2])
-		elseif r[2]:is('txn_exists') then
-			for idx=0,(#r[2].args)-1,2 do
-				local conflict_key = r[2].args[idx+1]
-				local conflict_txn = r[2].args[idx+2]
+		if not r[1] then 
+			-- if raft error, throw raft error
+			error(r[2]) 
+		end
+		if r[2] then
+			-- if command success, return result values
+			return util.retry_pattern.STOP, {unpack(r, 2)}
+		end
+		-- handling command error
+		local err, ret_ts = r[3], r[4]
+		if type(err) ~= 'table' then
+			-- return timestamp and error
+			return util.retry_pattern.STOP, {false, exception.raise('runtime', 'txn_retryer', err), ret_ts}
+		elseif err:is('txn_exists') then
+			for idx=0,(#err.args)-1,2 do
+				local conflict_key = err.args[idx+1]
+				local conflict_txn = err.args[idx+2]
 				-- logger.info('conflict_txn', conflict_key, conflict_txn)
-				local how = c:create_versioned_value() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
+				local how = c:is_write() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
 				local ok, res_txn = pcall(range_manager.resolve_txn, range_manager, c:get_txn(), conflict_txn, how, c.timestamp)
 				if ok then
 					-- logger.info('success to resolve: then resolve version', res_txn)
-					range_manager:resolve(conflict_key, #conflict_key, c.kind, nil, 0, 0, res_txn.timestamp, res_txn) 
-					-- logger.info('success to resolve: then resolve version end')
+					range_manager:resolve(c.kind, conflict_key, #conflict_key, nil, 0, 0, res_txn.timestamp, res_txn) 
+				    -- logger.info('success to resolve: then resolve version end')
 					return util.retry_pattern.RESTART
 				elseif res_txn:is('txn_push_fail') then
-					error(res_txn) -- abort writer side retry (will restart entire transaction)
+					-- return timestamp and error
+					return util.retry_pattern.STOP, {false, res_txn, ret_ts}
 				else
 					logger.report('resolve_txn error', res_txn)
 					c:get_txn().timestamp:least_greater_of(conflict_txn.timestamp)
 					return util.retry_pattern.CONTINUE
 				end
 			end
-		elseif r[2]:is('txn_write_too_old') then
-			local exist_ts = r[2].args[2]
+		elseif err:is('txn_write_too_old') then
+			local exist_ts = err.args[2]
 			-- just move timestamp forward
 			c.timestamp:least_greater_of(exist_ts)
 			return util.retry_pattern.RESTART
 		else
 			-- does some stuff to recover from write error, including tweaking txn
-			error(r[2])
+			return util.retry_pattern.STOP, {false, err, ret_ts}
 		end
 	end, command, fn, ...)
 	if success then
+		-- because, if success, r[1] is true in above callback, no need to add true for indicating success
 		return unpack(ret)
 	else
-		return false, ret
+		error(ret) -- some retry error. bug
 	end
 end
 function range_mt:write(command, txn, timeout, dictatorial)
@@ -491,7 +518,7 @@ function range_mt:read(k, kl, ts, txn, consistent, timeout)
 	else
 		self:check_replica()
 		local replica = self.replicas[0]
-		return self:on_cmd_finished(command, txn, self:txn_retryer(command, txn, replica.read, replica, timeout, command))
+		return self:on_cmd_finished(command, txn, util.msec_walltime(), self:txn_retryer(command, txn, replica.read, replica, timeout, command))
 	end
 end
 -- operation to range
@@ -548,9 +575,12 @@ end
 function range_mt:scan(k, kl, ek, ekl, n, txn, consistent, scan_type, timeout)
 	return self:write(cmd.scan(self.kind, k, kl, ek, ekl, n, range_manager.clock:issue(), txn, consistent, scan_type), txn, timeout)
 end
-function range_mt:resolve(txn, n, s, sl, e, el, timeout)
+function range_mt:delete_range(k, kl, ek, ekl, n, txn, timeout)
+	return self:scan(k, kl, ek, ekl, n, txn, true, cmd.SCAN_TYPE_DELETE, timeout)
+end
+function range_mt:resolve(txn, n, s, sl, e, el, ts, timeout)
 	-- does not wait for reply
-	local ts = range_manager.clock:issue()
+	ts = range_manager.clock:issue()
 	if s then
 		return self:write(cmd.resolve(self.kind, s, sl, e, el, n, ts, txn), txn, timeout)
 	else
@@ -607,6 +637,7 @@ function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
 	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	local ok, ov = sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 	self:on_write_replica_finished()
+	logger.info('syn_cas', ok, ov)
 	return ok, ov	
 end
 local range_scan_filter_count
@@ -615,11 +646,14 @@ function range_mt.range_scan_filter(k, kl, v, vl, ts, r)
 	return #r >= range_scan_filter_count
 end
 -- make last key of this kind by increment last byte of prefix
-local scan_end_key_work = memory.alloc_typed('char', 1)
-function range_mt:scan_end_key(k, kl)
-	if self.kind == _M.KIND_META1 then
+local scan_end_key_work = memory.alloc_typed('uint8_t', 1)
+function range_mt:range_scan_end_key(k, kl)
+	if self.kind >= _M.NON_METADATA_KIND_START then
+		exception.raise('invalid', 'this range, should not scanned', self)
+	elseif self.kind == _M.KIND_META1 then
 		return _M.META2_SCAN_END_KEYSTR, #(_M.META2_SCAN_END_KEYSTR) 
-	else -- range data for actual data (DATA_FAMILY)
+	else -- currently KIND_META2 only
+		assert(self.kind == _M.KIND_META2)
 		ffi.copy(scan_end_key_work, k, 1)
 		scan_end_key_work[0] = scan_end_key_work[0] + 1
 		return scan_end_key_work, 1
@@ -627,15 +661,17 @@ function range_mt:scan_end_key(k, kl)
 end
 function range_mt:exec_scan(storage, k, kl, ek, ekl, n, ts, txn, consistent, scan_type)
 	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
-	if ekl <= 0 then
-		ek, ekl = self:scan_end_key(k, kl)
-	end
 	-- logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)), scan_type)
 	if scan_type == cmd.SCAN_TYPE_NORMAL then
 		return storage:scan(k, kl, ek, ekl, n, ts, txn, consistent)		
 	elseif scan_type == cmd.SCAN_TYPE_RANGE then
+		if ekl <= 0 then
+			ek, ekl = self:range_scan_end_key(k, kl)
+		end
 		range_scan_filter_count = n
 		return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn, consistent)
+	elseif scan_type == cmd.SCAN_TYPE_DELETE then
+		return storage:rawdelete_range(self.stats, k, kl, ek, ekl, n, ts, txn)
 	end
 end
 function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
@@ -736,7 +772,7 @@ function range_mt:exec_resolve_txn(storage, ts, txn, conflict_txn, how, cmd_ts)
 		now = cmd_ts -- if cmd timestamp is later, use it.
 	end
 	resolved_txn.last_update:copy_to(expiry_ts_work)
-	expiry_ts_work:add_walltime(2 * txncoord.opts.txn_heartbeat_interval)
+	expiry_ts_work:add_walltime(2 * range_manager.opts.txn_heartbeat_interval)
 	if expiry_ts_work < now then
 		logger.info("pushing expired txn", resolved_txn, expiry_ts_work)
 		pusher_wins = true
@@ -831,9 +867,43 @@ end
 -- call from raft module
 function range_mt:apply(command)
 	assert(self.kind == command.kind)
-	range_manager.clock:witness(command.timestamp)
-	local r = {command:apply_to(self:partition(), self)}
-	return command:get_txn(), unpack(r)
+	-- if command uses ts cache (and not readonly), forward ts according to range's latest read/write timestamp
+	if command:use_ts_cache() and (not command:is_readonly()) then
+		local rts, wts = self:ts_cache():latest_ts(command:key(), command:keylen(), command:end_key(), command:end_keylen(), command:get_txn())
+		-- Always push the timestamp forward if there's been a read which
+		-- occurred after our txn timestamp.
+		if rts >= command.timestamp then
+			command.timestamp:least_greater_of(rts)
+			-- logger.info("ts forward to rts", ffi.string(command:key(),command:keylen()), command:end_key_str(), command.timestamp, rts, command)
+		end
+		-- If there's a newer write timestamp...
+		if wts >= command.timestamp then
+			-- If we're in a txn, we still go ahead and try the write since
+			-- we want to avoid restarting the transaction in the event that
+			-- there isn't an intent or the intent can be pushed by us.
+			-- 
+			-- If we're not in a txn, it's trivial to just advance our timestamp.
+			if not command:get_txn() then
+				command.timestamp:least_greater_of(wts)
+				-- logger.info("ts forward to wts", command.timestamp, wts, command)
+			end
+		end
+	end
+	local r = {pcall(command.apply_to, command, self:partition(), self)}
+	if r[1] then
+		-- if command success, update ts_cache with this timestamp and returns it to caller 
+		if command:use_ts_cache() then
+			--[[ 
+			logger.info('command use ts cache: update cache:', 
+				command, ffi.string(command:key(), command:keylen()), command:end_key_str(), 
+				command.timestamp, command:get_txn(), command:is_readonly())
+			--]]
+			self:ts_cache():add(command:key(), command:keylen(), command:end_key(), command:end_keylen(), command.timestamp, command:get_txn(), command:is_readonly())
+		end
+		return true, command:get_txn(), command.timestamp, unpack(r, 2)
+	else
+		return false, unpack(r, 2), command.timestamp
+	end
 end
 function range_mt:fetch_state(read_cmd)
 	return self:apply(read_cmd)
@@ -933,9 +1003,9 @@ function range_manager_mt:bootstrap(nodelist)
 	-- create storage for initial dht setting with bootstrap mode
 	local root_cf = self:new_partition(_M.KIND_META1, _M.META1_FAMILY_NAME)
 	local meta2_cf = self:new_partition(_M.KIND_META2, _M.META2_FAMILY_NAME)
-	self:new_partition(_M.KIND_TXN, _M.DATA_FAMILY_NAME)
-	self:new_partition(_M.KIND_VID, _M.DATA_FAMILY_NAME)
-	self:new_partition(_M.KIND_STATE, _M.DATA_FAMILY_NAME)
+	self:new_partition(_M.KIND_TXN, _M.TXN_FAMILY_NAME)
+	self:new_partition(_M.KIND_VID, _M.VID_FAMILY_NAME)
+	self:new_partition(_M.KIND_STATE, _M.STATE_FAMILY_NAME)
 	-- start dht gossiper
 	self.gossiper = luact.root_actor.gossiper(opts.gossip_port, {
 		nodelist = nodelist,
@@ -954,7 +1024,7 @@ function range_manager_mt:bootstrap(nodelist)
 		self.root_range:rawput(meta2_key, meta2_key_len, ffi.cast('char *', meta2), #meta2, nil, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
 		for _, kind in ipairs({_M.KIND_TXN, _M.KIND_VID, _M.KIND_STATE}) do
-			local rng = self:new_range(key.MIN, key.MAX, kind)
+			local rng = self:new_range(key.MIN, _M.NON_META_MAX_KEY, kind)
 			local mk, mkl = rng:metakey()
 			meta2:rawput(mk, mkl, ffi.cast('char *', rng), #rng, nil, nil, true)
 		end
@@ -980,11 +1050,11 @@ function range_manager_mt:bootstrap_kind(name, kind)
 		end
 	end
 	for k=kind or _M.USER_KIND_PREFIX_MIN, _M.USER_KIND_PREFIX_MAX do
-		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, tostring(k))
+		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, string.char(k))
 		local ok, prev = self.root_range:cas(syskey, nil, name) 
 		if ok then
-			self:new_partition(k, _M.DATA_FAMILY_NAME)
-			self:new_range(key.MIN, key.MAX, k)
+			self:new_partition(k)
+			self:new_range(key.MIN, _M.NON_META_MAX_KEY, k)
 			return k
 		elseif prev == name then
 			return k
@@ -1013,7 +1083,7 @@ end
 function range_manager_mt:new_range(start_key, end_key, kind, dont_start_replica)
 	local r = range_mt.alloc(_M.NUM_REPLICA)
 	r:init(start_key, end_key, kind)
-	self.ranges[kind]:add(r)
+	self:add_owned_range(r)
 	if kind > _M.KIND_META1 then
 		self.caches[kind]:add(r)
 	end
@@ -1021,6 +1091,16 @@ function range_manager_mt:new_range(start_key, end_key, kind, dont_start_replica
 		r:start_replica_set()
 	end
 	return r
+end
+-- TODO : max clock skew should be change according to cluster environment, so measure it.
+function range_manager_mt:max_clock_skew()
+	return self.opts.max_clock_skew
+end
+function range_manager_mt:ts_cache_duration()
+	if self.opts.ts_cache_duration then
+		return self.opts.ts_cache_duration
+	end
+	return self.opts.txn_heartbeat_interval * 2
 end
 function range_manager_mt:is_owner(rng)
 	return self.ranges[rng.kind]:find(rng:cachekey())
@@ -1033,14 +1113,29 @@ function range_manager_mt:create_fsm_for_arbiter(rng)
 	local r = self.ranges[kind]:find(rng:cachekey())
 	if not r then
 		r = rng:clone() -- rng is from packet, so volatile
-		self.ranges[kind]:add(r)
+		self:add_owned_range(r)
+		self:new_partition(rng.kind)
 		if kind > _M.KIND_META1 then
 			self.caches[kind]:add(r)
 		end
 	end
 	return r
 end
+function range_manager_mt:add_owned_range(rng)
+	self.ranges[rng.kind]:add(rng)
+	local k = rng:arbiter_id()
+	if not self.ts_caches[k] then
+		self.ts_caches[k] = cache.new_ts(self)
+	end
+end
+function range_manager_mt:ts_cache_by_range(rng)
+	return self.ts_caches[rng:arbiter_id()]
+end
 function range_manager_mt:destory_range(rng)
+	local k = rng:arbiter_id()
+	local c = self.ts_caches[k] 
+	self.ts_caches[k] = nil
+	c:fin()
 	self:clear_cache(rng)
 	self.ranges[rng.kind]:remove(rng)
 	rng:fin()
@@ -1052,20 +1147,17 @@ function range_manager_mt:clear_cache(rng)
 		self.caches[rng.kind]:remove(rng)
 	end
 end
-function range_manager_mt:new_partition(kind, name)
+function range_manager_mt:new_partition(kind)
 	if #self.partitions >= 255 then
 		exception.raise('invalid', 'cannot create new family: full')
 	end
-	local p = self.partitions.lookup[name]
+	local p = self.partitions[kind]
 	if not p then
-		p = self.storage:column_family(name)
-		self.partitions.lookup[name] = c
-	end
-	if not self.partitions[kind] then
+		p = self.storage:column_family(tostring(kind))
 		self.partitions[kind] = p
-		self.ranges[kind] = cache.new(kind)
+		self.ranges[kind] = cache.new_range(kind)
 		if kind > _M.KIND_META1 then
-			self.caches[kind] = cache.new(kind)
+			self.caches[kind] = cache.new_range(kind)
 		end
 	end
 	return p
@@ -1076,7 +1168,7 @@ function range_manager_mt:destroy_partition(kind, truncate)
 		self.storage:close_column_family(p, truncate)
 	end
 end
--- find range which contains key (k, kl)
+-- find range which contains key (k, kl) of kind
 -- search original kind => KIND_META2 => KIND_META1
 function range_manager_mt:find(k, kl, kind)
 	local r, mk, mkl
@@ -1136,21 +1228,71 @@ function range_manager_mt:resolve_txn(txn, conflict_txn, how, cmd_ts)
 	local k, kl = txncoord.storage_key(conflict_txn)
 	return self:find(k, kl, _M.KIND_TXN):resolve_txn(txn, conflict_txn, how, cmd_ts)
 end
-function range_manager_mt:resolve(k, kl, kind, ek, ekl, n, ts, txn)
-	return self:find(k, kl, kind):resolve(txn, n, k, kl, ek, ekl)
-end
 function range_manager_mt:end_txn(txn, commit)
 	local k, kl = txncoord.storage_key(txn)
 	self:find(k, kl, _M.KIND_TXN):end_txn(txn, commit)
 end
--- get kind id from kind name
-function range_manager_mt:parition_name_by_kind(kind)
-	local cf = self.partitions[kind]
-	for k,v in pairs(self.partitions.lookup) do
-		if v == cf then
-			return k
+function range_manager_mt:add_span_command_result(ret, r)
+	-- logger.info('add_span_command_result', ret, r)
+	assert(not ret or (type(r) == type(ret)))
+	if not ret then
+		ret = r
+	elseif type(r) == 'number' then
+		ret = ret + r
+	elseif type(r) == 'table' then
+		for k,v in pairs(r) do
+			ret[k] = v
+		end
+	elseif type(r) == 'string' then
+		ret = ret .. r
+	end
+	return ret
+end
+function range_manager_mt:invoke_span_command(method, kind, k, kl, ek, ekl, ...)
+	local rng, remain, ret
+	local ck, ckl = k, kl
+	while true do
+		rng = self:find(ck, ckl, kind)
+		remain = rng.end_key:less_than(ek, ekl)
+		if remain then
+			-- In next iteration, query next range.
+			-- It's important that we use the EndKey of the current descriptor
+			-- as opposed to the StartKey of the next one: if the former is stale,
+			-- it's possible that the next range has since merged the subsequent
+			-- one, and unless both descriptors are stale, the next descriptor's
+			-- StartKey would move us to the beginning of the current range,
+			-- resulting in a duplicate scan.
+			ret = self:add_span_command_result(ret, rng[method](rng, ck, ckl, rng.end_key.p, rng.end_key.len, ...))
+			ck, ckl = rng.end_key.p, rng.end_key.len
+		else
+			ret = self:add_span_command_result(ret, rng[method](rng, ck, ckl, ek, ekl, ...))
+			break
 		end
 	end
+	return ret
+end
+function range_manager_mt:scan(kind, k, kl, ek, ekl, n, txn, consistent, scan_type)
+	return self:invoke_span_command("scan", kind, k, kl, ek, ekl, n, txn, consistent, scan_type)
+end
+function range_manager_mt:delete_range(kind, k, kl, ek, ekl, n, txn)
+	return self:invoke_span_command("delete_range", kind, k, kl, ek, ekl, n, txn)
+end
+-- NOTE : no need to care about multiple range request for resolve.
+-- because resolve's key range is originally given by finished command, which is already seperated properly.
+function range_manager_mt:resolve(kind, k, kl, ek, ekl, n, ts, txn)
+	return self:find(k, kl, kind):resolve(txn, n, k, kl, ek, ekl, ts)
+end
+-- update system clock
+function range_manager_mt:update_clock(ts)
+	local max_clock_skew = self:max_clock_skew()
+	if max_clock_skew > 0 then
+		local now = util.msec_walltime()
+		local dt = ts:walltime() - now
+		if dt > max_clock_skew then
+			exception.raise('future_ts', ts:walltime(), now)
+		end
+	end
+	self.clock:witness(ts)
 end
 -- gossip event processors
 function range_manager_mt:initialized()
@@ -1283,6 +1425,7 @@ function _M.get_manager(nodelist, datadir, opts)
 			gossiper = false, -- initialized in dht.lua
 			ranges = {}, -- same data structure as cache
 			caches = {},
+			ts_caches = {},
 			threads = {}, 
 			partitions = {
 				lookup = {}, 

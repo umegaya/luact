@@ -92,10 +92,24 @@ end
 function key_range_mt:contains_range(kr)
 	return self:contains(kr.s) and (kr.e <= self.e)
 end
+function key_range_mt:contains_key_slice(k, kl)
+	-- s <= (k, kl) < e
+	return (not self.e:less_than_equals(k, kl)) and self.s:less_than_equals(k, kl)
+end
+function key_range_mt:intersects_key_slice_range(k, kl, ek, ekl)
+	return self:contains_key_slice(k, kl) or self:contains_key_slice(ek, ekl)
+end
+function key_range_mt:intersects_range(kr)
+	return self:contains(kr.s) or self:contains(kr.e)
+end
+function key_range_mt:__eq(kr)
+	return kr.s == self.s and kr.e == self.e
+end
 function key_range_mt:__tostring()
-	local s = tostring(self.s)
-	s=s.."~~"
-	return s..tostring(self.e)
+--	local s = tostring(self.s)
+--	s=s.."~"
+--	return s..tostring(self.e)
+	return ffi.string(self.s:as_slice()).."~"..ffi.string(self.e:as_slice())
 end
 
 ffi.metatype('luact_dht_key_range_t', key_range_mt)

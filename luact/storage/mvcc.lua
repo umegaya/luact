@@ -627,7 +627,6 @@ function mvcc_mt:rawget(k, kl, ts, txn, consistent, opts)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local meta, ml = self.db:rawget(mk, mkl, opts)
 	if meta == ffi.NULL then
-		-- logger.info('meta data not exists:', pstr(k, kl))
 		return nil
 	end
 	if ml ~= ffi.sizeof('luact_mvcc_metadata_t') then
@@ -663,7 +662,7 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 	end
 
 	local same_txn = meta:txn_equals_to(txn)
-	-- logger.warn('rawget_internal', ts, meta.timestamp, txn and txn.max_ts, meta.txn, same_txn, meta:txn_conflicts_with(txn))	
+	-- logger.warn('rawget_internal', ts, meta.timestamp, txn, meta.txn, same_txn, meta:txn_conflicts_with(txn))	
 	if (ts >= meta.timestamp) and meta:txn_conflicts_with(txn) then
 		-- if txn already exists, only same txn can read latest value.
 		-- logger.warn('txn_exists', txn, meta.txn, txn and txn:same_origin(meta.txn))
@@ -744,14 +743,11 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 		-- dump_db(self.db)
 	end
 	if not iter then
-		-- logger.notice('rawget_internal, not iter', ffi.string(k, kl))
 		return nil
 	end
 
 	value_ts = _M.bytes_codec:timestamp_of(iter)
 	if not value_ts then
-		logger.notice('rawget_internal, no value_ts', ffi.string(k, kl))
-		-- dump_db(self.db)
 		return nil
 	end
 	-- allocate own memory
@@ -836,6 +832,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- This should not happen since range should check the existing
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
+			-- logger.info('txn_exists', ffi.string(k, kl), txn, meta.txn)
 			exception.raise('txn_exists', ffi.string(k, kl), meta.txn:clone())
 		end
 
@@ -924,8 +921,9 @@ function mvcc_mt:rawmerge(stats, k, kl, v, vl, merge_op, ts, txn, opts)
 		else
 			self:rawdelete(stats, k, kl, ts, txn, opts)
 		end
+		return true, ffi.string(r[2], pvl_work[0]), r[3]
 	end
-	return unpack(r, 2)
+	return false
 end
 function mvcc_mt:cas(stats, k, ov, nv, ts, txn, opts)
 	return self:rawcas(stats, k, #k, ov, #ov, nv, #nv, ts, txn, opts)
@@ -945,7 +943,7 @@ function mvcc_mt:resolve_version(stats, k, kl, ts, txn, opts)
 			error(r)
 		end
 	else
-		logger.report('resolve_version: meta not exists', _M.inspect_key(mk, mkl))
+		logger.warn('resolve_version: meta not exists', _M.inspect_key(mk, mkl))
 	end
 end
 local orig_timestamp_work = ffi.new('pulpo_hlc_t')
@@ -1009,7 +1007,16 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- This method shouldn't be called with this instance, but there's
 	-- nothing to do if the epochs match and the state is still PENDING.
 	if txn.status == txncoord.STATUS_PENDING and meta.txn.n_retry >= txn.n_retry then
-		logger.warn('resolve_version: retry count old and status pending')
+		logger.warn('resolve_version: retry count same and status pending', txn.timestamp, _G.guilty_ts)
+		--[[
+		if not _G.guilty_ts then
+			_G.guilty_ts = txn.timestamp
+		elseif _G.guilty_ts == txn.timestamp then
+			-- os.exit(-1)
+		else
+			_G.guilty_ts = txn.timestamp
+		end
+		]]
 		return
 	end
 
@@ -1055,7 +1062,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 		meta.txn:invalidate()
 		meta:set_current_kv_len(prev_kl, prev_vl)
 		-- meta:set_deleted()
-		logger.info('delete version:', meta.txn)
+		-- logger.info('delete version:', meta.txn)
 		self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
 		local restoredAgeSeconds = math.floor((ts:walltime() - timestamp:walltime())/1000)
 

@@ -95,6 +95,8 @@ local default_opts = {
 	range_size_max = 64 * 1024 * 1024,
 	gossip_port = 8008,
 	range_prefetch_count = 8,
+	txn_heartbeat_interval = 5.0, -- 5sec
+	max_clock_skew = 0.25, -- 250 msec
 }
 local function configure_datadir(opts)
 	if not opts.datadir then

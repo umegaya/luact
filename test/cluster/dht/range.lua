@@ -29,7 +29,9 @@ tools.start_luact(1, nil, function ()
 		n_replica = 1, -- allow single node quorum
 		storage = "rocksdb",
 		datadir = luact.DEFAULT_ROOT_DIR,
-		range_size_max = 64 * 1024 * 1024
+		range_size_max = 64 * 1024 * 1024,
+		max_clock_skew = 0,
+		ts_cache_duration = 0,		
 	})
 	
 	local key = "hoge"
@@ -40,6 +42,7 @@ tools.start_luact(1, nil, function ()
 	assert(r == "fuga" and (not consistent_flag), "same value as given to put should be returned")
 	print('cas test1')
 	local res = rm:find(key, #key):cas(key, "gyaa", "guha")
+	print('cas test', res, res == nil)
 	assert(not res, "cas should fail if condition not met")
 	print('cas test2')
 	assert(rm:find(key, #key):cas(key, "fuga", "guha"), "cas should success if condition met")

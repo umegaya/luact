@@ -153,6 +153,14 @@ register_ctype('struct', 'luact_dht_cmd_heartbeat_txn', 'luact_dht_cmd_heartbeat
 register_ctype('struct', 'luact_dht_gossip_replica_change', 'luact_dht_gossip_replica_change_t', serde_common.LUACT_DHT_GOSSIP_REPLICA_CHANGE)
 register_ctype('struct', 'luact_dht_gossip_range_split', 'luact_dht_gossip_range_split_t', serde_common.LUACT_DHT_GOSSIP_RANGE_SPLIT)
 
+-- command attribute flag
+local read_f = bit.lshift(1, 0)
+local write_f = bit.lshift(1, 1)
+local start_txn_f = bit.lshift(1, 2)
+local use_ts_cache_f = bit.lshift(1, 3)
+local range_f = bit.lshift(1, 4)
+local end_txn_f = bit.lshift(1, 5)
+
 -- base command
 local base_mt = {}
 base_mt.__gc = memory.free
@@ -173,11 +181,26 @@ end
 function base_mt:has_txn() 
 	return self.txn_f ~= 0
 end
-function base_mt:create_versioned_value()
-	return true
+function base_mt:is_read()
+	return bit.band(self:flags(), read_f) ~= 0
+end
+function base_mt:is_readonly()
+	return self:is_read() and (not self:is_write())
+end
+function base_mt:is_write()
+	return bit.band(self:flags(), write_f) ~= 0
+end
+function base_mt:is_start_txn()
+	return bit.band(self:flags(), start_txn_f) ~= 0
+end
+function base_mt:use_ts_cache()
+	return bit.band(self:flags(), use_ts_cache_f) ~= 0
+end
+function base_mt:has_range()
+	return bit.band(self:flags(), range_f) ~= 0 
 end
 function base_mt:end_txn()
-	return false
+	return bit.band(self:flags(), end_txn_f) ~= 0 
 end
 function base_mt:keylen()
 	return self.kl
@@ -190,6 +213,10 @@ function base_mt:end_key()
 end
 function base_mt:end_keylen()
 	return 0
+end
+function base_mt:end_key_str()
+	local ek, ekl = self:end_key(), self:end_keylen()
+	return ek and ffi.string(ek, ekl) or "[empty]"
 end
 
 -- get command
@@ -215,8 +242,8 @@ end
 function get_mt:__len()
 	return get_mt.size(self.kl, self:has_txn())
 end
-function get_mt:create_versioned_value()
-	return false
+function get_mt:flags()
+	return bit.bor(read_f, use_ts_cache_f)
 end
 function get_mt:apply_to(storage, range)
 	return range:exec_get(storage, self:key(), self.kl, self.timestamp, self:get_txn(), self.consistent ~= 0)
@@ -250,6 +277,9 @@ end
 function put_mt:__len()
 	return put_mt.size(self.kl, self.vl, self:has_txn())
 end
+function put_mt:flags()
+	return bit.bor(write_f, start_txn_f, use_ts_cache_f)
+end
 function put_mt:apply_to(storage, range)
 	return range:exec_put(storage, self:key(), self.kl, self:val(), self.vl, self.timestamp, self:get_txn())
 end
@@ -276,6 +306,9 @@ function delete_mt:txn_p()
 end
 function delete_mt:__len()
 	return delete_mt.size(self.kl, self:has_txn())
+end
+function delete_mt:flags()
+	return bit.bor(write_f, start_txn_f, use_ts_cache_f)
 end
 function delete_mt:apply_to(storage, range)
 	return range:exec_delete(storage, self:key(), self.kl, self.timestamp, self:get_txn())
@@ -315,6 +348,9 @@ end
 function cas_mt:__len()
 	return cas_mt.size(self.kl, self.ol, self.nl, self:has_txn())
 end
+function cas_mt:flags()
+	return bit.bor(read_f, write_f, start_txn_f, use_ts_cache_f)
+end
 function cas_mt:apply_to(storage, range)
 	return range:exec_cas(storage, self:key(), self.kl, 
 		self:oldval(), self.ol, self:newval(), self.nl, self.timestamp, self:get_txn())
@@ -339,7 +375,7 @@ function scan_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn, consistent, scan_t
 	p.consistent = consistent and 1 or 0
 	ffi.copy(p:key(), k, kl)
 	if ekl > 0 then
-		ffi.copy(p:endkey(), ek, ekl)
+		ffi.copy(p:end_key(), ek, ekl)
 	end
 	p:set_txn(txn)
 	return p
@@ -347,20 +383,31 @@ end
 _M.scan = scan_mt.new
 _M.SCAN_TYPE_NORMAL = 0
 _M.SCAN_TYPE_RANGE = 1
+_M.SCAN_TYPE_DELETE = 2
 function scan_mt:txn_p()
 	return self.p + self.kl + self.ekl
 end
 function scan_mt:__len()
 	return scan_mt.size(self.kl, self.ekl, self:has_txn())
 end
-function scan_mt:create_versioned_value()
-	return false
+function scan_mt:flags()
+	if self.scan_type == _M.SCAN_TYPE_DELETE then
+		return bit.bor(write_f, start_txn_f, use_ts_cache_f, range_f)
+	else
+		return bit.bor(read_f, use_ts_cache_f, range_f)
+	end
 end
-function scan_mt:endkey() 
+function scan_mt:end_key() 
 	return self.p + self.kl
 end
+function scan_mt:end_keylen()
+	return self.ekl
+end
+function scan_mt:use_ts_cache()
+	return true
+end
 function scan_mt:apply_to(storage, range)
-	return range:exec_scan(storage, self:key(), self.kl, self:endkey(), self.ekl, 
+	return range:exec_scan(storage, self:key(), self.kl, self:end_key(), self.ekl, 
 		self.n_process, self.timestamp, self:get_txn(), self.consistent ~= 0, self.scan_type)
 end
 ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
@@ -402,8 +449,8 @@ end
 function resolve_mt:end_keylen()
 	return self.ekl
 end
-function resolve_mt:create_versioned_value()
-	return false
+function resolve_mt:flags()
+	return bit.bor(write_f, use_ts_cache_f, range_f)
 end
 function resolve_mt:__len()
 	return resolve_mt.size(self.kl, self.ekl)
@@ -448,8 +495,8 @@ end
 function resolve_txn_mt:set_txn(txn)
 	ffi.copy(self.txn, txn, ffi.sizeof('luact_dht_txn_t'))
 end
-function resolve_txn_mt:create_versioned_value()
-	return false
+function resolve_txn_mt:flags()
+	return bit.bor(write_f)
 end
 function resolve_txn_mt:__len()
 	return resolve_txn_mt.size()
@@ -460,7 +507,7 @@ end
 ffi.metatype('luact_dht_cmd_resolve_txn_t', resolve_txn_mt)
 
 
--- end_txn command
+-- hb_txn command
 local heartbeat_txn_mt = util.copy_table(resolve_txn_mt)
 heartbeat_txn_mt.__index = heartbeat_txn_mt
 function heartbeat_txn_mt.new(kind, timestamp, txn)
@@ -492,8 +539,8 @@ _M.end_txn = end_txn_mt.new
 function end_txn_mt:committed()
 	return self.commit ~= 0 
 end
-function end_txn_mt:end_txn()
-	return true
+function end_txn_mt:flags()
+	return bit.bor(write_f, end_txn_f)
 end
 function end_txn_mt:apply_to(storage, range)
 	return range:exec_end_txn(storage, self.timestamp, self.txn, self:committed())
@@ -532,6 +579,9 @@ function merge_mt:txn_p()
 end
 function merge_mt:__len()
 	return merge_mt.size(self.kl, self.vl, self.ol, self:has_txn())
+end
+function merge_mt:flags()
+	return bit.bor(read_f, write_f, start_txn_f,  use_ts_cache_f)
 end
 function merge_mt:apply_to(storage, range)
 	return range:exec_merge(storage, self:key(), self.kl, self:val(), self.vl, self:op(), self.ol, self.timestamp, self:get_txn())
@@ -574,6 +624,9 @@ end
 function watch_mt:__len()
 	return watch_mt.size(self.kl, self.name_len, self.arg_len)
 end
+function watch_mt:flags()
+	return bit.bor(read_f, write_f, start_txn_f,  use_ts_cache_f)
+end
 function watch_mt:apply_to(storage, range)
 	if self.arg_len > 0 then
 		return range:exec_watch(storage, self:key(), self.kl, ffi.string(self:method(), self.name_len), 
@@ -607,6 +660,9 @@ function split_mt:txn_p()
 end
 function split_mt:__len()
 	return split_mt.size(self.kl, self:has_txn())
+end
+function split_mt:flags()
+	return 0
 end
 function split_mt:apply_to(storage, range)
 	return range:exec_split(storage, self:key(), self.kl, self.timestamp, self:get_txn())
