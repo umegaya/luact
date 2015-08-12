@@ -235,7 +235,7 @@ function _M.monitor(watcher_actor, target_actor)
 	table.insert(t.links, w.uuid)
 end
 function _M.root_of(machine_id, thread_id)
-	assert(thread_id, "thread_id should specified")
+	assert(thread_id, "thread_id should specified:"..debug.traceback())
 	return uuid.first(machine_id or uuid.node_address, thread_id)
 end
 

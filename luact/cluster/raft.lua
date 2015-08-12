@@ -22,6 +22,7 @@ exception.define('raft')
 
 local _M = {}
 local raftmap = {}
+local raft_bodymap = {}
 
 -- tick interval
 local tick_intval_sec = 0.05
@@ -170,7 +171,6 @@ function raft_index:stop_replicator(target_actor)
 	self.state:stop_replicator(target_actor)
 end
 function raft_index:read(timeout, ...)
-	logger.warn('raft:read', ...)
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l:read(timeout, ...) end
 	return self.state.fsm:fetch_state(...)
@@ -443,6 +443,7 @@ local function create(id, fsm_factory, opts, ...)
 	local sr = configure_serde(opts)
 	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
 	-- create column_family which name is "id" in database at dir
+	-- TODO : use unified column family for raft stable storage. related data such as hardstate/log key will be prefixed by "id".
 	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(id))
 	local ss = snapshot.new(dir, sr)
 	local wal = wal.new(fsm:metadata(), store, sr, opts)
@@ -457,6 +458,7 @@ local function create(id, fsm_factory, opts, ...)
 	}, raft_mt)
 	rft.state.actor_body = rft
 	rft:start()
+	raft_bodymap[id] = rft
 	return rft
 end
 -- create new raft state machine
@@ -476,7 +478,7 @@ function _M.new(id, fsm_factory, opts, ...)
 			while true do
 				create_id, rft = select(3, event.wait(nil, clock.alarm(5.0), _M.create_ev))
 				if not create_id then
-					exception.raise('actor_timeout', 'raft', 'object creation timeout', self:group_id())
+					exception.raise('actor_timeout', 'raft', 'object creation ptimeout', self:group_id())
 				end
 				if id == create_id then
 					break
@@ -488,6 +490,10 @@ function _M.new(id, fsm_factory, opts, ...)
 end
 function _M.find(id)
 	return raftmap[id]
+end
+-- get raft body. internal use only.
+function _M._find_body(id)
+	return raft_bodymap[id]
 end
 
 return _M

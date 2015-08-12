@@ -6,7 +6,7 @@ local ffi = require 'ffiex.init'
 
 local txncoord = require 'luact.storage.txncoord'
 local clock = require 'luact.clock'
-local buffer = require 'luact.util.buffer'
+local key = require 'luact.cluster.dht.key'
 local lamport = require 'pulpo.lamport'
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
@@ -22,12 +22,6 @@ typedef enum luact_mvcc_key_type {
 	MVCC_KEY_VERSIONED,
 } luact_mvcc_key_type_t;
 
-typedef struct luact_mvcc_bytes_codec {
-	uint16_t size, idx;
-	uint32_t *lengths;
-	char **buffers;
-} luact_mvcc_bytes_codec_t;
-
 typedef struct luact_mvcc_stats {
 	size_t bytes_key, bytes_val;
 	size_t n_key, n_val;
@@ -38,8 +32,8 @@ typedef struct luact_mvcc_stats {
 typedef struct luact_mvcc_metadata {
 	pulpo_hlc_t timestamp;
 	uint32_t key_len, val_len;
-	luact_dht_txn_t txn;
 	uint8_t delete_flag, reserved[3];
+	luact_dht_txn_t txn;
 } luact_mvcc_metadata_t;
 
 typedef struct luact_mvcc_merge_cas {
@@ -173,8 +167,11 @@ ffi.metatype('luact_mvcc_merge_cas_t', merger_cas_mt)
 -- mvcc metadata
 local mvcc_meta_mt = {}
 mvcc_meta_mt.__index = mvcc_meta_mt
+function mvcc_meta_mt.size(txn)
+	return ffi.sizeof('luact_mvcc_metadata_t') + (txn and txn.kl or 0)
+end
 function mvcc_meta_mt:__len()
-	return ffi.sizeof('luact_mvcc_metadata_t')
+	return mvcc_meta_mt.size(self.txn)
 end
 function mvcc_meta_mt:inline()
 	return false
@@ -190,10 +187,16 @@ function mvcc_meta_mt:set_inline_value(v, vl)
 end
 function mvcc_meta_mt:set_txn(txn)
 	if txn then
-		ffi.copy(self.txn, txn, ffi.sizeof(self.txn))
+		if #(self.txn) < #txn then
+			local tmp = memory.realloc(self, #self + #txn - #(self.txn))
+			if not tmp then exception.raise('fatal', 'malloc', #self + #txn - #(self.txn)) end
+			self = ffi.cast('luact_mvcc_metadata_t *', tmp)
+		end
+		ffi.copy(self.txn, txn, #txn)
 	else
 		self.txn:invalidate()
 	end
+	return self
 end
 function mvcc_meta_mt:valid_txn(txn)
 	return txn and (ffi.cast('void *', txn) ~= nil)
@@ -206,6 +209,10 @@ function mvcc_meta_mt:txn_equals_to(txn)
 end
 function mvcc_meta_mt:set_current_kv_len(kl, vl)
 	self.key_len, self.val_len = kl, vl
+end
+function mvcc_meta_mt.verify_record(meta, ml)
+	local p = ffi.cast('luact_mvcc_metadata_t*', meta)
+	return ml == #p and p or nil
 end
 ffi.metatype('luact_mvcc_metadata_t', mvcc_meta_mt)
 
@@ -233,7 +240,7 @@ function mvcc_stats_mt:inline(kl, prev_meta, meta, already_exists)
 		self.bytes_val = self.bytes_val - prev_meta.val_len + meta.val_len
 	else
 		self.bytes_key = self.bytes_key + meta.key_len + kl
-		self.bytes_val = self.bytes_val + meta.val_len + ffi.sizeof(prev_meta)
+		self.bytes_val = self.bytes_val + meta.val_len + #prev_meta
 	end
 	self:updated()
 end
@@ -251,9 +258,9 @@ function mvcc_stats_mt:put(kl, prev_meta, meta, already_exists)
 			self.bytes_val = self.bytes_val + meta.val_len			
 		end
 	else
-		assert(not prev_meta.txn:valid())
+		assert(not prev_meta.txn:valid(), tostring(prev_meta.txn))
 		self.bytes_key = self.bytes_key + meta.key_len + kl
-		self.bytes_val = self.bytes_val + meta.val_len + ffi.sizeof(prev_meta)	
+		self.bytes_val = self.bytes_val + meta.val_len + #prev_meta
 	end
 	-- print(' ====> ', self.bytes_key, self.bytes_val)
 	self:updated()
@@ -271,7 +278,7 @@ function mvcc_stats_mt:aborted(kl, prev_meta, meta, prev_key_iter)
 	if not prev_key_iter then
 		-- no committed value for this key, so metadata itself has removed
 		self.bytes_key = self.bytes_key - kl
-		self.bytes_val = self.bytes_val - ffi.sizeof(prev_meta)
+		self.bytes_val = self.bytes_val - #prev_meta
 	end
 	-- print(' ====> ', self.bytes_key, self.bytes_val)
 	self:updated()
@@ -282,110 +289,6 @@ function mvcc_stats_mt:gc(kl, vl)
 	self.bytes_val = self.bytes_val - vl
 end
 ffi.metatype('luact_mvcc_stats_t', mvcc_stats_mt)
-
-
-
--- mvcc key
-local mvcc_bytes_codec_mt = {}
-mvcc_bytes_codec_mt.__index = mvcc_bytes_codec_mt
-function mvcc_bytes_codec_mt:init(size)
-	self.size = size
-	self.idx = 0
-	self.lengths = memory.alloc_fill_typed('uint32_t', size)
-	self.buffers = memory.alloc_fill_typed('char *', size)
-	for i=0, self.size - 1 do
-		self.lengths[i] = 256
-		self.buffers[i] = memory.alloc(self.lengths[i])
-	end
-end
-function mvcc_bytes_codec_mt:reserve(k, kl, ts)
-	-- +1 for using in self:next_of
-	local reqlen = (util.encode_binary_length(kl + (ts and ffi.sizeof('pulpo_hlc_t') or 0)) + 1)
-	local curidx = self.idx
-	local len = self.lengths[curidx]
-	if len >= reqlen then 
-		self.idx = (self.idx + 1) % self.size
-		return self.buffers[curidx], len 
-	end
-	while len < reqlen do
-		len = len * 2
-	end
-	-- print('---------------- reserve: newlen', len, kl, ffi.sizeof('pulpo_hlc_t'))
-	local tmp = memory.realloc_typed('char', self.buffers[curidx], len)
-	if tmp ~= ffi.NULL then
-		self.buffers[curidx] = tmp
-		self.lengths[curidx] = len
-		self.idx = (self.idx + 1) % self.size
-		return tmp, len
-	else
-		exception.raise('fatal', 'malloc', len)
-	end
-end
-function mvcc_bytes_codec_mt:encode(k, kl, ts)
-	local _, olen, ofs
-	local p, len = self:reserve(k, kl, ts)
-	_, ofs = util.encode_binary(k, kl, p, len)
-	if ts then
-		_, olen = util.encode_binary(ts.p, ffi.sizeof(ts), p + ofs, len - ofs)
-		ofs = ofs + olen
-	end
-	return p, ofs
-end
-function mvcc_bytes_codec_mt:decode(ek, ekl)
-	local p, len = self:reserve(ek, ekl, true)
-	local k, kl, n_read = util.decode_binary(ek, ekl, p, len)
-	if n_read >= ekl then
-		return k, kl
-	else
-		-- +1 for additional \0 when this pointer called with next_of
-		local ts, tsl = util.decode_binary(ek + n_read, ekl - n_read, p + kl + 1, len - kl - 1)
-		return k, kl, ffi.cast('pulpo_hlc_t *', ts)
-	end
-end
-function mvcc_bytes_codec_mt:available(p, pl)
-	for i=0, self.size - 1 do
-		if self.buffers[i] == p then
-			if (self.lengths[i] - pl) > 0 then
-				return true
-			else
-				logger.report('error', 'allocated pointer length short: try recover')
-				local tmp = memory.realloc_typed('char', p, pl)
-				if tmp == ffi.NULL then
-					exception.raise('fatal', 'realloc', pl, p)
-				end
-				self.buffers[i] = tmp
-				return true
-			end
-		end
-	end
-end
--- caluculate next key by appending \0 to last 
-function mvcc_bytes_codec_mt:next_of(k, kl)
-	if self:available(k, kl) then
-		k[kl] = 0
-		return k, kl + 1
-	else
-		local p, len = self:reserve(k, kl)
-		ffi.copy(p, k, kl)
-		return self:next_of(p, kl)
-	end
-end
-function mvcc_bytes_codec_mt:upper_bound_of_prefix(k, kl)
-	local rk, rkl = self:reserve(k, kl)
-	ffi.copy(rk, k, kl)
-	for i=kl-1,0,-1 do
-		rk[i] = rk[i] + 1
-		if rk[i] ~= 0 then
-			return rk, rkl
-		end
-	end
-	return rk, rkl
-end
-function mvcc_bytes_codec_mt:timestamp_of(iter)
-	local k, kl, ts = self:decode(iter:key())
-	return ts
-end
-ffi.metatype('luact_mvcc_bytes_codec_t', mvcc_bytes_codec_mt)
 
 
 
@@ -405,7 +308,7 @@ function mvcc_mt:column_family(name, opts)
 end
 function mvcc_mt:default_filter(k, kl, v, vl, ts, txn, consistent, opts, n, results)
 	local value, value_len, value_ts = self:rawget_internal(k, kl, v, vl, ts, txn, consistent, opts)
-	-- print('filter', ffi.cast('luact_mvcc_metadata_t*', v).txn, ts, txn, value and ffi.string(value, value_len))
+	-- logger.info('filter', ffi.cast('luact_mvcc_metadata_t*', v).txn, ts, txn, value and ffi.cast('luact_dht_range_t *', value))--ffi.string(value, value_len))
 	if value then
 		-- print(n, pstr(k, kl), pstr(value, value_len))
 		if type(n) == 'number' then
@@ -481,13 +384,15 @@ function mvcc_mt:rawscan_internal(s, sl, e, el, opts, cb, boundary, ...)
 	while it:valid() do
 		local k, kl, ts = _M.bytes_codec:decode(it:key())
 		if ts then
+			_M.dump_key(it:key())
+			--dump_db(self.db)
 			exception.raise('mvcc', 'invalid_key', 'start key should not be versioned key', pstr(s, sl), ts)
 		end
 		-- break if exceed end boundary
 		if boundary(e, el, k, kl) then
 			break
 		end
-		-- logger.warn('rawscan_internal', pstr(s, sl), pstr(k, kl), pstr(e, el), kl, el, it:valid())
+		-- logger.warn('rawscan_internal', pstr(s, sl), pstr(e, el), pstr(k, kl), kl, el, it:valid())
 		local v, vl = it:val()
 		if cb(self, k, kl, v, vl, ...) == true then
 			break
@@ -629,15 +534,15 @@ function mvcc_mt:rawget(k, kl, ts, txn, consistent, opts)
 	if meta == ffi.NULL then
 		return nil
 	end
-	if ml ~= ffi.sizeof('luact_mvcc_metadata_t') then
-		exception.raise('fatal', 'invalid metadata size', ml, ffi.sizeof('luact_mvcc_metadata_t'))
+	if not mvcc_meta_mt.verify_record(meta, ml) then
+		exception.raise('fatal', 'invalid metadata size', ml, #(ffi.cast('luact_mvcc_metadata_t *', meta)))
 	end
 	local ok, v, vl, ts = pcall(self.rawget_internal, self, k, kl, meta, ml, ts, txn, consistent, opts)
 	memory.free(meta)
 	if ok then 
 		return v, vl, ts
 	else
-		error(v)
+		error(v)	
 	end
 end
 function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
@@ -715,8 +620,9 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 		-- We want to know if anything has been written ahead of timestamp, but
 		-- before MaxTimestamp. (target which is like read_ts < *target* < txn.max_ts)
 		local newest_key, newest_key_len = _M.bytes_codec:encode(k, kl, txn:max_timestamp())
+		local from_key, from_key_len = _M.bytes_codec:encode(k, kl)
 		-- we want to exclude read_ts and txn.max_ts, so ignore boundary
-		iter = self:seek_prev(newest_key, newest_key_len, _M.bytes_codec:encode(k, kl), true)
+		iter = self:seek_prev(newest_key, newest_key_len, from_key, from_key_len, true)
 		if iter then
 			local newest_ts = _M.bytes_codec:timestamp_of(iter)
 			if newest_ts and (newest_ts > ts) then
@@ -735,19 +641,24 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 		-- a transaction, or in the absence of future versions that clock
 		-- uncertainty would apply to.
 		local cur_key, cur_key_len = _M.bytes_codec:encode(k, kl, ts)
+		local next_key, next_key_len = _M.bytes_codec:encode(k, kl)
 		-- we exclude metakey but not for cur_key. so use next_of(encode(k, kl)) and include boundary
-		iter = self:seek_prev(cur_key, cur_key_len, _M.bytes_codec:encode(_M.bytes_codec:next_of(k, kl)))
-		-- print('iter', iter)
+		iter = self:seek_prev(cur_key, cur_key_len, next_key, next_key_len)
 		-- _M.dump_key(cur_key, cur_key_len)
+		-- _M.dump_key(next_key, next_key_len)
 		-- _M.dump_key(iter:key())
 		-- dump_db(self.db)
 	end
 	if not iter then
+		-- logger.info('not iter')
+		-- dump_db(self.db)
 		return nil
 	end
 
 	value_ts = _M.bytes_codec:timestamp_of(iter)
 	if not value_ts then
+		-- logger.info('not ts')
+		-- dump_db(self.db)
 		return nil
 	end
 	-- allocate own memory
@@ -757,6 +668,8 @@ function mvcc_mt:rawget_internal(k, kl, meta, ml, ts, txn, consistent, opts)
 	if vl > 0 then
 		return v, vl, value_ts
 	else
+		-- logger.info('vl == 0')
+		-- dump_db(self.db)
 		return nil
 	end
 end
@@ -766,11 +679,15 @@ end
 function mvcc_mt:rawput(stats, k, kl, v, vl, ts, txn, opts, deleted)
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local meta, ml = self.db:rawget(mk, mkl, opts)
-	if ml > 0 and ml ~= ffi.sizeof('luact_mvcc_metadata_t') then
-		exception.raise('fatal', 'invalid metadata size', ml, ffi.sizeof('luact_mvcc_metadata_t'))
+	if ml > 0 and (not mvcc_meta_mt.verify_record(meta, ml)) then
+		exception.raise('fatal', 'invalid metadata size', ml, #(ffi.cast('luact_mvcc_metadata_t *', meta)))
+
 	end
-	local ok, r = pcall(self.rawput_internal, self, stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn, opts, deleted)
-	memory.free(meta)
+	local ok, r
+	meta, ok, r = self:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn, opts, deleted)
+	if meta ~= nil then
+		memory.free(meta)
+	end
 	if not ok then
 		error(r)
 	end
@@ -791,6 +708,16 @@ put
  b. それ以外の場合、metadataに現在のtransactionとtimestampを書き込む。versioned keyを作ってそこに値を書く
 ]]
 local prev_meta_work = memory.alloc_typed('luact_mvcc_metadata_t')
+prev_meta_work.txn.kl = 0
+prev_meta_work.txn.klimit = 0
+local function reserve_prev_meta_work(meta)
+	if #prev_meta_work < #meta then
+		local tmp = memory.realloc(prev_meta_work, #meta)
+		if not tmp then exception.raise('fatal', 'malloc', #meta) end
+		prev_meta_work = ffi.cast('luact_mvcc_metadata_t*', tmp)
+	end
+	return prev_meta_work
+end
 function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn, opts, deleted)
 	if (not deleted) and (vl <= 0) then
 		exception.raise('mvcc', 'empty_value')
@@ -799,19 +726,22 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 	local exists = true
 	-- local origAgeSeconds = math.floor((ts:walltime() - meta.timestamp:walltime())/1000)
 
-	if meta == ffi.NULL then
+	if meta == nil then
 		-- logger.info('meta data not exists create new:', pstr(k, kl))
-		meta = ffi.new('luact_mvcc_metadata_t')
+		local tmp = memory.alloc_fill(mvcc_meta_mt.size(txn))
+		if not tmp then exception.raise('fatal', 'malloc', #meta) end
+		meta = ffi.cast('luact_mvcc_metadata_t *', tmp)
 		exists = false
 	else
 		meta = ffi.cast('luact_mvcc_metadata_t*', meta)
 	end
-	ffi.copy(prev_meta_work, meta, ffi.sizeof('luact_mvcc_metadata_t'))
+	prev_meta_work = reserve_prev_meta_work(meta)
+	ffi.copy(prev_meta_work, meta, #meta)
 	-- Verify we are not mixing inline and non-inline values.
 	-- TODO : support inline read/write?
 	local inline = (ts == lamport.ZERO_HLC)
 	if inline ~= meta:inline() then
-		exception.raise('mvcc', 'key_op', 'mixing inline and non-inline operation')
+		return meta, false, exception.new('mvcc', 'key_op', 'mixing inline and non-inline operation')
 	end
 	if inline then
 		-- TODO : also we consider stats update on inline mode
@@ -822,7 +752,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 			self.db:rawput(mk, mkl, ffi.cast('char *', meta), #meta, opts)
 		end
 		stats:inline(mkl, prev_meta_work[0], meta, exists)
-		return
+		return meta, true
 	end
 
 	-- In case the key metadata exists.
@@ -833,7 +763,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
 			-- logger.info('txn_exists', ffi.string(k, kl), txn, meta.txn)
-			exception.raise('txn_exists', ffi.string(k, kl), meta.txn:clone())
+			return meta, false, exception.new('txn_exists', ffi.string(k, kl), meta.txn:clone())
 		end
 
 		-- We can update the current metadata only if both the timestamp
@@ -850,23 +780,23 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 				local prev_key, prev_key_len = _M.bytes_codec:encode(k, kl, meta.timestamp)
 				self.db:rawdelete(prev_key, prev_key_len)
 			end
-			meta:set_txn(txn)
+			meta = meta:set_txn(txn)
 			meta.timestamp = ts
 		elseif (meta.timestamp > ts) and (not meta.txn:valid()) then
 			-- If we receive a Put request to write before an already-
 			-- committed version, send write too old error.
-			exception.raise('txn_write_too_old', ffi.string(k, kl), meta.timestamp:clone(true), ts)
+			return meta, false, exception.new('txn_write_too_old', ffi.string(k, kl), meta.timestamp:clone(true), ts)
 		else
 			-- Otherwise, its an old write to the current transaction. Just ignore.
-			return
+			return meta
 		end
 	else -- In case the key metadata does not exist yet.
 		-- If this is a delete, do nothing!
 		if deleted then
-			return
+			return meta
 		end
 		-- Create key metadata.
-		meta:set_txn(txn)
+		meta = meta:set_txn(txn)
 		meta.timestamp = ts
 	end
 
@@ -881,6 +811,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 	-- Write the mvcc metadata now that we have sizes for the latest versioned value.
 	self.db:rawput(mk, mkl, ffi.cast("char *", meta), #meta, opts)
 	stats:put(mkl, prev_meta_work[0], meta, exists)
+	return meta, true
 end
 function mvcc_mt:delete(stats, k, ts, txn, opts)
 	return self:rawdelete(stats, k, #k, ts, txn, opts)
@@ -954,11 +885,12 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 		return
 	end
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
-	if vl ~= ffi.sizeof('luact_mvcc_metadata_t') then
-		exception.raise('invalid', 'metadata size', vl, ffi.sizeof('luact_mvcc_metadata_t'))
+	local meta = mvcc_meta_mt.verify_record(v, vl)
+	if not meta then
+		exception.raise('invalid', 'metadata size', vl, #(ffi.cast('luact_mvcc_metadata_t', v)))
 	end
-	local meta = ffi.cast('luact_mvcc_metadata_t*', v)
-	ffi.copy(prev_meta_work, meta, ffi.sizeof('luact_mvcc_metadata_t'))
+	prev_meta_work = reserve_prev_meta_work(meta)
+	ffi.copy(prev_meta_work, meta, #meta)
 	-- For cases where there's no write intent to resolve, or one exists
 	-- which we can't resolve, this is a noop.
 	if meta == nil or (not (meta.txn:valid() and meta.txn:same_origin(txn))) then
@@ -981,7 +913,7 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 		ffi.copy(orig_timestamp_work, meta.timestamp, ffi.sizeof(meta.timestamp))
 		meta.timestamp = txn.timestamp
 		if pushed then -- keep intent if we're pushing timestamp
-			meta:set_txn(txn)
+			meta = meta:set_txn(txn)
 		else
 			meta.txn:invalidate()
 		end
@@ -1008,15 +940,15 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- nothing to do if the epochs match and the state is still PENDING.
 	if txn.status == txncoord.STATUS_PENDING and meta.txn.n_retry >= txn.n_retry then
 		logger.warn('resolve_version: retry count same and status pending', txn.timestamp, _G.guilty_ts)
-		--[[
+		-- [[
 		if not _G.guilty_ts then
 			_G.guilty_ts = txn.timestamp
 		elseif _G.guilty_ts == txn.timestamp then
-			-- os.exit(-1)
+			os.exit(-1)
 		else
 			_G.guilty_ts = txn.timestamp
 		end
-		]]
+		--]]
 		return
 	end
 
@@ -1040,10 +972,10 @@ function mvcc_mt:resolve_version_internal(stats, k, kl, v, vl, ts, txn, opts)
 	-- we ignore boundary
 	local iter = self:seek_prev(latest_key, latest_key_len, limit_key, limit_key_len, true)
 	if not iter then
-	-- print('no possible key: delete meta', ffi.string(k, kl))
+	-- logger.info('no possible key: delete meta', ffi.string(k, kl))
 		self.db:rawdelete(mk, mkl, opts)
 	else
-	-- print('possible key exists', _M.dump_key(iter:key()))
+	-- logger.info('possible key exists', _M.dump_key(iter:key()))
 		local prev_k, prev_kl = iter:key()
 		local prev_v, prev_vl = iter:val()
 		local _k, _kl, timestamp = _M.bytes_codec:decode(prev_k, prev_kl)
@@ -1217,8 +1149,8 @@ function _M.new_mt()
 	mt.__index = mt
 	return mt
 end
-_M.bytes_codec = memory.alloc_typed('luact_mvcc_bytes_codec_t')
-_M.bytes_codec:init(32)
+_M.bytes_codec = key.codec
+_M.inspect_key = key.inspect
 function _M.make_key(k, kl, ts)
 	return ffi.string(_M.bytes_codec:encode(k, kl, ts))
 end
@@ -1227,17 +1159,6 @@ function _M.upper_bound_of_prefix(k, kl)
 end
 function _M.register_merger(name, callable)
 	mergers[name] = callable
-end
-function _M.inspect_key(k, kl)
-	local dk, dkl, ts = _M.bytes_codec:decode(k, kl)
-	local src = {'key:('..tostring(tonumber(kl))..')'..tostring(k)}
-	for i=0,dkl-1 do
-		table.insert(src, (':%02x'):format(ffi.cast('const unsigned char *', dk)[i]))
-	end
-	if ts then
-		table.insert(src, (' @ ')..tostring(ts))
-	end
-	return table.concat(src)
 end
 -- cas merger
 _M.register_merger('cas', merger_cas_mt.process)
@@ -1249,7 +1170,7 @@ function _M.dump_key(k, kl)
 		kl = #k
 		k = ffi.cast('const char *', k)
 	end
-if false then
+if true then
 	io.write('key:')
 	for i=0,tonumber(kl)-1 do
 		io.write((':%02x'):format(ffi.cast('const unsigned char *', k)[i]))

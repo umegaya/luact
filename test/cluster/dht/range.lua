@@ -33,26 +33,25 @@ tools.start_luact(1, nil, function ()
 		max_clock_skew = 0,
 		ts_cache_duration = 0,		
 	})
-	
+	local kind = range.KIND_STATE
+	assert(kind)
 	local key = "hoge"
 	print('put test')
-	rm:find(key, #key):put(key, "fuga")
-	local r = rm:find(key, #key):get(key)
+	rm:put(kind, key, "fuga")
+	local r = rm:get(kind, key)
 	print('get test', r)
 	assert(r == "fuga" and (not consistent_flag), "same value as given to put should be returned")
 	print('cas test1')
-	local res = rm:find(key, #key):cas(key, "gyaa", "guha")
+	local res = rm:cas(kind, key, "gyaa", "guha")
 	print('cas test', res, res == nil)
 	assert(not res, "cas should fail if condition not met")
 	print('cas test2')
-	assert(rm:find(key, #key):cas(key, "fuga", "guha"), "cas should success if condition met")
+	assert(rm:cas(kind, key, "fuga", "guha"), "cas should success if condition met")
 	print('get test2')
-	assert(rm:find(key, #key):get(key, nil, true) == "guha" and consistent_flag, "result of get also should change")
+	assert(rm:get(kind, key, nil, true) == "guha" and consistent_flag, "result of get also should change")
 	print('delete test')
-	rm:find(key, #key):delete(key)
-	assert(not rm:find(key, #key):get(key), "result of get shouldn't be found")
-	
-	
+	rm:delete(kind, key)
+	assert(not rm:get(kind, key), "result of get shouldn't be found")	
 end)
 
 return true

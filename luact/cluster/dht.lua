@@ -33,8 +33,24 @@ typedef struct luact_dht {
 ]]
 
 
--- act as table wrapper
-
+-- table wrapper
+local dht_wrap_mt = {}
+dht_wrap_mt.__index = dht_wrap_mt
+local txn_key = "\0\0txn"
+local dht_key = "\0\0dht"
+local opt_key = "\0\0opt"
+function new_dht_wrap(dht, opt)
+	return setmetatable({
+		[dht_key] = dht,
+		[opt_key] = opt or {},
+	}, dht_wrap_mt)
+end
+function dht_wrap_mt:__index(k)
+	return self[dht_key]:rawget(k, #k, self[txn_key], self[opt_key].consistent, self[opt_key].timeout)
+end
+function dht_wrap_mt:__newindex(k, v)
+	self[dht_key]:put(k, #k, v, #v, self[txn_key], self[opt_key].timeout)
+end
 
 
 -- dht object
@@ -75,11 +91,8 @@ end
 function dht_mt:rawmerge(k, kl, v, vl, o, ol, txn, timeout)
 	return self:range_of(k, kl):rawmerge(k, kl, v, vl, o, ol, txn, timeout or self.timeout)
 end
-function dht_mt:new_txn()
-	return range_manager:new_txn()
-end
-function dht_mt:txn(proc)
-	assert(false, "TBD")
+function dht_mt:txn(proc, ...)
+	txncoord.run_txn(proc, ...)
 end
 
 
@@ -118,11 +131,18 @@ function _M.initialize(parent_address, opts)
 	logger.notice('waiting dht module initialization finished')
 end
 
+function _M.manager_actor()
+	return range.manager_actor()
+end
+
 function _M.finalize()
-	range_manager:finalize()
+	range.destroy_manager()
 end
 
 function _M.new(name, timeout)
+	return new_dht_wrap(_M.new_raw(name, timeout))
+end
+function _M.new_raw()
 	local r = dht_map[name]
 	if not r then
 		r = memory.alloc_typed('luact_dht_t')
@@ -131,7 +151,6 @@ function _M.new(name, timeout)
 	end
 	return r
 end
-
 function _M.destroy(dht, truncate)
 	local name = range.family_name_by_kind(dht.kind)
 	dht:destroy(truncate)

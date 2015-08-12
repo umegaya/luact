@@ -25,6 +25,7 @@ luact.start({
 	assert((not ok) and resp:is('http') and resp.args[1] == 'status' and resp.args[2] == 418)
 
 	local cnt = 0
+	_G.global_dump = true
 	for key, val in pairs({ 
 		hoge = "fuga",
 		bar = "baz",

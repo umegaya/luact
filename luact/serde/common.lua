@@ -109,6 +109,7 @@ local map_ctype_id = {
 }
 local map_id_ctype = {}
 local map_id_ctype_ptr = {}
+local map_id_has_gc = {}
 -- reserve system ctype id
 -- TODO : this should be move to independent file
 _M.LUACT_UUID = 1
@@ -145,16 +146,20 @@ _M.serpent_unpacker = {}
 _M.json_unpacker = {}
 _M.protobuf_unpacker = {}
 _M.msgpack_unpacker = {}
+
 function _M.register_ctype(what, name, serde, id)
 	-- logger.info('register_ctype', what, name, tostring(serde), id)
 	local t = what.." "..name
-	if id then
-		map_ctype_id[what][name] = id
-		map_id_ctype[id] = ffi.typeof(t)
-		map_id_ctype_ptr[id] = ffi.typeof("$[?]", ffi.typeof(t))
-	else
+	if not id then
 		-- TODO : generate id autometically by registering it to dht
 		local defs = ffi.src_of(t)
+	end
+	map_ctype_id[what][name] = id
+	map_id_ctype[id] = ffi.typeof(t)
+	map_id_ctype_ptr[id] = ffi.typeof("$ *", ffi.typeof(t))
+	local p = ffi.new(ffi.typeof(t))
+	if getmetatable(p).__gc then
+		map_id_has_gc[id] = true
 	end
 	if serde then
 		for kind, procs in pairs(serde) do
@@ -171,7 +176,7 @@ end
 function _M.ctype_from_id(id)
 	local tmp = tonumber(id)
 	-- logger.warn(id, map_id_ctype[tmp], map_id_ctype_ptr[tmp])
-	return map_id_ctype[tmp], map_id_ctype_ptr[tmp]
+	return map_id_ctype[tmp], map_id_ctype_ptr[tmp], map_id_has_gc[tmp]
 end
 
 -- common serde mt

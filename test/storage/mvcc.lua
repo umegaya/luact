@@ -193,9 +193,7 @@ end, create_db, destroy_db)
 test("TestMVCCPutWithTxn", function (db, stats)
 	db:put(stats, test_key1, value1, makets(1, 0), txn1)
 	for _, ts in ipairs({makets(1, 0), makets(0, 1), makets(2, 0)}) do
-		print("TestMVCCPutWithTxn", _)
 		local v = db:get(test_key1, ts, txn1, true)
-		print("TestMVCCPutWithTxn end", _)
 		assert(v == value1, 
 			"put value in transaction should be seen for read which has greater-equals timestamp and same transaction")			
 	end

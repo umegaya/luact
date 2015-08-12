@@ -28,133 +28,49 @@ local txncoord = require 'luact.storage.txncoord'
 
 
 -- module share variable
-local _M = {}
+local _M = require 'luact.cluster.dht.const'
 local range_manager
 
-
--- constant
+-- 
+-- DEFAULT_REPLICA is default number of range replica to maintain
 _M.DEFAULT_REPLICA = 3
+-- ***_FAMILY_NAME is used for the name of column_family which preserves system kind partition
 _M.META1_FAMILY_NAME = '__dht.meta1__'
 _M.META2_FAMILY_NAME = '__dht.meta2__'
 _M.TXN_FAMILY_NAME = '__dht.txn__'
 _M.VID_FAMILY_NAME = '__dht.vid__'
 _M.STATE_FAMILY_NAME = '__dht.state__'
+-- following declares system range's min and max key
+_M.NON_COLOC_KEY_START = memory.alloc_typed('luact_dht_key_t')[0]
+key.MIN:next(_M.NON_COLOC_KEY_START)
+_M.META1_MIN_KEY = _M.NON_COLOC_KEY_START
+_M.META1_MAX_KEY = key.MAX
+_M.META2_MIN_KEY = _M.NON_COLOC_KEY_START
 _M.META2_MAX_KEY = memory.alloc_typed('luact_dht_key_t')[0]
 _M.META2_MAX_KEY:init(string.char(0xFF), 1)
 _M.META2_SCAN_END_KEYSTR = string.char(0xFF, 0xFF)
+_M.NON_META_MIN_KEY = _M.NON_COLOC_KEY_START
 _M.NON_META_MAX_KEY = memory.alloc_typed('luact_dht_key_t')[0]
--- -1 for 1byte prefix when it convert to meta2 range key
-_M.NON_META_MAX_KEY:init((string.char(0xFF)):rep(key.MAX_LENGTH - 1), key.MAX_LENGTH - 1)
-
--- data category
-_M.KIND_META1 = 1
-_M.ROOT_METADATA_KIND = _M.KIND_META1
-_M.KIND_META2 = 2
-_M.NON_METADATA_KIND_START = _M.KIND_META2 + 1
-_M.KIND_TXN = 3
-_M.KIND_VID = 4
-_M.KIND_STATE = 5
-_M.BUILTIN_KIND_START = 1
-_M.BUILTIN_KIND_END = 5
--- user kind
-_M.USER_KIND_PREFIX_MIN = 0x40
-_M.USER_KIND_PREFIX_MAX = 0xfe
-_M.NUM_USER_KIND = _M.USER_KIND_PREFIX_MAX - _M.USER_KIND_PREFIX_MIN
--- syskey prefix
-_M.SYSKEY_CATEGORY_KIND = 0
--- hook type
-_M.SPLIT_HOOK = 1
-_M.MERGE_HOOK = 2
+_M.NON_META_MAX_KEY:init((string.char(0xFF)):rep(key.MAX_LENGTH - 1), key.MAX_LENGTH - 1) -- -1 for 1byte prefix when it convert to meta2 range key
 -- resolve txn type
 _M.RESOLVE_TXN_CLEANUP = 1 -- cleanup txn. eg. gc?
 _M.RESOLVE_TXN_ABORT = 2 -- abort txn. eg. write/write conflict
 _M.RESOLVE_TXN_TS_FORWARD = 3 -- move txn timestamp forward. eg. read/write conflict
 
--- cdefs
+-- exception
+exception.define('range_key')
+
+-- cdef
 ffi.cdef [[
 typedef struct luact_dht_range {
 	luact_dht_key_t start_key;
 	luact_dht_key_t end_key;
 	uint8_t n_replica, kind, replica_available, padd;
 	luact_mvcc_stats_t stats;
-	luact_uuid_t replicas[0];		//arbiter actors' uuid
+	luact_uuid_t replicas[0];		//range_managers' uuid
 } luact_dht_range_t;
-typedef struct luact_dht_kind {
-	char prefix[2];
-	uint8_t txnl, padd;
-} luact_dht_kind_t;
 ]]
 
-
--- kind data
---[[
-### [min]    : unused
-
-### [\0, \1) : un-splittable system keys (configuration) => つまり全てroot rangeのノードに保持される
-```
-[\0\0, \0\1) : kind (独立したdhtを管理する単位)の名前   \0\0 + numerical id => kind name これによってnumerical id (within 1byte)が予約される
-[\0\1, \1  ) : reserved
-```
-
-### [\1, \40) : splittable system keys => 数の多いconfiguration, あるいはtxnのいらないユーザーデータ 
-```
-[\1, \2 ) : txn (分散トランザクションの管理情報) のmeta2 ranges \1 + key, non-transactional
-[\2, \3 ) : vid (仮想アクターのidと物理アドレスのマッピング) のmeta2 ranges \2 + key, non-transactional
-[\3, \4 ) : vid state (仮想アクターの永続化される状態,{vid+key}と{value}のマッピング) のmeta2 ranges \3 + key, transactional
-[\4, \40) : reserved
-```
-
-### [\40,\ff) : splittable user keys (max 180)
-```
-[\40,\41) : user data : category 1のmeta2 ranges \40 + key
-[\41,\42) : user data : category 2のmeta2 ranges \41 + key
-...
-[\fe,\ff) : user data : category 180のmeta2 ranges \fe + key
-```
-
-### [\3,max] : reserved
-]]
-local function new_kind(prefix, txnl)
-	local p = memory.alloc_typed('luact_dht_kind_t')
-	ffi.copy(p.prefix, prefix, #prefix)
-	p.txnl = txnl
-	return p
-end
-local kind_map = {
-	-- system category (built in)
-	[_M.KIND_META1] = new_kind("", true),
-	[_M.KIND_META2] = new_kind("", true),
-	[_M.KIND_TXN] = new_kind(string.char(1), false),
-	[_M.KIND_VID] = new_kind(string.char(2), false),
-	[_M.KIND_STATE] = new_kind(string.char(3), true),
-}
-local n_data_kind = 0
--- txnl : use transactional operation? 
--- *caution* txnl==false does not means split does not need transaction. 
--- range data of txnl == false still need txn to split. 
-local function create_kind(id, txnl)
-	kind_map[id] = new_kind(string.char(id), txnl)
-end
-
-
--- common helper
-local function make_arbiter_id(kind, k, kl)
-	return string.char(kind)..ffi.string(k, kl)
-end
-local function make_metakey(kind, k, kl)
-	if kind > _M.KIND_META2 then
-		local kind = kind_map[kind]
-		local p = memory.managed_alloc_typed('char', kl + 1)
-		ffi.copy(p, kind.prefix, 1)
-		ffi.copy(p + 1, k, kl)
-		return p, kl + 1
-	else
-		return k, kl
-	end
-end
-local function make_syskey(category, k, kl)
-	return string.char(0, category)..ffi.string(k, kl)
-end
 
 -- synchorinized merge
 local function sync_merge(storage, stats, k, kl, v, vl, ts, txn)
@@ -167,8 +83,6 @@ local function rawget_to_s(v, vl)
 		return s
 	end
 end
-
-
 
 
 -- range
@@ -186,13 +100,17 @@ function range_mt.alloc(n_replica)
 	p.replica_available = 0
 	return p
 end
-function range_mt:init(start_key, end_key, kind, category)
+function range_mt:init(start_key, end_key, kind, replicas)
 	self.start_key = start_key
 	self.end_key = end_key
 	self.kind = kind
 	self.replica_available = 0
 	self.stats:init()
-	uuid.invalidate(self.replicas[0])
+	if not replicas then
+		uuid.invalidate(self.replicas[0])
+	else
+		ffi.copy(self.replicas, replicas, self.n_replica * ffi.sizeof(self.replicas[0]))
+	end
 end
 function range_mt:__len()
 	return range_mt.size(self.n_replica)
@@ -201,35 +119,73 @@ function range_mt:__tostring()
 	local s = 'range('..tonumber(self.kind)..')['..self.start_key:as_digest().."]..["..self.end_key:as_digest().."]"
 	s = s..' ('..tostring(ffi.cast('void *', self))..')\n'
 	if self.replica_available > 0 then
+		s = s .. "replicas"
 		for i=0, tonumber(self.replica_available)-1 do
-			s = s.."replica"..tostring(i).." "..tostring(self.replicas[i]).."\n"
+			s = s.." "..tostring(self.replicas[i])
 		end
+		s = s .."\n"
 	else
 		s = s.."no replica assigned\n"
 	end
+	local rft = self:raft_body()
+	if rft then
+		s = s.."raftgrps "..tostring(rft:leader())
+		local rs = rft:replica_set()
+		if #rs > 0 then
+			for i=1,#rs do
+				s = s.." "..tostring(rs[i])
+			end
+		end
+		s = s .."\n"
+	else
+		s = s.."no raft group\n"
+	end
 	return s
 end
--- should call after range registered to range manager caches/ranges
-function range_mt:start_replica_set(remote)
-	remote = remote or actor.root_of(nil, luact.thread_id)
-	-- after this arbiter become leader, range_mt:change_replica_set is called, and it starts scanner.
-	-- scanner check number of replica and if short, call add_replica_set to add replica.
-	local a = remote.arbiter(
-		self:arbiter_id(), scanner.range_fsm_factory, { initial_node = true }, self
-	)
-	-- wait for this node becoming leader
-	while true do
-		if self.replica_available >= _M.NUM_REPLICA then
-			break
+function range_mt:copy_to(rng)
+	if #self > #rng then
+		local tmp = memory.realloc(rng, #self)
+		if not tmp then
+			exception.raise('fatal', 'malloc', #self)
 		end
-		luact.clock.sleep(0.5)
+		rng = ffi.cast('luact_dht_range_t*', tmp)
 	end
-	logger.notice('start_replica_set',self)
+	ffi.copy(rng, self, #self)
 end
-function range_mt:debug_add_replica(a)
-	-- print('debug_add_replica', a, self.replica_available, self)
-	self.replicas[self.replica_available] = a
-	self.replica_available = self.replica_available + 1
+-- initiate initial arbiter and wait until replica set sufficiently formed
+local wait_start_replicas_event = {}
+function range_mt:start_raft_group(remote)
+	local id = self:arbiter_id()
+	local rft = self:is_replica_synchorinized_with_raft()
+	if not rft then
+		local ev = wait_start_replicas_event[id]
+		if not ev then
+			ev = event.new()
+			wait_start_replicas_event[id] = ev
+
+			remote = remote or actor.root_of(nil, luact.thread_id)
+			-- after this arbiter become leader, range_mt:change_replica_set is called, and it starts scanner.
+			-- scanner check number of replica and if short, call add_replica_set to add replica.
+			local a = remote.arbiter(
+				self:arbiter_id(), scanner.range_fsm_factory, { initial_node = true }, self
+			)
+			-- wait for this node becoming leader
+			-- maintain_replica_set adds new replica and it will call range_mt:change_replica_set, which increases self.replica_available.
+			while true do
+				if self:is_replica_synchorinized_with_raft() then
+					break
+				end
+				luact.clock.sleep(0.5)
+			end
+			logger.notice('start_raft_group', self)
+			ev:emit('done')
+			wait_start_replicas_event[id] = nil
+		else
+			event.join(nil, ev)
+		end
+		rft = self:raft_body()
+	end
+	return rft
 end
 
 function range_mt:clone(gc)
@@ -242,33 +198,34 @@ function range_mt:clone(gc)
 end
 function range_mt:fin()
 	-- TODO : consider when range need to be removed, and do correct finalization
-	if self:is_lead_by_this_node() then
-		local rft = raft.find(self:arbiter_id())
-		if rft then
-			rft:destroy()
-		end
+	local rft = raft.find(self:arbiter_id())
+	if rft then
+		rft:destroy()
 	end
 end
 function range_mt:arbiter_id()
-	return make_arbiter_id(self.kind, self.end_key:as_slice())
+	return key.make_arbiter_id(self.kind, self:cachekey())
 end
 function range_mt:ts_cache()
 	return range_manager:ts_cache_by_range(self)
 end
 function range_mt:metakey()
-	return make_metakey(self.kind, self.end_key:as_slice())
+	return key.make_metakey(self.kind, self:mvcckey())
 end
 function range_mt:metakind()
-	return self.kind > _M.KIND_META2 and _M.KIND_META2 or _M.KIND_META1
+	return self.kind > _M.KIND_META2 and _M.KIND_META2 or (self.kind - 1)
 end
 function range_mt:is_lead_by_this_node()
 	return uuid.owner_of(self.replicas[0])
 end
-function range_mt:metarange()
+function range_mt:metarange(wtxn)
 	local mk, mkl = self:metakey()
-	return range_manager:find(mk, mkl, self:metakind())
+	return range_manager:find(self:metakind(), mk, mkl, wtxn)
 end
 function range_mt:cachekey()
+	return self.start_key:as_slice()
+end
+function range_mt:mvcckey()
 	return self.end_key:as_slice()
 end
 function range_mt:check_replica()
@@ -278,19 +235,33 @@ function range_mt:check_replica()
 end
 function range_mt:compute_stats()
 	local p = self:partition()
-	p:compute_stats(self.stats, 
-		self.start_key.p, self.start_key:length(), self.end_key.p, self.end_key:length(), 
+	self.stats = p:compute_stats(
+		self.start_key.p, self.start_key:length(), 
+		self.end_key.p, self.end_key:length(), 
 		range_manager.clock:issue())
 end
 function range_mt:is_root_range()
 	return self.kind == _M.KIND_META1
 end
 function range_mt:is_mvcc()
-	return kind_map[self.kind].txnl ~= 0
+	return key.is_mvcc(self.kind)
 end
 -- true if start_key <= k, kl < end_key, false otherwise
-function range_mt:include(k, kl)
-	return self.start_key:less_than(k, kl) and (not self.end_key:less_than(k, kl))
+function range_mt:contains(k, kl)
+	return self.start_key:less_than_equals(k, kl) and (not self.end_key:less_than_equals(k, kl))
+end
+function range_mt:contains_key_slice_range(k, kl, ek, ekl)
+	return self:contains(k, kl) 
+end
+function range_mt:verify_command_range(command)
+	-- logger.warn('txn_retryer', self, command:has_range(), ffi.string(command:key(), command:keylen()))
+	if command:has_range() then
+		if not self:contains_key_slice_range(command:key(), command:keylen(), command:end_key(), command:end_keylen()) then
+			return exception.raise('range_key', ffi.string(command:key(), command:keylen()))
+		end
+	elseif not self:contains(command:key(), command:keylen()) then
+		return exception.raise('range_key', ffi.string(command:key(), command:keylen()))
+	end
 end
 function range_mt:belongs_to(node)
 	if self.replica_available <= 0 then
@@ -315,250 +286,56 @@ function range_mt:find_replica_by(node, check_thread_id)
 		end
 	end
 end
-function range_mt:update_txn_by_response(command, txn, ok, r, r2)
-	-- if no transactional, nothing to do.
-	if not txn then return end
-	-- Move txn timestamp forward to response timestamp. because it will change with timestamp cache.
-	if ok and txn.timestamp < r2 then
- 		-- logger.info('update_txn_by_response ts fwd', txn.timestamp, r2, command)
- 		txn.timestamp = r2
-	end
-	 -- no error, change is not possible
-	if ok then return end 
-	local err = r
-	-- Take action on various errors.
-	if err:is('txn_ts_uncertainty') then
-		-- TODO: Mark the host as certain. certain node skips timestamp check
-
-		-- If the reader encountered a newer write within the uncertainty
-		-- interval, move the timestamp forward, just past that write or
-		-- up to MaxTimestamp, whichever comes first.
-		local exist_ts, max_ts, new_ts = err.args[2], txn:max_timestamp()
-		if exist_ts < max_ts then
-			new_ts = max_ts
-			-- this will change txn.max_ts, but txn.max_ts resets after txn:restart is called
-			new_ts:least_greater_of(exist_ts) 
-		else
-			new_ts = max_ts
-		end
-		-- Only change the timestamp if we're moving it forward.
-		if txn.timestamp < new_ts then
-			txn.timestamp = new_ts
-		end
-		txn:restart(txn.priority, txn.timestamp)
-	elseif err:is('txn_aborted') then
-		-- Increase timestamp if applicable.
-		local target_txn = err.args[1]
-		if txn.timestamp < target_txn.timestamp then
-			txn.timestamp = target_txn.timestamp
-		end
-		txn.priority = target_txn.priority
-	elseif err:is('txn_push_fail') then
-		local resolved_txn = err.args[2]
-		if txn.timestamp < resolved_txn.timestamp then
-			txn.timestamp:least_greater_of(resolved_txn.timestamp)
-		end
-		txn:restart(math.max(0, resolved_txn.priority - 1), txn.timestamp)
-	elseif err:is('txn_need_retry') then
-		local exist_txn = err.args[1]
-		if txn.timestamp < exist_txn.timestamp then
-			-- logger.info('txn_need_retry: fix ts:', exist_txn, txn)
-			txn.timestamp = exist_txn.timestamp
-		end
-		txn:restart(exist_txn.priority, txn.timestamp)
-	end
+local wait_start_replicas_event = {}
+function range_mt:raftlog()
+	-- below may cause block due to initialization wait for raft group, 
+	-- if still split range creation is ongoing in range_mt:exec_split.
+	-- actual initialization is done in range_manager:new_range
+	return self:start_raft_group() 
 end
-function range_mt:on_cmd_finished(command, txn, cmd_start_msec, ok, r, r2, ...)
-	-- if you change txn in this function, the change will propagate to caller. 
-	-- note that command:get_txn() is copied txn object, so any change will not affect caller's txn object. 
-	-- logger.info('on_cmd_finished', command, txn, ok, r, r2, 'realret:', ...)
-	self:update_txn_by_response(command, txn, ok, r, r2)
-	if not ok then
-		local err = r
-		if err:is('actor_no_body') then
-			-- if this node is not owner of this range, invalidate and retrieve range again.
-			-- if it is, should be replication delay, so just wait and retry.
-			if not range_manager:is_owner(self) then
-				range_manager:clear_cache(self)
-				local ok, ret = pcall(range_manager.find, range_manager, command:key(), command:keylen(), self.kind)
-				if ok then
-					ffi.copy(self, ret, ffi.sizeof(self))
-					memory.free(ret)
-				else
-					error(ret)
-				end
-			end
-		elseif txn then
-			if err:is('txn_aborted') then
-				-- abort this txn by resolving version with aborting status.
-				txncoord.resolve_version(txn)
-			end
-		elseif err:is('txn_required') then -- without txn, thenis should be checked.
-			exception.raise('fatal', "TODO : start txn on the fly.")
-		end
-		error(err)
-	elseif txn then
-		local rtxn = r
-		-- if this command modify database, it should added to transaction.
-		if command:is_start_txn() then
-			txncoord.add_cmd(txn, command)
-		end
-		if command:end_txn() then
-			rtxn = ...
-			-- If the -linearizable flag is set, we want to make sure that
-			-- all the clocks in the system are past the commit timestamp
-			-- of the transaction. This is guaranteed if either
-			-- - the commit timestamp is MaxOffset behind startNS
-			-- - MaxOffset ns were spent in this function
-			-- when returning to the client. Below we choose the option
-			-- that involves less waiting, which is likely the first one
-			-- unless a transaction commits with an odd timestamp.
-
-			-- here, r should be transaction
-			local wt = math.min(rtxn.timestamp:walltime(), cmd_start_msec)
-			local sleep_ms = range_manager:max_clock_skew() - (util.msec_walltime() - wt)
-			if txncoord.opts.linearizable and sleep_ms > 0 then
-				logger.info(rtxn, ("waiting %d msec on EndTransaction for linearizability"):format(sleep_ms))
-				clock.sleep(sleep_ms / 1000)
-			end
-			if rtxn.status ~= txncoord.STATUS_PENDING then
-				-- logger.warn('end txn done: resolve version', r.status)
-				txncoord.resolve_version(rtxn)
-			end
-		end
-		-- update with returned transaction (its timestamp may change with retry)
-		txn:update_with(rtxn, true)
-	end
-	return ...
+function range_mt:raft_body()
+	return raft._find_body(self:arbiter_id())
 end
-function range_mt:txn_retryer(command, txn, fn, ...)
-	-- If this call is part of a transaction...
-	if txn then
-		if txncoord.start_txn(txn) then
-			command:get_txn():update_with(txn)
-		end
-		-- Set the timestamp to the original timestamp for read-only
-		-- commands and to the transaction timestamp for read/write
-		-- commands.
-		if command:is_readonly() then
-			command.timestamp = txn.start_at
-		else
-			command.timestamp = txn.timestamp
-		end
-	end
-	-- system clock should be update before tweaking by range's ts cache.
-	range_manager:update_clock(command.timestamp)
-	-- write raft log with retry
-	local success, ret = util.retry(txncoord.retry_opts, function (c, f, replica, ...)
-		f.id = replica -- because f is callable table object and value "id" will reset once called, we set id on every call
-		-- r == raft status, command status or raft error, returned transaction or command error, returned timestamp, { return values}
-		local r = {pcall(f, replica, ...)}
-		if not r[1] then 
-			-- if raft error, throw raft error
-			error(r[2]) 
-		end
-		if r[2] then
-			-- if command success, return result values
-			return util.retry_pattern.STOP, {unpack(r, 2)}
-		end
-		-- handling command error
-		local err, ret_ts = r[3], r[4]
-		if type(err) ~= 'table' then
-			-- return timestamp and error
-			return util.retry_pattern.STOP, {false, exception.raise('runtime', 'txn_retryer', err), ret_ts}
-		elseif err:is('txn_exists') then
-			for idx=0,(#err.args)-1,2 do
-				local conflict_key = err.args[idx+1]
-				local conflict_txn = err.args[idx+2]
-				-- logger.info('conflict_txn', conflict_key, conflict_txn)
-				local how = c:is_write() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
-				local ok, res_txn = pcall(range_manager.resolve_txn, range_manager, c:get_txn(), conflict_txn, how, c.timestamp)
-				if ok then
-					-- logger.info('success to resolve: then resolve version', res_txn)
-					range_manager:resolve(c.kind, conflict_key, #conflict_key, nil, 0, 0, res_txn.timestamp, res_txn) 
-				    -- logger.info('success to resolve: then resolve version end')
-					return util.retry_pattern.RESTART
-				elseif res_txn:is('txn_push_fail') then
-					-- return timestamp and error
-					return util.retry_pattern.STOP, {false, res_txn, ret_ts}
-				else
-					logger.report('resolve_txn error', res_txn)
-					c:get_txn().timestamp:least_greater_of(conflict_txn.timestamp)
-					return util.retry_pattern.CONTINUE
-				end
-			end
-		elseif err:is('txn_write_too_old') then
-			local exist_ts = err.args[2]
-			-- just move timestamp forward
-			c.timestamp:least_greater_of(exist_ts)
-			return util.retry_pattern.RESTART
-		else
-			-- does some stuff to recover from write error, including tweaking txn
-			return util.retry_pattern.STOP, {false, err, ret_ts}
-		end
-	end, command, fn, ...)
-	if success then
-		-- because, if success, r[1] is true in above callback, no need to add true for indicating success
-		return unpack(ret)
+function range_mt:is_replica_synchorinized_with_raft()
+	local rft = self:raft_body()
+	if not rft then return nil end
+	local replica_set = rft:replica_set()
+	return (1 + #replica_set) >= self.n_replica and rft or nil -- +1 for leader node (raft replica_set does not contains leader)
+end
+function range_mt:write(command, timeout, dictatorial)
+	if not uuid.owner_of(self.replicas[0]) then
+		return self.replicas[0]:write(command, timeout, dictatorial)
 	else
-		error(ret) -- some retry error. bug
+		local rft = self:raftlog()
+		return rft:write({command}, timeout, dictatorial)
 	end
 end
-function range_mt:write(command, txn, timeout, dictatorial)
-	if not dictatorial then
-		self:check_replica()
-	end
-	local replica = self.replicas[0]
-	return self:on_cmd_finished(command, txn, util.msec_walltime(), self:txn_retryer(command, txn, replica.write, replica, {command}, timeout, dictatorial))
-end
-function range_mt:read(k, kl, ts, txn, consistent, timeout)
-	local command = cmd.get(self.kind, k, kl, ts, txn, consistent)
-	if consistent then
-		return self:write(command, txn, timeout)
+function range_mt:read(timeout, command)
+	if not uuid.owner_of(self.replicas[0]) then
+		return self.replicas[0]:read(timeout, command)
 	else
-		self:check_replica()
-		local replica = self.replicas[0]
-		return self:on_cmd_finished(command, txn, util.msec_walltime(), self:txn_retryer(command, txn, replica.read, replica, timeout, command))
+		logger.info('range_mt:read')
+		local rft = self:raftlog()
+		return rft:read(timeout, command)
 	end
 end
 -- operation to range
-function range_mt:get(k, txn, consistent, timeout)
-	return self:rawget(k, #k, txn, consistent, timeout)
+function range_mt:update_address(wtxn)
+	assert(self.kind > _M.KIND_META1)
+	local mk, mkl = self:metakey()
+	range_manager:rawput(self:metakind(), mk, mkl, ffi.cast('char *', self), #self, wtxn)
 end
-function range_mt:rawget(k, kl, txn, consistent, timeout)
-	return self:read(k, kl, range_manager.clock:issue(), txn, consistent, timeout)
+function range_mt:make_split_ranges(a, al)
+	if self.start_key:less_than(a, al) and (not self.end_key:less_than_equals(a, al)) then
+		local update, new = self:clone(true), self:clone(true)
+		update.end_key:init(a, al)
+		new.start_key:init(a, al)
+		return update, new, update:metarange(), new:metarange()
+	else
+		exception.raise('invalid', 'split key out of range', ('%q'):format(ffi.string(a, al)), self)
+	end
 end
-function range_mt:put(k, v, txn, timeout)
-	return self:rawput(k, #k, v, #v, txn, timeout)
-end
-function range_mt:rawput(k, kl, v, vl, txn, timeout, dictatorial)
-	return self:write(cmd.put(self.kind, k, kl, v, vl, range_manager.clock:issue(), txn), txn, timeout, dictatorial)
-end
-function range_mt:delete(k, txn, timeout)
-	return self:rawdelete(k, #k, txn, timeout)
-end
-function range_mt:rawdelete(k, kl, txn, timeout)
-	return self:write(cmd.delete(self.kind, k, kl, range_manager.clock:issue(), txn), txn, timeout)
-end
-function range_mt:merge(k, v, op, txn, timeout)
-	return self:rawmerge(k, #k, v, #v, op, #op, txn, timeout)
-end
-function range_mt:rawmerge(k, kl, v, vl, op, ol, txn, timeout)
-	return self:write(cmd.merge(self.kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), txn), txn, timeout)
-end
-function range_mt:cas(k, ov, nv, txn, timeout)
-	local oval, ol = ov or nil, ov and #ov or 0
-	local nval, nl = nv or nil, nv and #nv or 0
-	local cas = range_manager.storage_module.op_cas(ov, nv, nil, ovl, nvl)
-	return self:rawcas(k, #k, oval, ol, nval, nl, txn, timeout)
-end
-function range_mt:rawcas(k, kl, ov, ovl, nv, nvl, txn, timeout)
-	return self:write(cmd.cas(self.kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), txn), txn, timeout)
-end
-function range_mt:watch(k, kl, watcher, method, timeout)
-	return self:write(cmd.watch(self.kind, k, kl, watcher, method, range_manager.clock:issue()), txn, timeout)
-end
-function range_mt:split(at, txn, timeout)
+function range_mt:split(at, timeout)
 	local spk, spkl
 	if at then
 		spk, spkl = at, #at
@@ -568,63 +345,41 @@ function range_mt:split(at, txn, timeout)
 			self.start_key.p, self.start_key:length(),
 			self.end_key.p, self.end_key:length())
 	end
-	return self:write(cmd.split(self.kind, spk, spkl, range_manager.clock:issue(), txn), txn, timeout)
-end
-function range_mt:merge_hook()
-end
-function range_mt:scan(k, kl, ek, ekl, n, txn, consistent, scan_type, timeout)
-	return self:write(cmd.scan(self.kind, k, kl, ek, ekl, n, range_manager.clock:issue(), txn, consistent, scan_type), txn, timeout)
-end
-function range_mt:delete_range(k, kl, ek, ekl, n, txn, timeout)
-	return self:scan(k, kl, ek, ekl, n, txn, true, cmd.SCAN_TYPE_DELETE, timeout)
-end
-function range_mt:resolve(txn, n, s, sl, e, el, ts, timeout)
-	-- does not wait for reply
-	ts = range_manager.clock:issue()
-	if s then
-		return self:write(cmd.resolve(self.kind, s, sl, e, el, n, ts, txn), txn, timeout)
-	else
-		return self:write(cmd.resolve(self.kind, self.start_key.p, self.start_key:length(),
-			self.end_key.p, self.end_key:length(), n, ts, txn), txn, timeout)
+	local update, new, update_meta, new_meta = self:make_split_ranges(spk, spkl)
+	-- create split range data
+	local ok, r = txncoord.run_txn({
+		on_commit = function (txn, ur, nr)
+		print('on_commit', txn)
+			return cmd.split(ur.kind, ur, nr, range_manager.clock:issue(), txn)
+		end,
+	}, function (txn, ur, nr)
+		-- Create range descriptor for second half of split.
+		-- Note that this put must go first in order to locate the
+		-- transaction record on the correct range.
+		nr:update_address(txn)
+		ur:update_address(txn)
+	end, update, new)
+	if not ok then
+		range_manager:destroy_range(new) -- cleanup created range
+		error(r)
 	end
-end
-function range_mt:end_txn(txn, commit, hook, timeout)
-	return self:write(cmd.end_txn(self.kind, range_manager.clock:issue(), txn, commit, hook), txn, timeout)
-end
-function range_mt:resolve_txn(txn, conflict_txn, how, cmd_ts, timeout)
-	return self:write(cmd.resolve_txn(self.kind, range_manager.clock:issue(), txn, conflict_txn, how, cmd_ts), txn, timeout)
-end
-function range_mt:heartbeat_txn(txn, timeout)
-	return self:write(cmd.heartbeat_txn(self.kind, range_manager.clock:issue(), txn), txn, timeout)
+	logger.info('split finished', update, new)
+	return update, new
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn, consistent)
-	local v, vl, rts
-	if self:is_mvcc() then
-		v, vl, rts = storage:rawget(k, kl, ts, txn, consistent)
-	else
-		v, vl = storage:backend():rawget(k, kl)
-	end
+	local v, vl, rts = storage:rawget(k, kl, ts, txn, consistent)
 	return rawget_to_s(v, vl), rts
 end
 function range_mt:exec_put(storage, k, kl, v, vl, ts, txn)
-	if self:is_mvcc() then
-		storage:rawput(self.stats, k, kl, v, vl, ts, txn)
-		self:on_write_replica_finished()
-	else
-		storage:backend():rawput(k, kl, v, vl)
-	end
+	storage:rawput(self.stats, k, kl, v, vl, ts, txn)
+	self:on_write_replica_finished()
 end
 function range_mt:exec_delete(storage, k, kl, ts, txn)
-	if self:is_mvcc() then
-		storage:rawdelete(self.stats, k, kl, ts, txn)
-		self:on_write_replica_finished()
-	else
-		strorage:backend():rawdelete(k, kl)
-	end
+	storage:rawdelete(self.stats, k, kl, ts, txn)
+	self:on_write_replica_finished()
 end
 function range_mt:exec_merge(storage, k, kl, v, vl, op, ol, ts, txn)
-	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	local r = {storage:rawmerge(self.stats, k, kl, v, vl, ffi.string(op, ol), ts, txn)}
 	self:on_write_replica_finished()
 	return unpack(r)
@@ -634,11 +389,10 @@ local function sync_cas(storage, stats, k, kl, o, ol, n, nl, ts, txn)
 	return storage:rawmerge(stats, k, kl, cas, #cas, 'cas', ts, txn)
 end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
-	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	local ok, ov = sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 	self:on_write_replica_finished()
 	logger.info('syn_cas', ok, ov)
-	return ok, ov	
+	return ok, ov
 end
 local range_scan_filter_count
 function range_mt.range_scan_filter(k, kl, v, vl, ts, r)
@@ -649,7 +403,7 @@ end
 local scan_end_key_work = memory.alloc_typed('uint8_t', 1)
 function range_mt:range_scan_end_key(k, kl)
 	if self.kind >= _M.NON_METADATA_KIND_START then
-		exception.raise('invalid', 'this range, should not scanned', self)
+		return self.end_key:as_slice()
 	elseif self.kind == _M.KIND_META1 then
 		return _M.META2_SCAN_END_KEYSTR, #(_M.META2_SCAN_END_KEYSTR) 
 	else -- currently KIND_META2 only
@@ -660,14 +414,13 @@ function range_mt:range_scan_end_key(k, kl)
 	end
 end
 function range_mt:exec_scan(storage, k, kl, ek, ekl, n, ts, txn, consistent, scan_type)
-	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
-	-- logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ('%q'):format(ffi.string(ek, ekl)), scan_type)
+	-- logger.warn('k/kl', self.kind, n, ('%q'):format(ffi.string(k, kl)), ek and ('%q'):format(ffi.string(ek, ekl)), scan_type)
+	if not ek then
+		ek, ekl = self:range_scan_end_key(k, kl)
+	end
 	if scan_type == cmd.SCAN_TYPE_NORMAL then
 		return storage:scan(k, kl, ek, ekl, n, ts, txn, consistent)		
 	elseif scan_type == cmd.SCAN_TYPE_RANGE then
-		if ekl <= 0 then
-			ek, ekl = self:range_scan_end_key(k, kl)
-		end
 		range_scan_filter_count = n
 		return storage:scan(k, kl, ek, ekl, range_mt.range_scan_filter, ts, txn, consistent)
 	elseif scan_type == cmd.SCAN_TYPE_DELETE then
@@ -675,7 +428,6 @@ function range_mt:exec_scan(storage, k, kl, ek, ekl, n, ts, txn, consistent, sca
 	end
 end
 function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
-	if not self:is_mvcc() then exception.raise('invalid', 'operation not allowed for non-mvcc range') end
 	if el > 0 then
 		return storage:resolve_versions_in_range(self.stats, s, sl, e, el, n, ts, txn)
 	else
@@ -683,21 +435,25 @@ function range_mt:exec_resolve(storage, s, sl, e, el, n, ts, txn)
 		return 1
 	end
 end
-function range_mt:exec_end_txn(storage, ts, txn, commit)
-	if self:is_mvcc() then exception.raise('invalid', 'operation not allowed for mvcc range') end
-	local k, kl = txncoord.storage_key(txn)
+function range_mt:exec_end_txn(storage, ts, txn, commit, cmd_on_commit)
+	local k, kl = key.make_txn_key(txn)
 	local v, vl = storage:backend():rawget(k, kl)
 	-- if txn record exists, make it gc-able. otherwise nil
-	local exist_txn = (v ~= ffi.NULL and ffi.gc(ffi.cast('luact_dht_txn_t *', v), memory.free) or nil)
+	local exist_txn = (v ~= nil and ffi.gc(ffi.cast('luact_dht_txn_t *', v), memory.free) or nil)
 	local rtxn = txncoord.end_txn(txn, exist_txn, commit)
 	-- Persist the transaction record with updated status (& possibly timestamp).
 	-- TODO : update stats
 	storage:backend():rawput(k, kl, ffi.cast('char *', rtxn), #rtxn)
+	if cmd_on_commit then
+		logger.info('apply cmd on commit:', cmd_on_commit)
+		-- use current txn (already commited) main usage is resolve version of necessary key
+		cmd_on_commit:set_txn(rtxn)
+		cmd_on_commit:apply_to(self:partition(), self)
+	end
 	return rtxn
 end
 function range_mt:exec_heartbeat_txn(storage, ts, txn)
-	if self:is_mvcc() then exception.raise('invalid', 'operation not allowed for mvcc range') end
-	local txk, txkl = txncoord.storage_key(txn)
+	local txk, txkl = key.make_txn_key(txn)
 	local v, vl = storage:backend():rawget(txk, txkl)
 	-- If no existing transaction record was found, initialize
 	-- to the transaction in the request.
@@ -706,7 +462,7 @@ function range_mt:exec_heartbeat_txn(storage, ts, txn)
 		if txn.last_update < ts then
 			txn.last_update = ts
 		end
-		-- logger.notice('hbtxn:', ffi.cast('luact_uuid_t*', txk), exist_txn)
+		-- logger.notice('hbtxn:', key.inspect(txk, txkl), txn)
 		-- TODO : update stats
 		storage:backend():rawput(txk, txkl, ffi.cast('char *', exist_txn), #exist_txn)
 	end
@@ -714,11 +470,10 @@ function range_mt:exec_heartbeat_txn(storage, ts, txn)
 end
 local expiry_ts_work = memory.alloc_typed('pulpo_hlc_t')
 function range_mt:exec_resolve_txn(storage, ts, txn, conflict_txn, how, cmd_ts)
-	if self:is_mvcc() then exception.raise('invalid', 'operation not allowed for mvcc range') end
-	local txk, txkl = txncoord.storage_key(conflict_txn)
+	local txk, txkl = key.make_txn_key(conflict_txn)
 	local v, vl = storage:backend():rawget(txk, txkl)
 	local resolved_txn
-	--logger.info('restxn', ffi.cast('luact_uuid_t*', txk), v)
+	-- logger.notice('txk:::', key.inspect(txk, txkl), conflict_txn, txn)
 
 	if v ~= nil then
 		resolved_txn = ffi.gc(ffi.cast('luact_dht_txn_t*', v), memory.free)
@@ -734,7 +489,9 @@ function range_mt:exec_resolve_txn(storage, ts, txn, conflict_txn, how, cmd_ts)
 		end
 	else
 		-- Some sanity checks for case where we don't find a transaction record.
-		if conflict_txn.last_update:is_zero() then
+		logger.info('conf:', conflict_txn)
+		os.exit(-1)
+		if not conflict_txn.last_update:is_zero() then
 			exception.raise('txn_invalid', 'no txn persisted, yet intent has heartbeat')
 		elseif conflict_txn.status ~= txncoord.STATUS_PENDING then
 			exception.raise('txn_invalid', 'no txn persisted, yet intent has status', tostring(txn.status))
@@ -814,36 +571,31 @@ end
 function range_mt:exec_watch(storage, k, kl, watcher, method, arg, alen, ts)
 	assert(false, "TBD")
 end
-function range_mt.split_hook(fr, sr)
-	-- compute stats after commit done, to minimize write lock duration.
-	fr:compute_stats()
-	sr:compute_stats()
-end
-function range_mt:exec_split(storage, at, atl, ts)
-	assert(self:is_mvcc(), exception.new('invalid', 'operation not allowed for non-mvcc range'))
-	-- create split range data
-	txncoord.run_txn({
-		on_commit = range_mt.split_hook,
-	}, function (txn, fr, sr, mfr, msr)
-		-- search for the range which stores split ranges
-		fr:update_address(txn, mfr)
-		sr:update_address(txn, msr)
-	end, rng:make_split_ranges(at, atl))
-end
-function range_mt:make_split_ranges(a, al)
-	if self.start_key:less_than(a, al) and (not self.end_key:less_than_equals(a, al)) then
-		local first, second = self:clone(true), self:clone(true)
-		first.end_key:init(a, al)
-		second.start_key:init(a, al)
-		return first, second, first:metarange(), second:metarange()
-	else
-		exception.raise('invalid', 'split key out of range', ('%q'):format(ffi.string(a, al)), self)
-	end
-end
-function range_mt:update_address(txn, mrng)
-	assert(self.kind > _M.KIND_META1)
-	mrng = mrng or self:metarange()
-	mrng:rawput(mk, mkl, ffi.cast('char *', self), #self, txn)
+--[[
+exec_splitはsplitのフローのうち3.を実行する
+splitのフローは以下の通り
+1. rangeを分割したデータを作る(updated/new)
+2. newを保持するデータを新しくmetarangeに作成する。updatedを保持しているmetarangeのデータを更新する。
+　　これらはtransactionalに更新する。
+3. 同時にこのraft commandに関与したVM全てで他の処理の割り込みがないタイミングでこの２つのrangeを保持するようにマークする。(range_manager.ranges[kind]の更新)
+   この場合、range_manager.rangesはkeyからそれを保持するrangeを高速に検索できるようになっている必要がある(rbtree?)
+4. gossipでsplitを通知する
+]]
+function range_mt:exec_split(storage, update_range, new_range, txn, ts)
+	local k, kl = update_range:cachekey()
+	local updated = range_manager:find_range(k, kl, update_range.kind)
+	updated.end_key:init(update_range.end_key:as_slice())
+	updated:compute_stats()
+	-- update new range's ts_cache. it should be same as split source's, without initializing raft group
+	local created = range_manager:new_range(new_range.start_key, new_range.end_key, new_range.kind, new_range.replicas, true)
+	created:ts_cache():merge(updated:ts_cache(), true)
+	range_manager:cache_range(created) -- add to cache.
+	created:compute_stats()
+	-- here, all range related setup is done, then start raft group.
+	-- luajit VM is single threaded, so any request to *created* never be received after here.
+	created:start_raft_group()
+	-- notify split via gossip
+	range_manager.gossiper:broadcast(cmd.gossip.replica_change(self, self.end_key), cmd.GOSSIP_RANGE_SPLIT)
 end
 function range_mt:partition()
 	return range_manager.partitions[self.kind]
@@ -866,6 +618,9 @@ end
 
 -- call from raft module
 function range_mt:apply(command)
+	if not command then
+		logger.error('command nil')
+	end
 	assert(self.kind == command.kind)
 	-- if command uses ts cache (and not readonly), forward ts according to range's latest read/write timestamp
 	if command:use_ts_cache() and (not command:is_readonly()) then
@@ -874,7 +629,7 @@ function range_mt:apply(command)
 		-- occurred after our txn timestamp.
 		if rts >= command.timestamp then
 			command.timestamp:least_greater_of(rts)
-			-- logger.info("ts forward to rts", ffi.string(command:key(),command:keylen()), command:end_key_str(), command.timestamp, rts, command)
+			-- logger.info("ts forward to rts", ('%q'):format(ffi.string(command:key(),command:keylen())), command:end_key_str(), command.timestamp, rts, command)
 		end
 		-- If there's a newer write timestamp...
 		if wts >= command.timestamp then
@@ -895,7 +650,7 @@ function range_mt:apply(command)
 		if command:use_ts_cache() then
 			--[[ 
 			logger.info('command use ts cache: update cache:', 
-				command, ffi.string(command:key(), command:keylen()), command:end_key_str(), 
+				command, ('%q'):format(ffi.string(command:key(), command:keylen())), command:end_key_str(), 
 				command.timestamp, command:get_txn(), command:is_readonly())
 			--]]
 			self:ts_cache():add(command:key(), command:keylen(), command:end_key(), command:end_keylen(), command.timestamp, command:get_txn(), command:is_readonly())
@@ -913,6 +668,30 @@ function range_mt:metadata()
 		key = self.start_key,
 	}
 end
+-- raft2rm maintains mapping of ip => range manager actor
+local machine_and_thread_to_rm = {}
+local function manager_actor_from(raft_uuid)
+	-- TODO : this affects performance, using cache like below.
+	--[[
+	local mid, tid = uuid.addr(raft_uuid), uuid.thread_id(raft_uuid)
+	local threads = machine_and_thread_to_rm[mid]
+	if not threads then
+		threads = {}
+		machine_and_thread_to_rm[mid] = threads
+	end
+	local ma = threads[tid]
+	if not ma then
+		ma = actor.root_of(mid, tid).dhtm()
+		threads[tid] = ma
+	end
+	return ma]]
+	local n = actor.root_of(uuid.addr(raft_uuid), uuid.thread_id(raft_uuid))
+	return n.dhtm()
+end
+function range_mt:debug_add_replica(a)
+	self.replicas[self.replica_available] = manager_actor_from(a)
+	self.replica_available = self.replica_available + 1
+end
 function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if not uuid.valid(leader) then
 		logger.warn('dht', 'change_replica_set', 'leader_id cleared. wait for next leader_id', self)
@@ -927,9 +706,9 @@ function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	local prev_leader = uuid.owner_of(self.replicas[0])
 	local current_leader = uuid.owner_of(leader)
 	-- change replica set
-	self.replicas[0] = leader
+	self.replicas[0] = manager_actor_from(leader)
 	for i=1,#replica_set do
-		self.replicas[i] = replica_set[i]
+		self.replicas[i] = manager_actor_from(replica_set[i])
 	end
 	self.replica_available = (1 + #replica_set)
 	-- handle leader change
@@ -987,7 +766,7 @@ serde_common.register_ctype('struct', 'luact_dht_range', {
 }, serde_common.LUACT_DHT_RANGE)
 serde_common.register_ctype('struct', 'luact_dht_key', nil, serde_common.LUACT_DHT_KEY)
 serde_common.register_ctype('union', 'pulpo_hlc', nil, serde_common.LUACT_HLC)
-ffi.metatype('luact_dht_range_t', range_mt)
+ffi.metatype('luact_dht_range_t', range_mt) -- cdef is done in range_cdef.lua
 
 
 
@@ -1003,7 +782,6 @@ function range_manager_mt:bootstrap(nodelist)
 	-- create storage for initial dht setting with bootstrap mode
 	local root_cf = self:new_partition(_M.KIND_META1, _M.META1_FAMILY_NAME)
 	local meta2_cf = self:new_partition(_M.KIND_META2, _M.META2_FAMILY_NAME)
-	self:new_partition(_M.KIND_TXN, _M.TXN_FAMILY_NAME)
 	self:new_partition(_M.KIND_VID, _M.VID_FAMILY_NAME)
 	self:new_partition(_M.KIND_STATE, _M.STATE_FAMILY_NAME)
 	-- start dht gossiper
@@ -1015,24 +793,25 @@ function range_manager_mt:bootstrap(nodelist)
 	})
 	-- primary thread create initial cluster data structure
 	if not nodelist then
-		-- create root range
-		self.root_range = self:new_range(key.MIN, key.MAX, _M.KIND_META1, true)
-		self.root_range:start_replica_set()
+		-- create root range. 
+		self.root_range = self:new_range(_M.META1_MIN_KEY, _M.META1_MAX_KEY, _M.KIND_META1, nil, true)
+		-- because of check in range:change_replica_set, first we need to initialize root_range before start_raft_group of it.
+		self.root_range:start_raft_group()
 		-- put initial meta2 storage into root_range (with writing raft log)
-		local meta2 = self:new_range(key.MIN, _M.META2_MAX_KEY, _M.KIND_META2)
+		local meta2 = self:new_range(_M.META2_MIN_KEY, _M.META2_MAX_KEY, _M.KIND_META2)
 		local meta2_key, meta2_key_len = meta2:metakey()
-		self.root_range:rawput(meta2_key, meta2_key_len, ffi.cast('char *', meta2), #meta2, nil, nil, true)
+		self:rawput(_M.KIND_META1, meta2_key, meta2_key_len, ffi.cast('char *', meta2), #meta2, nil, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
-		for _, kind in ipairs({_M.KIND_TXN, _M.KIND_VID, _M.KIND_STATE}) do
-			local rng = self:new_range(key.MIN, _M.NON_META_MAX_KEY, kind)
+		for kind=_M.NON_METADATA_KIND_START,_M.NON_METADATA_KIND_END do
+			local rng = self:new_range(_M.NON_META_MIN_KEY, _M.NON_META_MAX_KEY, kind)
 			local mk, mkl = rng:metakey()
-			meta2:rawput(mk, mkl, ffi.cast('char *', rng), #rng, nil, nil, true)
+			self:rawput(_M.KIND_META2, mk, mkl, ffi.cast('char *', rng), #rng, nil, nil, true)
 		end
 	end
 end
 -- shutdown range manager.
 function range_manager_mt:shutdown(truncate)
-	for _, kind in ipairs({_M.KIND_TXN, _M.KIND_VID, _M.KIND_STATE, _M.KIND_META2, _M.KIND_META1}) do
+	for kind=_M.ROOT_METADATA_KIND,_M.NON_METADATA_KIND_END do
 		self:shutdown_kind(kind, truncate)
 	end
 	self.root_range = false
@@ -1045,16 +824,16 @@ function range_manager_mt:bootstrap_kind(name, kind)
 	if kind then
 		if kind >= _M.BUILTIN_KIND_START and kind <= _M.BUILTIN_KIND_END then
 			return kind
-		elseif kind < _M.USER_KIND_PREFIX_MIN or kind > _M.USER_KIND_PREFIX_MAX then
-			exception.raise('invalid', 'kind value should be within', _M.USER_KIND_PREFIX_MIN, _M.USER_KIND_PREFIX_MAX)
+		elseif kind < _M.USER_KIND_PREFIX_START or kind > _M.USER_KIND_PREFIX_END then
+			exception.raise('invalid', 'kind value should be within', _M.USER_KIND_PREFIX_START, _M.USER_KIND_PREFIX_END)
 		end
 	end
-	for k=kind or _M.USER_KIND_PREFIX_MIN, _M.USER_KIND_PREFIX_MAX do
-		local syskey = make_syskey(_M.SYSKEY_CATEGORY_KIND, string.char(k))
+	for k=kind or _M.USER_KIND_PREFIX_START, _M.USER_KIND_PREFIX_END do
+		local syskey = key.make_user_kind_syskey(string.char(k), 1)
 		local ok, prev = self.root_range:cas(syskey, nil, name) 
 		if ok then
 			self:new_partition(k)
-			self:new_range(key.MIN, _M.NON_META_MAX_KEY, k)
+			self:new_range(_M.NON_META_MIN_KEY, _M.NON_META_MAX_KEY, k)
 			return k
 		elseif prev == name then
 			return k
@@ -1074,23 +853,31 @@ function range_manager_mt:shutdown_kind(kind, truncate)
 	end
 	if self.ranges[kind] then
 		self.ranges[kind]:clear(function (rng)
-			self:destory_range(rng)
+			self:destroy_range(rng)
 		end)
 	end
 	self:destroy_partition(kind, truncate)
 end
 -- create new range
-function range_manager_mt:new_range(start_key, end_key, kind, dont_start_replica)
+function range_manager_mt:new_range(start_key, end_key, kind, replica_set, dont_start_raft)
 	local r = range_mt.alloc(_M.NUM_REPLICA)
-	r:init(start_key, end_key, kind)
+	r:init(start_key, end_key, kind, replica_set)
 	self:add_owned_range(r)
-	if kind > _M.KIND_META1 then
-		self.caches[kind]:add(r)
-	end
-	if not dont_start_replica then
-		r:start_replica_set()
+	self:cache_range(r)
+	if not dont_start_raft then
+		r:start_raft_group()
 	end
 	return r
+end
+function range_manager_mt:destroy_range(rng)
+	local k = rng:arbiter_id()
+	local c = self.ts_caches[k] 
+	self.ts_caches[k] = nil
+	c:fin()
+	self:clear_cache(rng)
+	self.ranges[rng.kind]:remove(rng)
+	rng:fin()
+	memory.free(rng)
 end
 -- TODO : max clock skew should be change according to cluster environment, so measure it.
 function range_manager_mt:max_clock_skew()
@@ -1113,11 +900,9 @@ function range_manager_mt:create_fsm_for_arbiter(rng)
 	local r = self.ranges[kind]:find(rng:cachekey())
 	if not r then
 		r = rng:clone() -- rng is from packet, so volatile
-		self:add_owned_range(r)
 		self:new_partition(rng.kind)
-		if kind > _M.KIND_META1 then
-			self.caches[kind]:add(r)
-		end
+		self:add_owned_range(r)
+		self:cache_range(r)
 	end
 	return r
 end
@@ -1128,24 +913,18 @@ function range_manager_mt:add_owned_range(rng)
 		self.ts_caches[k] = cache.new_ts(self)
 	end
 end
-function range_manager_mt:ts_cache_by_range(rng)
-	return self.ts_caches[rng:arbiter_id()]
+function range_manager_mt:cache_range(rng)
+	if rng.kind > _M.KIND_META1 then
+		self.caches[rng.kind]:add(rng)
+	end
 end
-function range_manager_mt:destory_range(rng)
-	local k = rng:arbiter_id()
-	local c = self.ts_caches[k] 
-	self.ts_caches[k] = nil
-	c:fin()
-	self:clear_cache(rng)
-	self.ranges[rng.kind]:remove(rng)
-	rng:fin()
-	memory.free(rng)
-end
--- if rng is hosted by this node, 
 function range_manager_mt:clear_cache(rng)
 	if rng.kind > _M.KIND_META1 then
 		self.caches[rng.kind]:remove(rng)
 	end
+end
+function range_manager_mt:ts_cache_by_range(rng)
+	return self.ts_caches[rng:arbiter_id()]
 end
 function range_manager_mt:new_partition(kind)
 	if #self.partitions >= 255 then
@@ -1155,7 +934,7 @@ function range_manager_mt:new_partition(kind)
 	if not p then
 		p = self.storage:column_family(tostring(kind))
 		self.partitions[kind] = p
-		self.ranges[kind] = cache.new_range(kind)
+		self.ranges[kind] = cache.new(kind)
 		if kind > _M.KIND_META1 then
 			self.caches[kind] = cache.new_range(kind)
 		end
@@ -1170,7 +949,7 @@ function range_manager_mt:destroy_partition(kind, truncate)
 end
 -- find range which contains key (k, kl) of kind
 -- search original kind => KIND_META2 => KIND_META1
-function range_manager_mt:find(k, kl, kind)
+function range_manager_mt:find(kind, k, kl, wtxn)
 	local r, mk, mkl
 	local prefetch = self.opts.range_prefetch_count
 	kind = kind or _M.KIND_STATE
@@ -1178,21 +957,15 @@ function range_manager_mt:find(k, kl, kind)
 		r = self.caches[kind]:find(k, kl)
 		-- logger.info('r = ', r)
 		if not r then
-			mk, mkl = make_metakey(kind, k, kl)
+			mk, mkl = key.make_metakey(kind, k, kl)
+			logger.info('metakey', ('%q'):format(ffi.string(mk, mkl)))
 			-- find range from meta ranges
-			r = self:find(mk, mkl, _M.NON_METADATA_KIND_START - 1)
-			if r then
-				r = r:scan(mk, mkl, "", 0, prefetch, nil, true, cmd.SCAN_TYPE_RANGE)
-			end
+			r = self:sr_scan(_M.NON_METADATA_KIND_START - 1, mk, mkl, nil, 0, prefetch, wtxn, true, cmd.SCAN_TYPE_RANGE)
 		end
 	elseif kind > _M.ROOT_METADATA_KIND then
 		r = self.caches[kind]:find(k, kl)
 		if not r then
-			-- find range from top level meta ranges
-			r = self:find(k, kl, kind - 1)
-			if r then
-				r = r:scan(k, kl, "", 0, prefetch, nil, true, cmd.SCAN_TYPE_RANGE)
-			end
+			r = self:sr_scan(kind - 1, k, kl, nil, 0, prefetch, wtxn, true, cmd.SCAN_TYPE_RANGE)
 		end
 	else -- KIND_META1
 		return self.root_range
@@ -1201,7 +974,7 @@ function range_manager_mt:find(k, kl, kind)
 		if type(r) == 'table' then
 			-- cache all fetched range
 			for i=1,#r do
-				self.caches[kind]:add(r[i])
+				self:cache_range(r[i])
 			end
 			-- first one is our target.
 			r = r[1]
@@ -1209,87 +982,31 @@ function range_manager_mt:find(k, kl, kind)
 			-- if not table, it means r is from cache, so no need to re-cache
 		end
 	else
-		exception.raise('not_found', 'cannot find range for', ('%d,%q'):format(kind, ffi.string(k, kl)))
+		exception.raise('not_found', 'range', kind, ffi.string(k, kl))
 	end
 	return r
 end
-function range_manager_mt:find_on_memory(k, kl, kind)
+function range_manager_mt:find_range_from_cache(k, kl, kind)
 	if kind > _M.KIND_META1 then
 		return self.caches[kind]:find(k, kl)
 	else
 		return self.root_range
 	end
 end
-function range_manager_mt:heartbeat_txn(txn)
-	local k, kl = txncoord.storage_key(txn)
-	return self:find(k, kl, _M.KIND_TXN):heartbeat_txn(txn)
+function range_manager_mt:find_range(k, kl, kind)
+	return self.ranges[kind]:find(k, kl)
 end
-function range_manager_mt:resolve_txn(txn, conflict_txn, how, cmd_ts)
-	local k, kl = txncoord.storage_key(conflict_txn)
-	return self:find(k, kl, _M.KIND_TXN):resolve_txn(txn, conflict_txn, how, cmd_ts)
-end
-function range_manager_mt:end_txn(txn, commit)
-	local k, kl = txncoord.storage_key(txn)
-	self:find(k, kl, _M.KIND_TXN):end_txn(txn, commit)
-end
-function range_manager_mt:add_span_command_result(ret, r)
-	-- logger.info('add_span_command_result', ret, r)
-	assert(not ret or (type(r) == type(ret)))
-	if not ret then
-		ret = r
-	elseif type(r) == 'number' then
-		ret = ret + r
-	elseif type(r) == 'table' then
-		for k,v in pairs(r) do
-			ret[k] = v
-		end
-	elseif type(r) == 'string' then
-		ret = ret .. r
-	end
-	return ret
-end
-function range_manager_mt:invoke_span_command(method, kind, k, kl, ek, ekl, ...)
-	local rng, remain, ret
-	local ck, ckl = k, kl
-	while true do
-		rng = self:find(ck, ckl, kind)
-		remain = rng.end_key:less_than(ek, ekl)
-		if remain then
-			-- In next iteration, query next range.
-			-- It's important that we use the EndKey of the current descriptor
-			-- as opposed to the StartKey of the next one: if the former is stale,
-			-- it's possible that the next range has since merged the subsequent
-			-- one, and unless both descriptors are stale, the next descriptor's
-			-- StartKey would move us to the beginning of the current range,
-			-- resulting in a duplicate scan.
-			ret = self:add_span_command_result(ret, rng[method](rng, ck, ckl, rng.end_key.p, rng.end_key.len, ...))
-			ck, ckl = rng.end_key.p, rng.end_key.len
-		else
-			ret = self:add_span_command_result(ret, rng[method](rng, ck, ckl, ek, ekl, ...))
-			break
-		end
-	end
-	return ret
-end
-function range_manager_mt:scan(kind, k, kl, ek, ekl, n, txn, consistent, scan_type)
-	return self:invoke_span_command("scan", kind, k, kl, ek, ekl, n, txn, consistent, scan_type)
-end
-function range_manager_mt:delete_range(kind, k, kl, ek, ekl, n, txn)
-	return self:invoke_span_command("delete_range", kind, k, kl, ek, ekl, n, txn)
-end
--- NOTE : no need to care about multiple range request for resolve.
--- because resolve's key range is originally given by finished command, which is already seperated properly.
-function range_manager_mt:resolve(kind, k, kl, ek, ekl, n, ts, txn)
-	return self:find(k, kl, kind):resolve(txn, n, k, kl, ek, ekl, ts)
-end
--- update system clock
+
+-- update_clock updates system clock (hlc) with considering max_clock_skew.
+-- if incoming clock exceeds beyond the margin of max_clock_skew, means too future.
 function range_manager_mt:update_clock(ts)
 	local max_clock_skew = self:max_clock_skew()
 	if max_clock_skew > 0 then
+		local skew_wt = util.sec2walltime(max_clock_skew)
 		local now = util.msec_walltime()
 		local dt = ts:walltime() - now
-		if dt > max_clock_skew then
-			exception.raise('future_ts', ts:walltime(), now)
+		if dt > skew_wt then
+			exception.raise('txn_future_ts', ts:walltime(), now, dt, skew_mt)
 		end
 	end
 	self.clock:witness(ts)
@@ -1304,8 +1021,10 @@ function range_manager_mt:initialized()
 	end
 	return false
 end
+-- process_join handles gossip node join event.
 function range_manager_mt:process_join(node, total_nodes)
 end
+-- process_leave handles gossip node leave event
 function range_manager_mt:process_leave(node)
 	for i=1,#self.caches do
 		local c = self.caches[i]
@@ -1322,6 +1041,7 @@ function range_manager_mt:process_leave(node)
 		end, node)
 	end
 end
+-- process_user_event handles gossip node user event
 function range_manager_mt:process_user_event(subkind, p, len)
 	if subkind == cmd.GOSSIP_REPLICA_CHANGE then
 		p = ffi.cast('luact_dht_gossip_replica_change_t*', p)
@@ -1330,7 +1050,7 @@ function range_manager_mt:process_user_event(subkind, p, len)
 		--end
 		-- only when this node own or cache corresponding range, need to follow the change
 		local ptr, len = p.key:as_slice()
-		local r = self:find_on_memory(ptr, len, p.kind) 
+		local r = self:find_range_from_cache(ptr, len, p.kind) 
 		if r then
 			if p.n_replica > r.n_replica then
 				exception.raise('fatal', 'invalid replica set size', p.n_replica, r.n_replica)
@@ -1342,7 +1062,7 @@ function range_manager_mt:process_user_event(subkind, p, len)
 	elseif subkind == cmd.GOSSIP_RANGE_SPLIT then
 		-- only when this node own or cache corresponding range, need to follow the change
 		local ptr, len = p.key:as_slice()
-		local r = self:find_on_memory(ptr, len, p.kind) 
+		local r = self:find_range_from_cache(ptr, len, p.kind) 
 		if r then
 			r:split_at(p.split_at)
 		end
@@ -1360,8 +1080,9 @@ function range_manager_mt:process_user_event(subkind, p, len)
 		logger.report('invalid user command', subkind, ('%q'):format(ffi.string(p, len)))
 	end
 end
+-- memberlist_event handles all gossip node event, by calling sub-callback properly.
 function range_manager_mt:memberlist_event(kind, ...)
-	logger.warn('memberlist_event', kind, ...)
+	--logger.warn('memberlist_event', kind, ...)
 	if kind == 'start' then
 		logger.info('dht', 'gossip start')
 	elseif kind == 'join' then
@@ -1375,6 +1096,7 @@ function range_manager_mt:memberlist_event(kind, ...)
 		logger.report('dht', 'invalid gossip event', kind, ...)
 	end
 end
+-- user_state returns gossip user state, which is broadcast with system node information
 function range_manager_mt:user_state()
 	-- TODO : send some information to help to choose replica set
 	return nil, 0
@@ -1400,6 +1122,403 @@ function range_manager_mt:run_root_range_gossiper(intv)
 	while true do 
 		self.gossiper:broadcast(cmd.gossip.root_range(range_manager.root_range), cmd.GOSSIP_ROOT_RANGE)
 		luact.clock.sleep(intv)
+	end
+end
+
+
+
+-- common operation helper
+-- txn error handling
+function range_manager_mt:update_txn_by_response(command, txn, ok, r, r2)
+	-- if no transactional, nothing to do.
+	if not txn then return end
+	-- Move txn timestamp forward to response timestamp. because it will change with timestamp cache.
+	if ok and txn.timestamp < r2 then
+ 		-- logger.info('update_txn_by_response ts fwd', txn.timestamp, r2, command)
+ 		txn.timestamp = r2
+	end
+	 -- no error, change is not possible
+	if ok then return end 
+	local err = r
+	-- Take action on various errors.
+	if err:is('txn_ts_uncertainty') then
+		-- TODO: Mark the host as certain. certain node skips timestamp check
+
+		-- If the reader encountered a newer write within the uncertainty
+		-- interval, move the timestamp forward, just past that write or
+		-- up to MaxTimestamp, whichever comes first.
+		local exist_ts, max_ts, new_ts = err.args[2], txn:max_timestamp()
+		if exist_ts < max_ts then
+			new_ts = max_ts
+			-- this will change txn.max_ts, but txn.max_ts resets after txn:restart is called
+			new_ts:least_greater_of(exist_ts) 
+		else
+			new_ts = max_ts
+		end
+		-- Only change the timestamp if we're moving it forward.
+		if txn.timestamp < new_ts then
+			txn.timestamp = new_ts
+		end
+		txn:restart(txn.priority, txn.timestamp)
+	elseif err:is('txn_aborted') then
+		-- Increase timestamp if applicable.
+		local target_txn = err.args[1]
+		if txn.timestamp < target_txn.timestamp then
+			txn.timestamp = target_txn.timestamp
+		end
+		txn.priority = target_txn.priority
+	elseif err:is('txn_push_fail') then
+		local resolved_txn = err.args[2]
+		if txn.timestamp < resolved_txn.timestamp then
+			txn.timestamp:least_greater_of(resolved_txn.timestamp)
+		end
+		txn:restart(math.max(0, resolved_txn.priority - 1), txn.timestamp)
+	elseif err:is('txn_need_retry') then
+		local exist_txn = err.args[1]
+		if txn.timestamp < exist_txn.timestamp then
+			-- logger.info('txn_need_retry: fix ts:', exist_txn, txn)
+			txn.timestamp = exist_txn.timestamp
+		end
+		txn:restart(exist_txn.priority, txn.timestamp)
+	end
+end
+function range_manager_mt:on_cmd_finished(command, wrapped_txn, cmd_start_walltime, ok, r, r2, ...)
+	-- if you change txn in this function, the change will propagate to caller. 
+	-- note that command:get_txn() is copied txn object, so any change will not affect caller's txn object. 
+	-- if not ok then
+	 	-- logger.info('on_cmd_finished', command, txn, ok, r, r2, 'callret:', ...)
+	-- end
+	local txn = self:strip(wrapped_txn)
+	self:update_txn_by_response(command, txn, ok, r, r2)
+	if not ok then
+		local err = r
+		if wrapped_txn then
+			if err:is('txn_aborted') then
+				-- abort this txn by resolving version with aborting status.
+				txncoord.resolve_version(txn)
+			end
+		elseif err:is('txn_required') then -- without txn, thenis should be checked.
+			exception.raise('fatal', "TODO : start txn on the fly.")
+		end
+		error(err)
+	elseif wrapped_txn then
+		local rtxn = r
+		-- if this command modify database, it should added to transaction.
+		if command:is_start_txn() then
+			txncoord.add_cmd(wrapped_txn, command)
+		end
+		if command:end_txn() then
+			rtxn = ...
+			-- If the -linearizable flag is set, we want to make sure that
+			-- all the clocks in the system are past the commit timestamp
+			-- of the transaction. This is guaranteed if either
+			-- * the commit timestamp is MaxOffset behind startNS
+			-- * MaxOffset ns were spent in this function
+			-- when returning to the client. Below we choose the option
+			-- that involves less waiting, which is likely the first one
+			-- unless a transaction commits with an odd timestamp.
+			
+			-- here, r should be transaction
+			local wt = math.min(rtxn.timestamp:walltime(), cmd_start_walltime)
+			local sleep_ms = util.sec2walltime(self:max_clock_skew()) - (util.msec_walltime() - wt)
+			if txncoord.opts.linearizable and sleep_ms > 0 then
+				logger.info(rtxn, ("waiting %d msec on EndTransaction for linearizability"):format(sleep_ms))
+				clock.sleep(sleep_ms / 1000)
+			end
+			if rtxn.status ~= txncoord.STATUS_PENDING then
+				-- logger.warn('end txn done: resolve version', r.status)
+				txncoord.resolve_version(rtxn)
+			end
+		end
+		-- update with returned transaction (its timestamp may change with retry)
+		txn:update_with(rtxn, true)
+	end
+	return ...
+end
+function range_manager_mt:txn_retryer(command, wrapped_txn, fn, ...)
+	-- If this call is part of a transaction...
+	if wrapped_txn then
+		local txn = wrapped_txn:strip()
+		if txncoord.start_txn(txn) then
+			command:get_txn():update_with(txn)
+		end
+		-- Set the timestamp to the original timestamp for read-only
+		-- commands and to the transaction timestamp for read/write
+		-- commands.
+		if command:is_readonly() then
+			command.timestamp = txn.start_at
+		else
+			command.timestamp = txn.timestamp
+		end
+	end
+	-- system clock should be update before tweaking by range's ts cache.
+	self:update_clock(command.timestamp)
+	-- write raft log with retry
+	local success, ret = util.retry(txncoord.retry_opts, function (rm, c, wtxn, f, ...)
+		-- r == raft status, command status or raft error, returned transaction or command error, returned timestamp, { return values}
+		local r = {pcall(f, ...)}
+		if not r[1] then 
+			-- if raft error, throw it
+			error(r[2]) 
+		end
+		if r[2] then
+			-- if command success, return result values
+			return util.retry_pattern.STOP, {unpack(r, 2)}
+		end
+		-- handling command error
+		local err, ret_ts = r[3], r[4]
+		if type(err) ~= 'table' then
+			-- return timestamp and error
+			return util.retry_pattern.STOP, {false, exception.raise('runtime', 'txn_retryer', err), ret_ts}
+		elseif err:is('txn_exists') then
+			for idx=0,(#err.args)-1,2 do
+				local conflict_key = err.args[idx+1]
+				local conflict_txn = err.args[idx+2]
+				-- logger.info('conflict_txn', conflict_key, conflict_txn)
+				local how = c:is_write() and _M.RESOLVE_TXN_ABORT or _M.RESOLVE_TXN_TS_FORWARD
+				local ok, res_txn = pcall(rm.resolve_txn, rm, wtxn, conflict_txn, how, c.timestamp)
+				if ok then
+					-- logger.info('success to resolve: then resolve version', res_txn)
+					-- nil, 0 means single key resolve
+					rm:resolve(txncoord.wrap(res_txn), 0, conflict_key, #conflict_key, nil, 0, res_txn.timestamp)
+				    -- logger.info('success to resolve: then resolve version end')
+					return util.retry_pattern.RESTART
+				elseif res_txn:is('txn_push_fail') then
+					-- return timestamp and error
+					return util.retry_pattern.STOP, {false, res_txn, ret_ts}
+				else
+					logger.report('resolve_txn error', res_txn)
+					c:get_txn().timestamp:least_greater_of(conflict_txn.timestamp)
+					return util.retry_pattern.CONTINUE
+				end
+			end
+		elseif err:is('txn_write_too_old') then
+			local exist_ts = err.args[2]
+			-- just move timestamp forward
+			c.timestamp:least_greater_of(exist_ts)
+			return util.retry_pattern.RESTART
+		else
+			-- does some stuff to recover from write error, including tweaking txn
+			return util.retry_pattern.STOP, {false, err, ret_ts}
+		end
+	end, self, command, wrapped_txn, fn, ...)
+	if success then
+		-- because, if success, r[1] is true in above callback, no need to add true for indicating success
+		return unpack(ret)
+	else
+		error(ret) -- some retry error. bug
+	end
+end
+function range_manager_mt:read(timeout, command)
+	local rng, refreshed
+	local kind, k, kl = command.kind, command:key(), command:keylen()
+::again::
+	rng = self.ranges[kind]:find_contains(k, kl)
+	if not rng then
+		rng = self:find(kind, k, kl)
+		if rng then
+			local r = {pcall(rng.read, rng, timeout, command)}
+			if not r[1] then
+				if (not refreshed) and (r[2]:is('range_key')) then
+					self:clear_cache(rng)
+					refreshed = true
+					goto again
+				end
+				error(r[2])
+			else
+				return unpack(r, 2)
+			end
+		end
+	end
+	return rng:read(timeout, command)
+end
+function range_manager_mt:write(command, timeout, dictatorial)
+	local rng, refreshed
+	local kind, k, kl = command.kind, command:key(), command:keylen()
+::again::
+	rng = self.ranges[kind]:find_contains(k, kl)
+	if not rng then
+		if not k then
+			logger.info('invalid cmd', command)
+		end
+		rng = self:find(kind, k, kl)
+		if rng then
+			local r = {pcall(rng.write, rng, command, timeout, dictatorial)}
+			if not r[1] then
+				if (not refreshed) and (r[2]:is('range_key')) then
+					self:clear_cache(rng)
+					refreshed = true
+					goto again
+				end
+				error(r[2])
+			else
+				return unpack(r, 2)
+			end
+		end
+	end
+	return rng:write(command, timeout, dictatorial)
+end
+function range_manager_mt:strip(wtxn, kind, k, kl)
+	if wtxn then
+		return kind and wtxn:setup_and_strip(kind, k, kl) or wtxn:strip()
+	end
+end
+function range_manager_mt:_write(command, wtxn, timeout, dictatorial)
+	return self:on_cmd_finished(command, wtxn, util.msec_walltime(), self:txn_retryer(command, wtxn, self.write, self, command, timeout, dictatorial))
+end
+function range_manager_mt:_read(kind, k, kl, ts, wtxn, consistent, timeout)
+	local command = cmd.get(kind, k, kl, ts, self:strip(wtxn, kind, k, kl), consistent)
+	if consistent then
+		return self:_write(command, wtxn, timeout)
+	else
+		return self:on_cmd_finished(command, wtxn, util.msec_walltime(), self:txn_retryer(command, wtxn, self.read, self, timeout, command))
+	end
+end
+
+
+
+-- operation to ranges
+--[[
+range_manager:[operation](kind, k, kl, args...)
+=> find range with kind, k, kl
+ => range found!!
+  => get raft group of the range
+  => calling read/write
+ => range not found...
+  => find from cache (range_manager:find)
+  => messaging to primary range replica of range cache.
+   => if range_key error happens, refresh cache and try again. if fail again, there is something fatal.
+]]
+function range_manager_mt:get(kind, k, wtxn, consistent, timeout)
+	return self:rawget(kind, k, #k, wtxn, consistent, timeout)
+end
+function range_manager_mt:rawget(kind, k, kl, wtxn, consistent, timeout)
+	return self:_read(kind, k, kl, range_manager.clock:issue(), wtxn, consistent, timeout)
+end
+function range_manager_mt:put(kind, k, v, wtxn, timeout)
+	return self:rawput(kind, k, #k, v, #v, wtxn, timeout)
+end
+function range_manager_mt:rawput(kind, k, kl, v, vl, wtxn, timeout, dictatorial)
+	return self:_write(cmd.put(kind, k, kl, v, vl, range_manager.clock:issue(), self:strip(wtxn, kind, k, kl)), wtxn, timeout, dictatorial)
+end
+function range_manager_mt:delete(kind, k, wtxn, timeout)
+	return self:rawdelete(kind, k, #k, wtxn, timeout)
+end
+function range_manager_mt:rawdelete(kind, k, kl, wtxn, timeout)
+	return self:_write(cmd.delete(kind, k, kl, range_manager.clock:issue(), self:strip(wtxn, kind, k, kl)), wtxn, timeout)
+end
+function range_manager_mt:merge(kind, k, v, op, wtxn, timeout)
+	return self:rawmerge(kind, k, #k, v, #v, op, #op, wtxn, timeout)
+end
+function range_manager_mt:rawmerge(kind, k, kl, v, vl, op, ol, wtxn, timeout)
+	return self:_write(cmd.merge(kind, k, kl, v, vl, op, ol, range_manager.clock:issue(), self:strip(wtxn, kind, k, kl)), wtxn, timeout)
+end
+function range_manager_mt:cas(kind, k, ov, nv, wtxn, timeout)
+	local oval, ol = ov or nil, ov and #ov or 0
+	local nval, nl = nv or nil, nv and #nv or 0
+	local cas = range_manager.storage_module.op_cas(ov, nv, nil, ovl, nvl)
+	return self:rawcas(kind, k, #k, oval, ol, nval, nl, wtxn, timeout)
+end
+function range_manager_mt:rawcas(kind, k, kl, ov, ovl, nv, nvl, wtxn, timeout)
+	return self:_write(cmd.cas(kind, k, kl, ov, ovl, nv, nvl, range_manager.clock:issue(), self:strip(wtxn, kind, k, kl)), wtxn, timeout)
+end
+function range_manager_mt:watch(kind, k, kl, watcher, method, wtxn, timeout)
+	return self:_write(cmd.watch(kind, k, kl, watcher, method, range_manager.clock:issue()), wtxn, timeout)
+end
+function range_manager_mt:end_txn(wtxn, commit, hook, timeout)
+	local txn = self:strip(wtxn)
+	return self:_write(cmd.end_txn(txn.kind, range_manager.clock:issue(), txn, commit, hook), wtxn, timeout)
+end
+function range_manager_mt:resolve_txn(wtxn, conflict_txn, how, cmd_ts, timeout)
+	local txn = self:strip(wtxn)
+	return self:_write(cmd.resolve_txn(txn.kind, range_manager.clock:issue(), txn, conflict_txn, how, cmd_ts), wtxn, timeout)
+end
+function range_manager_mt:heartbeat_txn(wtxn, timeout)
+	local txn = self:strip(wtxn)
+	return self:_write(cmd.heartbeat_txn(txn.kind, range_manager.clock:issue(), txn), wtxn, timeout)
+end
+
+-- span commands 
+-- span command has start~end span of key to processing
+function range_manager_mt:add_span_command_result(ret, r, limit)
+	-- logger.info('add_span_command_result', ret, r, limit)
+	assert(not ret or (type(r) == type(ret)))
+	if not ret then
+		ret = r
+	elseif type(r) == 'number' then
+		ret = ret + r
+	elseif type(r) == 'table' then
+		for k,v in pairs(r) do
+			ret[k] = v
+		end
+	elseif type(r) == 'string' then
+		ret = ret .. r
+	end
+	if limit > 0 then
+		if type(r) == 'number' then
+			limit = limit - r
+		elseif type(r) == 'table' then
+			for k,v in pairs(r) do
+				limit = limit - 1
+			end
+		elseif type(r) == 'string' then
+			limit = limit - #r
+		end
+		if limit <= 0 then
+			limit = false
+		end
+	end
+	return ret, limit
+end
+function range_manager_mt:invoke_span_command(method, kind, k, kl, ek, ekl, n, ...)
+	local rng, remain, ret
+	local ck, ckl = k, kl
+	while true do
+		rng = self:find(kind, ck, ckl)
+		remain = ek and rng.end_key:less_than(ek, ekl)
+		if remain then
+			-- In next iteration, query next range.
+			-- It's important that we use the EndKey of the current descriptor
+			-- as opposed to the StartKey of the next one: if the former is stale,
+			-- it's possible that the next range has since merged the subsequent
+			-- one, and unless both descriptors are stale, the next descriptor's
+			-- StartKey would move us to the beginning of the current range,
+			-- resulting in a duplicate scan.
+			local cek, cekl = rng.end_key:as_slice()
+			ret, n = self:add_span_command_result(ret, self[method](self, kind, ck, ckl, cek, cekl, n, ...), n)
+			if not n then break end
+			ck, ckl = rng.end_key:as_slice()
+		else
+			ret = self:add_span_command_result(ret, self[method](self, kind, ck, ckl, ek, ekl, n, ...), n)
+			break
+		end
+	end
+	return ret
+end
+-- "sr_" functions are for "single range" version of span operation
+function range_manager_mt:sr_scan(kind, k, kl, ek, ekl, n, wtxn, consistent, scan_type, timeout)
+	return self:_write(cmd.scan(kind, k, kl, ek, ekl, n, range_manager.clock:issue(), self:strip(wtxn, kind, k, kl), consistent, scan_type), wtxn, timeout)
+end
+function range_manager_mt:sr_delete_range(kind, k, kl, ek, ekl, n, wtxn, timeout)
+	return self:sr_scan(kind, k, kl, ek, ekl, n, wtxn, true, cmd.SCAN_TYPE_DELETE, timeout)
+end
+function range_manager_mt:scan(kind, k, kl, ek, ekl, n, wtxn, consistent, scan_type)
+	return self:invoke_span_command("sr_scan", kind, k, kl, ek, ekl, n, wtxn, consistent, scan_type)
+end
+function range_manager_mt:delete_range(kind, k, kl, ek, ekl, n, wtxn)
+	return self:invoke_span_command("sr_delete_range", kind, k, kl, ek, ekl, n, wtxn)
+end
+-- NOTE : resolve have a span. but no need to care about dividing range request for it
+-- because resolve's key range is originally given by finished command, which is already seperated properly.
+function range_manager_mt:resolve(wtxn, n, s, sl, e, el, ts, timeout)
+	-- does not wait for reply
+	ts = range_manager.clock:issue()
+	local txn = self:strip(wtxn)
+	if s then
+		return self:write(cmd.resolve(txn.kind, s, sl, e, el, n, ts, txn), wtxn, timeout)
+	else
+		s, sl, e, el = self.start_key.p, self.start_key:length(), self.end_key.p, self.end_key:length()
+		return self:write(cmd.resolve(txn.kind, s, sl, e, el, n, ts, txn), wtxn, timeout)
 	end
 end
 
@@ -1435,9 +1554,18 @@ function _M.get_manager(nodelist, datadir, opts)
 		}, range_manager_mt)
 		-- start range manager
 		range_manager:bootstrap(nodelist)
-		logger.info('bootstrap finish')
 	end
 	return range_manager
+end
+
+local manager_actor
+function _M.manager_actor()
+	if not manager_actor then
+		manager_actor = luact.supervise(function ()
+			return range_manager
+		end, {})
+	end
+	return manager_actor
 end
 
 function _M.destroy_manager()

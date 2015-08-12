@@ -52,13 +52,21 @@ local g_last_ts
 
 -- init range manager
 local range_manager
+local raft_delay_emurator = luact({
+	c = function ()
+	end,
+})
 local function init_range_manager()
-	tools.use_dummy_arbiter(nil, function (actor, log, timeout, dectatorial)
+	tools.use_dummy_arbiter(function (actor, ...)
+		raft_delay_emurator.c()
+	end, function (actor, log, timeout, dectatorial)
+		raft_delay_emurator.c()
 		g_last_ts = log[1].timestamp
 	end)
 	range.destroy_manager()
 	fs.rmdir("/tmp/luact/range_test")
-	range_manager = range.get_manager(nil, "/tmp/luact/range_test", { 
+	local ok
+	ok, range_manager = pcall(range.get_manager, nil, "/tmp/luact/range_test", { 
 		n_replica = 1, -- allow single node quorum
 		storage = "rocksdb",
 		datadir = luact.DEFAULT_ROOT_DIR,
@@ -67,6 +75,9 @@ local function init_range_manager()
 		ts_cache_duration = 10.0,
 		txn_heartbeat_interval = 5.0,
 	})
+	if not ok then
+		error(range_manager)
+	end
 
 	-- init txn coordinator
 	txncoord.initialize(range_manager, {})
@@ -104,6 +115,8 @@ function cmd_mt.new(name, key, endkey, txn_idx, fn)
 end
 function cmd_mt:init(name, key, endkey, txn_idx, fn)
 	self.name = name
+	self.kind = range.KIND_STATE
+	assert(self.kind)
 	self.fn = fn
 	self.k = key
 	self.ek = endkey
@@ -177,13 +190,9 @@ function cmd_mt:__tostring()
 	end
 	return ("%s%d"):format(self.name, self.txn_idx)
 end
-function cmd_mt:range(rm)
-	local k = self:key()
-	return rm:find(k, #k)
-end
 -- readCmd reads a value from the db and stores it in the env.
 function cmd_mt:read(rm, txn)
-	local v, ts = self:range(rm):get(self:key(), txn, true)
+	local v, ts = rm:get(self.kind, self:key(), txn, true)
 	if v then
 		self.env[self.k] = tonumber(v)
 		self.debug = ("[%d ts=%s]"):format(tonumber(v), ts)
@@ -194,13 +203,13 @@ end
 -- deleteRngCmd deletes the range of values from the db from [key, endKey).
 function cmd_mt:delete(rm, txn) 
 	local k, ek = self:key(), self:endkey()
-	local n = rm:delete_range(range.KIND_STATE, k, #k, ek, #ek, 0, txn)
+	local n = rm:delete_range(self.kind, k, #k, ek, #ek, 0, txn)
 	self.debug = ("[%d]"):format(n)
 end
 -- scanCmd reads the values from the db from [key, endKey).
 function cmd_mt:scan(rm, txn)
 	local k, ek = self:key(), self:endkey()
-	local rows = rm:scan(range.KIND_STATE, k, #k, ek, #ek, 0, txn, true)
+	local rows = rm:scan(self.kind, k, #k, ek, #ek, 0, txn, true)
 	local vals = {}
 	local keypfx = tostring(self.history_idx).."."
 	for _, row in ipairs(rows) do
@@ -217,7 +226,7 @@ end
 -- it to the db. If c.key isn't in the db, writes 1.
 function cmd_mt:inc(rm, txn)
 	local k = self:key()
-	local ok, r = self:range(rm):merge(k, "1", "inc", txn)
+	local ok, r = rm:merge(self.kind, k, "1", "inc", txn)
 	assert(ok, r)
 	self.env[self.k] = tonumber(r)
 	self.debug = ("[%d ts=%s]"):format(r, g_last_ts)
@@ -233,7 +242,7 @@ function cmd_mt:sum(rm, txn)
 			sum = sum + v
 		end
 	end
-	local ok, r = self:range(rm):merge(self:key(), tostring(sum), "inc", txn)
+	local ok, r = rm:merge(self.kind, self:key(), tostring(sum), "inc", txn)
 	assert(ok, r)
 	self.debug = ("[%d ts=%s]"):format(sum, g_last_ts)
 end
@@ -498,7 +507,7 @@ function history_verifier_mt:run(isolations, rm)
 						logger.report('run history err', r)
 					end
 					table.insert(failures, r)
-					-- os.exit(-1)
+					--os.exit(-1)
 				end
 				history_idx = history_idx + 1
 			end

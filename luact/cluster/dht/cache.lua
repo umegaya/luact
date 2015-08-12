@@ -22,11 +22,12 @@ range_cache_mt.__index = range_cache_mt
 function range_cache_mt:find(k, kl)
 	if not k then
 		logger.error('invalid key:', k)
+		os.exit(-1)
 	end
 	kl = kl or #k
 	for i=1,#self do
-		-- logger.info('cache search', self[i].start_key, self[i]:include(k, kl))
-		if self[i]:include(k, kl) then
+		-- logger.info('cache search', self[i].start_key, self[i]:contains(k, kl))
+		if self[i]:contains(k, kl) then
 			return self[i]
 		end
 	end
@@ -38,7 +39,7 @@ function range_cache_mt:sort()
 	end)
 end
 function range_cache_mt:add(r)
-	local tmp = self:find(r.end_key:as_slice())
+	local tmp = self:find(r:cachekey())
 	if not tmp then
 		table.insert(self, r)
 		self:sort()
@@ -47,11 +48,12 @@ function range_cache_mt:add(r)
 	return tmp
 end
 function range_cache_mt:remove(r)
-	local k, kl = r.end_key:as_slice()
+	local k, kl = r:cachekey()
 	for i=1,#self do
-		-- logger.info(self[i].start_key, ("%02x"):format(k:byte()), 
-		-- 	self[i].end_key:less_than_equals(k, kl), self[i].start_key:less_than_equals(k, kl))
-		if self[i]:include(k, kl) then
+		-- logger.info(self[i].start_key, self[i].end_key:as_digest(), r.start_key, r.end_key:as_digest(), 
+		--  	self[i].end_key:less_than_equals(k, kl), self[i].start_key:less_than_equals(k, kl))
+		if self[i]:contains(k, kl) then
+			-- logger.info('contains:', self[i].start_key, self[i].end_key)
 			table.remove(self, i)
 			break
 		end
@@ -88,6 +90,17 @@ local ts_cache_ent_mt = {}
 ts_cache_ent_mt.__index = ts_cache_ent_mt
 function ts_cache_ent_mt:earlier(ent)
 end
+--[[
+function ts_cache_ent_mt:__tostring()
+	local s = ("%s:%s[%s-%s)@%s"):format(
+		tostring(ffi.cast('void *', self)), 
+		self.txn_id,
+		ffi.string(self.range.s:as_slice()), 
+		ffi.string(self.range.e:as_slice()), 
+		tostring(self.ts))
+	return s
+end
+]]
 
 local ts_cache_mt = {}
 ts_cache_mt.__index = ts_cache_mt
@@ -150,9 +163,16 @@ function ts_cache_mt:add_ent(ent)
 	self:evict()
 	return true
 end
-function ts_cache_mt:merge(tsc)
+function ts_cache_mt:merge(tsc, clear)
+	if clear then
+		self:clear()
+		tsc.low_water:copy_to(self.low_water)
+		tsc.latest:copy_to(self.latest)
+	end
 	for i=1,#tsc do
-		self:add_ent(tsc[i])
+		local tmp = memory.alloc_typed('luact_dht_ts_cache_entry_t')
+		ffi.copy(tmp, tsc[i], ffi.sizeof('luact_dht_ts_cache_entry_t'))
+		self:add_ent(tmp)
 	end
 end
 function ts_cache_mt:evict()
@@ -165,6 +185,7 @@ function ts_cache_mt:evict()
 			table.remove(self, i)
 			memory.free(ent)
 		elseif ts < self.work then
+			-- logger.info('update low_water', self.low_water, ts)
 			ts:copy_to(self.low_water)
 			table.remove(self, i)
 			memory.free(ent)
@@ -182,7 +203,7 @@ end
 -- returns latest read ts and write ts. 
 -- caution : these retvals are volatile. you need to copy them somewhere when you use it after.
 function ts_cache_mt:latest_ts(k, kl, ek, ekl, txn, dump)
-	if not ek then
+	if ekl <= 0 then
 		ek = ffi.string(k, kl)..string.char(0)
 		ekl = #ek
 	end
@@ -190,7 +211,7 @@ function ts_cache_mt:latest_ts(k, kl, ek, ekl, txn, dump)
 	local ret = { self.low_water, self.low_water }
 	self:each_intersection_of(k, kl, ek, ekl, function (ent, ret)
 		if dump then
-			logger.info(ent.range, ent.read, ent.ts, ent.txn_id)
+			logger.info(ffi.string(k,kl).."~"..ffi.string(ek,ekl), ent.range, ent.read, ent.ts, uuid.tostring(ent.txn_id), uuid.tostring(txn.id))
 		end
 		if (not (txn_id and uuid.valid(txn_id))) or (not uuid.valid(ent.txn_id)) or (not uuid.equals(txn_id, ent.txn_id)) then
 			if ent.read and ((not ret[1]) or (ret[1] < ent.ts)) then
@@ -200,13 +221,52 @@ function ts_cache_mt:latest_ts(k, kl, ek, ekl, txn, dump)
 			end
 		end
 	end, ret)
-	-- logger.report('latest_ts', ffi.string(k, kl), ek and ffi.string(ek, ekl) or "[empty]", self.low_water, unpack(ret))
+	-- logger.report('latest_ts', self, ffi.string(k, kl), ek and ffi.string(ek, ekl) or "[empty]", self.low_water, unpack(ret))
 	return unpack(ret)
 end
 
+
+-- basic cache (no range)
+local basic_cache_mt = {}
+basic_cache_mt.__index = basic_cache_mt
+function basic_cache_mt:find(k, kl)
+	if not k then
+		logger.error('invalid key:', k)
+	end
+	if kl then
+		k = ffi.string(k, kl)
+	end
+	return self[k]
+end
+function basic_cache_mt:find_contains(k, kl)
+	for k,v in pairs(self) do
+		if v:contains(k, kl) then
+			return v
+		end
+	end
+end
+function basic_cache_mt:add(r)
+	self[ffi.string(r:cachekey())] = r
+end
+function basic_cache_mt:remove(r)
+	self[ffi.string(r:cachekey())] = nil
+end
+function basic_cache_mt:clear(dtor)
+	for k,v in pairs(self) do
+		if dtor then
+			dtor(v)
+		end
+		self[k] = nil
+	end
+end
+
+
 -- module function 
+function _M.new(kind)
+	return setmetatable({}, basic_cache_mt)
+end
 function _M.new_range(kind)
-	return setmetatable({kind = kind}, range_cache_mt)
+	return setmetatable({}, range_cache_mt)
 end
 function _M.new_ts(rm)
 	local low_water, latest = memory.alloc_typed('pulpo_hlc_t'), memory.alloc_typed('pulpo_hlc_t')

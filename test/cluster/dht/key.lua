@@ -1,4 +1,5 @@
 local luact = require 'luact.init'
+local memory = require 'pulpo.memory'
 local key = require 'luact.cluster.dht.key'
 
 local ok, r
@@ -80,5 +81,14 @@ for k,v in pairs(tests) do
 		assert(false, "invalid key inc conversion:"..tostring(kk).." and "..tostring(vv))
 	end
 end
+
+local a, b, c, d = "A", "B", "C", "D"
+local kr, kr2 = memory.alloc_typed('luact_dht_key_range_t'), memory.alloc_typed('luact_dht_key_range_t')
+kr:init(a, #a, c, #c)
+kr2:init(b, #b, d, #d)
+assert(kr:intersects_range(kr2))
+assert(kr2:intersects_range(kr))
+assert(not kr:intersects_key_slice_range(c, #c, d, #d))
+assert(kr2:intersects_key_slice_range(a, #a, b, #b))
 
 return true

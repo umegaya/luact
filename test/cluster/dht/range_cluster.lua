@@ -40,21 +40,22 @@ tools.start_luact(5, nil, function ()
 	local function basic_functional_test(tid, msg)
 		if luact.thread_id == tid then
 			logger.notice(msg, luact.thread_id)
+			local kind = range.KIND_STATE
 			local key = "hoge"
 			local hlc = rm.clock
 			logger.info('put test')
-			rm:find(key, #key):put(key, "fuga")
+			rm:put(kind, key, "fuga")
 			logger.info('get test')
-			assert(rm:find(key, #key):get(key) == "fuga", "same value as given to put should be returned")
+			assert(rm:get(kind, key) == "fuga", "same value as given to put should be returned")
 			logger.info('cas test1')
-			assert(not rm:find(key, #key):cas(key, "gyaa", "guha"), "cas should fail if condition not met")
+			assert(not rm:cas(kind, key, "gyaa", "guha"), "cas should fail if condition not met")
 			logger.info('cas test2')
-			assert(rm:find(key, #key):cas(key, "fuga", "guha"), "cas should success if condition met")
+			assert(rm:cas(kind, key, "fuga", "guha"), "cas should success if condition met")
 			logger.info('get test2')
-			assert(rm:find(key, #key):get(key, nil, true) == "guha", "result of get also should change")
+			assert(rm:get(kind, key, nil, true) == "guha", "result of get also should change")
 			print('delete test')
-			rm:find(key, #key):delete(key)
-			assert(not rm:find(key, #key):get(key), "result of get shouldn't be found")
+			rm:delete(kind, key)
+			assert(not rm:get(kind, key), "result of get shouldn't be found")
 		end
 	end
 	basic_functional_test(ids[1], 'test when this thread not involved in range replica')

@@ -240,5 +240,13 @@ end
 function _M.inspect(uuid)
 	print(_M.thread_id(uuid), uuid.__detail__.serial, uuid.__detail__.timestamp_hi)
 end
+function _M.debug_new(thread_id, machine_id, serial, ts)
+	local u = memory.alloc_typed('luact_uuid_t')
+	u.__detail__.thread_id = thread_id
+	u.__detail__.machine_id = machine_id
+	u.__detail__.serial = serial
+	_M.set_timestamp(u, ts)
+	return u[0]
+end
 
 return _M

@@ -213,14 +213,16 @@ end
 -- create dummy arbiter for single thread mode
 function _M.use_dummy_arbiter(on_read, on_write)
 	local range_arbiters = {}
+	local range_arbiter_bodies = {}
 	local consistent_flag
 	function luact.root.arbiter(id, func, opts, rng)
 		local rm = (require 'luact.cluster.dht.range').get_manager()
 		rng = rm:create_fsm_for_arbiter(rng)
 		local storage = rng:partition()
+		logger.notice('arbiter_id = ', ('%q'):format(id), range_arbiters[id])
 		local a = range_arbiters[id]
 		if not a then
-			a = luact({
+			local body = {
 				read = function (self, timeout, ...)
 					if on_read then on_read(self, timeout, ...) end
 					return rng:fetch_state(...)
@@ -229,13 +231,27 @@ function _M.use_dummy_arbiter(on_read, on_write)
 					if on_write then on_write(self, logs, timeout, dictatorial) end
 					return rng:apply(logs[1])
 				end,
-			})
+				replica_set = function (self)
+					return self.rs
+				end,
+				leader = function (self)
+					return self.ldr
+				end,
+				rs = {}
+			}
+			a = luact(body)
+			body.ldr = a
 			range_arbiters[id] = a
-			rng:debug_add_replica(a)
+			range_arbiter_bodies[id] = body
+			rng:debug_add_replica(a) -- instead of being called change_replcia_set
 		else
 			assert(false, "same arbiter should not called")
 		end
 		return a
+	end
+	local raft = require 'luact.cluster.raft'
+	function raft._find_body(id)
+		return range_arbiter_bodies[id]
 	end
 end
 

@@ -440,14 +440,19 @@ function serde_mt.unpack_ext_struct_cdata(rb, clen)
 	if unpacker then
 		return unpacker(rb, clen)
 	else
-		local ct, ctp = common.ctype_from_id(ctype_id)
+		local ct, ctp, has_gc = common.ctype_from_id(ctype_id)
 		local ptr
 		if clen == ffi.sizeof(ct) then
 			ptr = ffi.new(ct)
+			ffi.copy(ptr, rb:curr_byte_p(), clen)
 		else
-			ptr = ffi.new(ctp, clen / ffi.sizeof(ct))
+			ptr = memory.alloc(clen)
+			ffi.copy(ptr, rb:curr_byte_p(), clen)
+			ptr = ffi.cast(ctp, ptr)
+			if not has_gc then
+				ffi.gc(ptr, memory.free)
+			end
 		end
-		ffi.copy(ptr, rb:curr_byte_p(), clen)
 		rb:seek_from_curr(clen)
 		return ptr
 	end

@@ -2,6 +2,7 @@ local ffi = require 'ffiex.init'
 local util = require 'pulpo.util'
 local memory = require 'pulpo.memory'
 local lamport = require 'pulpo.lamport'
+local exception = require 'pulpo.exception'
 local uuid = require 'luact.uuid'
 local serde_common = require 'luact.serde.common'
 
@@ -63,10 +64,17 @@ typedef struct luact_dht_cmd_watch {
 
 typedef struct luact_dht_cmd_split {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, txn_f;
-	uint16_t kl;
+	uint8_t kind, txn_f, n_replica, padd;
+	luact_dht_txn_t txn;
 	char p[0];
 } luact_dht_cmd_split_t;
+
+typedef struct luact_dht_cmd_join {
+	pulpo_hlc_t timestamp;
+	uint8_t kind, txn_f, n_replica, padd;
+	luact_dht_txn_t txn;
+	char p[0];	
+} luact_dht_cmd_join_t;
 
 typedef struct luact_dht_cmd_scan {
 	pulpo_hlc_t timestamp;
@@ -80,7 +88,6 @@ typedef struct luact_dht_cmd_resolve {
 	uint8_t kind, commit;
 	uint16_t n_process;
 	uint16_t kl, ekl;
-	luact_dht_txn_t txn;
 	char p[0];
 } luact_dht_cmd_resolve_t;
 
@@ -88,19 +95,22 @@ typedef struct luact_dht_cmd_resolve_txn {
 	pulpo_hlc_t timestamp;
 	pulpo_hlc_t cmd_ts;
 	uint8_t kind, how;
-	luact_dht_txn_t txn, conflict_txn;
+	uint16_t kl;
+	char p[0];
 } luact_dht_cmd_resolve_txn_t;
 
 typedef struct luact_dht_cmd_heartbeat_txn {
 	pulpo_hlc_t timestamp;
 	uint8_t kind, padd;
-	luact_dht_txn_t txn;
+	uint16_t kl;
+	char p[0];
 } luact_dht_cmd_heartbeat_txn_t;
 
 typedef struct luact_dht_cmd_end_txn {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, commit, padd[2];
-	luact_dht_txn_t txn;
+	uint8_t kind, commit_type;
+	uint16_t kl;
+	char p[0];
 } luact_dht_cmd_end_txn_t;
 
 typedef struct luact_dht_gossip_replica_change {
@@ -166,7 +176,7 @@ local base_mt = {}
 base_mt.__gc = memory.free
 function base_mt:set_txn(txn)
 	if txn then
-		ffi.copy(self:txn_p(), txn, ffi.sizeof('luact_dht_txn_t'))
+		ffi.copy(self:txn_p(), txn, #txn)
 		self.txn_f = 1
 	else
 		self.txn_f = 0
@@ -223,7 +233,7 @@ end
 local get_mt = util.copy_table(base_mt)
 get_mt.__index = get_mt
 function get_mt.size(kl, txn)
-	return ffi.sizeof('luact_dht_cmd_get_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_get_t') + kl + (txn and #txn or 0)
 end
 function get_mt.new(kind, k, kl, timestamp, txn, consistent)
 	local p = ffi.cast('luact_dht_cmd_get_t*', memory.alloc(get_mt.size(kl, txn)))
@@ -240,7 +250,7 @@ function get_mt:txn_p()
 	return self.p + self.kl
 end
 function get_mt:__len()
-	return get_mt.size(self.kl, self:has_txn())
+	return get_mt.size(self.kl, self:get_txn())
 end
 function get_mt:flags()
 	return bit.bor(read_f, use_ts_cache_f)
@@ -254,7 +264,7 @@ ffi.metatype('luact_dht_cmd_get_t', get_mt)
 local put_mt = util.copy_table(base_mt)
 put_mt.__index = put_mt
 function put_mt.size(kl, vl, txn)
-	return ffi.sizeof('luact_dht_cmd_put_t') + kl + vl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_put_t') + kl + vl + (txn and #txn or 0)
 end
 function put_mt.new(kind, k, kl, v, vl, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_put_t*', memory.alloc(put_mt.size(kl, vl, txn)))
@@ -275,7 +285,7 @@ function put_mt:txn_p()
 	return self.p + self.kl + self.vl
 end
 function put_mt:__len()
-	return put_mt.size(self.kl, self.vl, self:has_txn())
+	return put_mt.size(self.kl, self.vl, self:get_txn())
 end
 function put_mt:flags()
 	return bit.bor(write_f, start_txn_f, use_ts_cache_f)
@@ -289,7 +299,7 @@ ffi.metatype('luact_dht_cmd_put_t', put_mt)
 local delete_mt = util.copy_table(base_mt)
 delete_mt.__index = delete_mt
 function delete_mt.size(kl, txn)
-	return ffi.sizeof('luact_dht_cmd_delete_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_delete_t') + kl + (txn and #txn or 0)
 end
 function delete_mt.new(kind, k, kl, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_delete_t*', memory.alloc(delete_mt.size(kl, txn)))
@@ -305,7 +315,7 @@ function delete_mt:txn_p()
 	return self.p + self.kl
 end
 function delete_mt:__len()
-	return delete_mt.size(self.kl, self:has_txn())
+	return delete_mt.size(self.kl, self:get_txn())
 end
 function delete_mt:flags()
 	return bit.bor(write_f, start_txn_f, use_ts_cache_f)
@@ -320,7 +330,7 @@ ffi.metatype('luact_dht_cmd_delete_t', delete_mt)
 local cas_mt = util.copy_table(base_mt)
 cas_mt.__index = cas_mt
 function cas_mt.size(kl, ol, nl, txn)
-	return ffi.sizeof('luact_dht_cmd_cas_t') + kl + ol + nl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_cas_t') + kl + ol + nl + (txn and #txn or 0)
 end
 function cas_mt.new(kind, k, kl, o, ol, n, nl, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_cas_t*', memory.alloc(cas_mt.size(kl, ol, nl, txn)))
@@ -346,7 +356,7 @@ function cas_mt:txn_p()
 	return self.p + self.kl + self.ol + self.nl
 end
 function cas_mt:__len()
-	return cas_mt.size(self.kl, self.ol, self.nl, self:has_txn())
+	return cas_mt.size(self.kl, self.ol, self.nl, self:get_txn())
 end
 function cas_mt:flags()
 	return bit.bor(read_f, write_f, start_txn_f, use_ts_cache_f)
@@ -362,7 +372,7 @@ ffi.metatype('luact_dht_cmd_cas_t', cas_mt)
 local scan_mt = util.copy_table(base_mt)
 scan_mt.__index = scan_mt
 function scan_mt.size(kl, ekl, txn)
-	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + ekl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_scan_t') + kl + ekl + (txn and #txn or 0)
 end
 function scan_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn, consistent, scan_type)
 	local p = ffi.cast('luact_dht_cmd_scan_t*', memory.alloc(scan_mt.size(kl, ekl, txn)))
@@ -388,7 +398,7 @@ function scan_mt:txn_p()
 	return self.p + self.kl + self.ekl
 end
 function scan_mt:__len()
-	return scan_mt.size(self.kl, self.ekl, self:has_txn())
+	return scan_mt.size(self.kl, self.ekl, self:get_txn())
 end
 function scan_mt:flags()
 	if self.scan_type == _M.SCAN_TYPE_DELETE then
@@ -398,7 +408,7 @@ function scan_mt:flags()
 	end
 end
 function scan_mt:end_key() 
-	return self.p + self.kl
+	return self.ekl > 0 and (self.p + self.kl) or nil
 end
 function scan_mt:end_keylen()
 	return self.ekl
@@ -416,14 +426,13 @@ ffi.metatype('luact_dht_cmd_scan_t', scan_mt)
 -- resolve command
 local resolve_mt = util.copy_table(base_mt)
 resolve_mt.__index = resolve_mt
-function resolve_mt.size(kl, ekl)
-	return ffi.sizeof('luact_dht_cmd_resolve_t') + kl + ekl
+function resolve_mt.size(kl, ekl, txn)
+	return ffi.sizeof('luact_dht_cmd_resolve_t') + kl + ekl + #txn
 end
 function resolve_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_resolve_t*', memory.alloc(resolve_mt.size(kl, ekl)))
+	local p = ffi.cast('luact_dht_cmd_resolve_t*', memory.alloc(resolve_mt.size(kl, ekl, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
-	p:set_txn(txn)
 	p.kl = kl
 	p.ekl = ekl
 	p.n_process = n or 0
@@ -431,17 +440,18 @@ function resolve_mt.new(kind, k, kl, ek, ekl, n, timestamp, txn)
 	if ekl > 0 then
 		ffi.copy(p:end_key(), ek, ekl)
 	end
+	p:set_txn(txn)
 	return p
 end
 _M.resolve = resolve_mt.new
 function resolve_mt:txn_p()
-	return self.txn
+	return self.p + self.kl + self.ekl
+end
+function resolve_mt:set_txn(txn)
+	ffi.copy(self:txn_p(), txn, #txn)
 end
 function resolve_mt:has_txn()
 	return true
-end
-function resolve_mt:set_txn(txn)
-	ffi.copy(self.txn, txn, ffi.sizeof('luact_dht_txn_t'))
 end
 function resolve_mt:end_key()
 	return (self.ekl > 0) and (self.p + self.kl) or nil
@@ -453,7 +463,7 @@ function resolve_mt:flags()
 	return bit.bor(write_f, use_ts_cache_f, range_f)
 end
 function resolve_mt:__len()
-	return resolve_mt.size(self.kl, self.ekl)
+	return resolve_mt.size(self.kl, self.ekl, self:get_txn())
 end
 function resolve_mt:apply_to(storage, range)
 	return range:exec_resolve(storage, 
@@ -466,43 +476,52 @@ ffi.metatype('luact_dht_cmd_resolve_t', resolve_mt)
 -- resolve_txn command
 local resolve_txn_mt = util.copy_table(base_mt)
 resolve_txn_mt.__index = resolve_txn_mt
-function resolve_txn_mt.size()
-	return ffi.sizeof('luact_dht_cmd_resolve_txn_t')
+function resolve_txn_mt.size(txn, conflict_txn)
+	return ffi.sizeof('luact_dht_cmd_resolve_txn_t') + #txn + #conflict_txn
 end
 function resolve_txn_mt.new(kind, timestamp, txn, conflict_txn, how, cmd_ts)
-	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size()))
+	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size(txn, conflict_txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.cmd_ts = cmd_ts
-	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
-	ffi.copy(p.conflict_txn, conflict_txn, ffi.sizeof('luact_dht_txn_t'))
+	p:set_txn(txn)
+	p:set_conflict_txn(conflict_txn)
 	p.how = how
 	return p
 end
 _M.resolve_txn = resolve_txn_mt.new
 function resolve_txn_mt:key()
-	return nil
+	return self:get_txn().key
 end
 function resolve_txn_mt:keylen()
-	return 0
+	return self:get_txn().kl
 end
 function resolve_txn_mt:txn_p()
-	return self.txn
+	return self.p
+end
+function resolve_txn_mt:set_txn(txn)
+	ffi.copy(self:txn_p(), txn, #txn)
 end
 function resolve_txn_mt:has_txn()
 	return true
 end
-function resolve_txn_mt:set_txn(txn)
-	ffi.copy(self.txn, txn, ffi.sizeof('luact_dht_txn_t'))
+function resolve_txn_mt:conflict_txn_p()
+	return self.p + #(self:get_txn())
+end
+function resolve_txn_mt:set_conflict_txn(conflict_txn)
+	ffi.copy(self:conflict_txn_p(), conflict_txn, #conflict_txn)
+end
+function resolve_txn_mt:get_conflict_txn()
+	return ffi.cast('luact_dht_txn_t *', self:conflict_txn_p())
 end
 function resolve_txn_mt:flags()
 	return bit.bor(write_f)
 end
 function resolve_txn_mt:__len()
-	return resolve_txn_mt.size()
+	return resolve_txn_mt.size(self:get_txn(), self:get_conflict_txn())
 end
 function resolve_txn_mt:apply_to(storage, range)
-	return range:exec_resolve_txn(storage, self.timestamp, self.txn, self.conflict_txn, self.how, self.cmd_ts)
+	return range:exec_resolve_txn(storage, self.timestamp, self:get_txn(), self:get_conflict_txn(), self.how, self.cmd_ts)
 end
 ffi.metatype('luact_dht_cmd_resolve_txn_t', resolve_txn_mt)
 
@@ -510,16 +529,25 @@ ffi.metatype('luact_dht_cmd_resolve_txn_t', resolve_txn_mt)
 -- hb_txn command
 local heartbeat_txn_mt = util.copy_table(resolve_txn_mt)
 heartbeat_txn_mt.__index = heartbeat_txn_mt
+function heartbeat_txn_mt.size(txn)
+	return ffi.sizeof('luact_dht_cmd_heartbeat_txn_t') + #txn
+end
 function heartbeat_txn_mt.new(kind, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_heartbeat_txn_t*', memory.alloc(heartbeat_txn_mt.size()))
+	local p = ffi.cast('luact_dht_cmd_heartbeat_txn_t*', memory.alloc(heartbeat_txn_mt.size(txn)))
 	p.kind = kind
 	p.timestamp = timestamp
-	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
+	p:set_txn(txn)
 	return p
 end
 _M.heartbeat_txn = heartbeat_txn_mt.new
+function heartbeat_txn_mt:txn_p()
+	return self.p
+end
+function heartbeat_txn_mt:__len()
+	return heartbeat_txn_mt.size(self:get_txn())
+end
 function heartbeat_txn_mt:apply_to(storage, range)
-	return range:exec_heartbeat_txn(storage, self.timestamp, self.txn)
+	return range:exec_heartbeat_txn(storage, self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_heartbeat_txn_t', heartbeat_txn_mt)
 
@@ -527,23 +555,68 @@ ffi.metatype('luact_dht_cmd_heartbeat_txn_t', heartbeat_txn_mt)
 -- end_txn command
 local end_txn_mt = util.copy_table(resolve_txn_mt)
 end_txn_mt.__index = end_txn_mt
-function end_txn_mt.new(kind, timestamp, txn, commit)
-	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size()))
+function end_txn_mt.size(txn, cmd_on_commit)
+	return ffi.sizeof('luact_dht_cmd_end_txn_t') + #txn + (cmd_on_commit and #cmd_on_commit or 0)
+end
+function end_txn_mt.new(kind, timestamp, txn, commit, on_commit)
+	local p = ffi.cast('luact_dht_cmd_end_txn_t*', memory.alloc(end_txn_mt.size(txn, on_commit)))
 	p.kind = kind
 	p.timestamp = timestamp
-	ffi.copy(p.txn, txn, ffi.sizeof('luact_dht_txn_t'))
-	p.commit = commit and 1 or 0
+	p:set_txn(txn)
+	if not commit then
+		p.commit_type = end_txn_mt.ABORT
+	elseif on_commit then
+		p.commit_type = p:type_from_on_commit(on_commit)
+		ffi.copy(p:on_commit_p(), on_commit, #on_commit)
+	else
+		p.commit_type = end_txn_mt.NONE_ON_COMMIT
+	end
 	return p
 end
 _M.end_txn = end_txn_mt.new
 function end_txn_mt:committed()
-	return self.commit ~= 0 
+	return self.commit_type ~= end_txn_mt.ABORT
 end
 function end_txn_mt:flags()
 	return bit.bor(write_f, end_txn_f)
 end
 function end_txn_mt:apply_to(storage, range)
-	return range:exec_end_txn(storage, self.timestamp, self.txn, self:committed())
+	return range:exec_end_txn(storage, self.timestamp, self:get_txn(), self:committed(), self:cmd_on_commit())
+end
+function end_txn_mt:__len()
+	return end_txn_mt.size(self:get_txn(), self:cmd_on_commit())
+end
+function end_txn_mt:txn_p()
+	return self.p
+end
+function end_txn_mt:on_commit_p()
+	return self.p + #(self:get_txn())
+end
+end_txn_mt.ABORT = 0
+end_txn_mt.NONE_ON_COMMIT = 1
+end_txn_mt.SPLIT_ON_COMMIT = 2
+end_txn_mt.JOIN_ON_COMMIT = 3
+function end_txn_mt:type_from_on_commit(on_commit)
+	local t = ffi.typeof(on_commit)
+	if t == ffi.typeof('luact_dht_cmd_split_t*') then
+		return end_txn_mt.SPLIT_ON_COMMIT
+	elseif t == ffi.typeof('luact_dht_cmd_join_t*') then
+		return end_txn_mt.JOIN_ON_COMMIT
+	else
+		exception.raise('invalid', 'on_commit command', on_commit)
+	end
+end
+function end_txn_mt:cmd_on_commit()
+	local t = self.commit_type
+	if t == end_txn_mt.SPLIT_ON_COMMIT then
+		return ffi.cast('luact_dht_cmd_split_t*', self:on_commit_p())
+	elseif t == end_txn_mt.JOIN_ON_COMMIT then
+		return ffi.cast('luact_dht_cmd_join_t*', self:on_commit_p())
+	elseif t == end_txn_mt.NONE_ON_COMMIT or t == end_txn_mt.ABORT then
+		return nil
+	else
+		exception.raise('invalid', 'on_commit command type', t)
+	end	
 end
 ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
 
@@ -552,7 +625,7 @@ ffi.metatype('luact_dht_cmd_end_txn_t', end_txn_mt)
 local merge_mt = util.copy_table(base_mt)
 merge_mt.__index = merge_mt
 function merge_mt.size(kl, vl, ol, txn)
-	return ffi.sizeof('luact_dht_cmd_merge_t') + kl + vl + ol + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+	return ffi.sizeof('luact_dht_cmd_merge_t') + kl + vl + ol + (txn and #txn or 0)
 end
 function merge_mt.new(kind, k, kl, v, vl, o, ol, timestamp, txn)
 	local p = ffi.cast('luact_dht_cmd_merge_t*', memory.alloc(merge_mt.size(kl, vl, ol, txn)))
@@ -578,7 +651,7 @@ function merge_mt:txn_p()
 	return self.p + self.kl + self.vl + self.ol
 end
 function merge_mt:__len()
-	return merge_mt.size(self.kl, self.vl, self.ol, self:has_txn())
+	return merge_mt.size(self.kl, self.vl, self.ol, self:get_txn())
 end
 function merge_mt:flags()
 	return bit.bor(read_f, write_f, start_txn_f,  use_ts_cache_f)
@@ -642,30 +715,37 @@ ffi.metatype('luact_dht_cmd_watch_t', watch_mt)
 -- split command
 local split_mt = util.copy_table(base_mt)
 split_mt.__index = split_mt
-function split_mt.size(kl, txn)
-	return ffi.sizeof('luact_dht_cmd_split_t') + kl + (txn and ffi.sizeof('luact_dht_txn_t') or 0)
+function split_mt.size(update_rng, new_rng, txn)
+	return ffi.sizeof('luact_dht_cmd_split_t') + #update_rng + #new_rng + #txn
 end
-function split_mt.new(kind, k, kl, timestamp, txn)
-	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(kl, txn)))
+function split_mt.new(kind, update_rng, new_rng, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(update_rng, new_rng, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
-	p.kl = kl
-	ffi.copy(p:key(), k, kl)
+	ffi.copy(p:update_rng(), update_rng, #update_rng)
+	ffi.copy(p:new_rng(), new_rng, #new_rng)
 	p:set_txn(txn)
 	return p
 end
 _M.split = split_mt.new
-function split_mt:txn_p()
-	return self.p + self.kl
-end
 function split_mt:__len()
-	return split_mt.size(self.kl, self:has_txn())
+	return split_mt.size(self:update_rng(), self:new_rng(), self:get_txn())
+end
+function split_mt:txn_p()
+	return self.p + #(self:update_rng()) + #(self:new_rng())
 end
 function split_mt:flags()
 	return 0
 end
+function split_mt:update_rng()
+	return ffi.cast('luact_dht_range_t *', self.p)
+end
+function split_mt:new_rng()
+	local u = self:update_rng()
+	return ffi.cast('luact_dht_range_t *', (self.p + #u))
+end
 function split_mt:apply_to(storage, range)
-	return range:exec_split(storage, self:key(), self.kl, self.timestamp, self:get_txn())
+	return range:exec_split(storage, self:update_rng(), self:new_rng(), self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_split_t', split_mt)
 
@@ -715,9 +795,9 @@ end
 local range_split_mt = {}
 range_split_mt.__index = range_split_mt
 range_split_mt.__gc = memory.free
-function range_split_mt.new(kind, key, split_at)
+function range_split_mt.new(kind, k, kl, split_at)
 	local p = memory.alloc_typed('luact_dht_gossip_range_split_t')
-	p.key = key
+	p.key:init(k, kl)
 	p.kind = kind
 	p.split_at = split_at
 	return p
@@ -727,7 +807,7 @@ function range_split_mt:__len()
 end
 ffi.metatype('luact_dht_gossip_range_split_t', range_split_mt)
 function _M.gossip.range_split(rng, split_at)
-	return range_split_mt.new(rng.kind, rng.start_key, split_at)
+	return range_split_mt.new(rng.kind, rng:cachekey(), split_at)
 end
 
 
