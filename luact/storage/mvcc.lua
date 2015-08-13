@@ -677,11 +677,11 @@ function mvcc_mt:put(stats, k, v, ts, txn, opts)
 	return self:rawput(stats, k, #k, v, #v, ts, txn, opts)
 end
 function mvcc_mt:rawput(stats, k, kl, v, vl, ts, txn, opts, deleted)
+	assert((not txn) or (txn:valid()), "if txn speified, should be valid:"..tostring(txn))
 	local mk, mkl = _M.bytes_codec:encode(k, kl)
 	local meta, ml = self.db:rawget(mk, mkl, opts)
 	if ml > 0 and (not mvcc_meta_mt.verify_record(meta, ml)) then
 		exception.raise('fatal', 'invalid metadata size', ml, #(ffi.cast('luact_mvcc_metadata_t *', meta)))
-
 	end
 	local ok, r
 	meta, ok, r = self:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn, opts, deleted)
@@ -788,12 +788,12 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 			return meta, false, exception.new('txn_write_too_old', ffi.string(k, kl), meta.timestamp:clone(true), ts)
 		else
 			-- Otherwise, its an old write to the current transaction. Just ignore.
-			return meta
+			return meta, true
 		end
 	else -- In case the key metadata does not exist yet.
 		-- If this is a delete, do nothing!
 		if deleted then
-			return meta
+			return meta, true
 		end
 		-- Create key metadata.
 		meta = meta:set_txn(txn)

@@ -535,7 +535,7 @@ function _M.run_txn(opts_or_fn, ...)
 				if ok then 
 					return util.retry_pattern.STOP 
 				end
-				logger.report('run_txn: end_txn error', r)
+				-- logger.report('run_txn: end_txn error', r)
 				-- fall through to error handling
 			else
 				return util.retry_pattern.STOP
@@ -544,7 +544,7 @@ function _M.run_txn(opts_or_fn, ...)
 			-- logger.report('run_txn: proc error', r)
 		end
 		if type(r) == 'string' then
-			logger.warn('txn aborted by error', r)
+			-- logger.warn('txn aborted by error', r)
 			abort_txn(wtxn)
 			return util.retry_pattern.ABORT			
 		elseif r:is('actor_no_body') then
@@ -560,7 +560,7 @@ function _M.run_txn(opts_or_fn, ...)
 		elseif r:is('txn_need_retry') then
 			return util.retry_pattern.RESTART
 		end
-		logger.warn('txn aborted by error', r)
+		-- logger.warn('txn aborted by error', r)
 		abort_txn(wtxn)
 		return util.retry_pattern.ABORT
 	end, wrap_txn(new_txn(opts.priority, opts.isolation)), opts.on_commit, fn, select(args_index, ...))
@@ -606,7 +606,10 @@ function _M.make_priority(user_priority)
 end
 
 function _M.debug_make_txn(debug_opts)
-	return txn_mt.new(debug_opts.coord or _M.coord_actor, nil, nil, debug_opts)[0]
+	if not debug_opts.id then
+		debug_opts.id = uuid.new()
+	end
+	return txn_mt.new(debug_opts.coord or _M.coord_actor, nil, nil, debug_opts)
 end
 
 return _M

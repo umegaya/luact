@@ -239,7 +239,7 @@ function basic_cache_mt:find(k, kl)
 	return self[k]
 end
 function basic_cache_mt:find_contains(k, kl)
-	for k,v in pairs(self) do
+	for _,v in pairs(self) do
 		if v:contains(k, kl) then
 			return v
 		end

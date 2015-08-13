@@ -211,6 +211,16 @@ function _M.create_latch(name, num_thread)
 end
 
 -- create dummy arbiter for single thread mode
+local delay_actor
+function _M.delay_emurator() 
+	if not delay_actor then
+		delay_actor = luact({
+			c = function ()
+			end,
+		})
+	end
+	return delay_actor
+end
 function _M.use_dummy_arbiter(on_read, on_write)
 	local range_arbiters = {}
 	local range_arbiter_bodies = {}
@@ -219,7 +229,7 @@ function _M.use_dummy_arbiter(on_read, on_write)
 		local rm = (require 'luact.cluster.dht.range').get_manager()
 		rng = rm:create_fsm_for_arbiter(rng)
 		local storage = rng:partition()
-		logger.notice('arbiter_id = ', ('%q'):format(id), range_arbiters[id])
+		-- logger.notice('arbiter_id = ', ('%q'):format(id), range_arbiters[id])
 		local a = range_arbiters[id]
 		if not a then
 			local body = {
@@ -237,13 +247,16 @@ function _M.use_dummy_arbiter(on_read, on_write)
 				leader = function (self)
 					return self.ldr
 				end,
-				rs = {}
+				change_replcia_set = function (self)
+					rng:debug_add_replica(a)
+				end,
+				rs = {},
 			}
 			a = luact(body)
 			body.ldr = a
 			range_arbiters[id] = a
 			range_arbiter_bodies[id] = body
-			rng:debug_add_replica(a) -- instead of being called change_replcia_set
+			a:notify_change_replcia_set()
 		else
 			assert(false, "same arbiter should not called")
 		end

@@ -728,6 +728,12 @@ function split_mt.new(kind, update_rng, new_rng, timestamp, txn)
 	return p
 end
 _M.split = split_mt.new
+function split_mt:key()
+	return self:update_rng().end_key.p
+end
+function split_mt:keylen()
+	return self:update_rng().end_key.len
+end
 function split_mt:__len()
 	return split_mt.size(self:update_rng(), self:new_rng(), self:get_txn())
 end
@@ -772,9 +778,6 @@ function replica_change_mt.new(kind, key, replicas, n_replica)
 	p.kind = kind
 	p.n_replica = n_replica
 	ffi.copy(p.replicas, replicas, ffi.sizeof('luact_uuid_t') * n_replica)
-	for i=0, tonumber(n_replica) -1 do
-		logger.warn('replica_change:', i, p.replicas[i])
-	end
 	return p
 end
 function replica_change_mt:__len()

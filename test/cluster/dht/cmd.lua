@@ -8,6 +8,9 @@ local luact = require 'luact.init'
 local cmd = require 'luact.cluster.dht.cmd'
 local memory = require 'pulpo.memory'
 local util = require 'pulpo.util'
+local range = require 'luact.cluster.dht.range'
+local txncoord = require 'luact.storage.txncoord'
+local uuid = require 'luact.uuid'
 local fixed_msec = 100000000100
 function util.clock_pair()
 	return math.floor(fixed_msec / 1000), ((fixed_msec % 1000)* 1000)
@@ -38,9 +41,11 @@ assert(memory.cmp(m:key(), "guha", 4), "argument and stored data should be same"
 assert(memory.cmp(m:val(), "barbaz", 10), "argument and stored data should be same")
 assert(memory.cmp(m:op(), "cas", 3), "argument and stored data should be same")
 
-local s = cmd.split(5, "gyaa", 4, hlc(1))
+local s = cmd.split(5, range.debug_new(3), range.debug_new(3), hlc(1), txncoord.debug_make_txn({
+	kind = 5, key = "A",
+	coord = uuid.new(), 
+}))
 assert(s.kind == 5, "kind should be same as given to ctor")
-assert(memory.cmp(s:key(), "gyaa", 4), "argument and stored data should be same")
 
 local uuid = ffi.new('luact_uuid_t')
 local w = cmd.watch(6, "guee", 4, uuid, "notify_me", nil, nil, hlc(1))

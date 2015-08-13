@@ -106,8 +106,8 @@ for i=0,3 do
 end
 serde(idarray, function (obj1, obj2)
 	assert(ffi.typeof(obj1) == ffi.typeof('luact_uuid_t[4]'), tostring(ffi.typeof(obj1)))
-	assert(ffi.typeof(obj2) == ffi.typeof('luact_uuid_t[?]'), tostring(ffi.typeof(obj2)))
-	assert(ffi.sizeof(obj2) == 48)
+	assert(ffi.typeof(obj2) == ffi.typeof('luact_uuid_t*'), tostring(ffi.typeof(obj2)))
+	-- assert(ffi.sizeof(obj2) == 48)
 	for i=0,3 do
 		local m, t = 111 * (i + 1), 11 * (i + 1)
 		assert(uuid.machine_id(obj1[i]) == m)

@@ -18,7 +18,12 @@ tools.start_luact(1, nil, function ()
 
 	local rm
 	local function init_dht()
-		tools.use_dummy_arbiter()
+		tools.use_dummy_arbiter(function (actor, ...)
+			tools.delay_emurator().c()
+		end, function (actor, log, timeout, dectatorial)
+			tools.delay_emurator().c()
+			g_last_ts = log[1].timestamp
+		end)
 		dht.finalize()
 		fs.rmdir("/tmp/luact/split_test")
 		local test_config = {
@@ -62,7 +67,7 @@ tools.start_luact(1, nil, function ()
 			end)
 			-- logger.warn(id, 'txn takes', luact.clock.get() - start, 'sec')
 			rc.exec = rc.exec + 1
-			luact.clock.sleep(0.01)
+			-- luact.clock.sleep(0.01)
 		end
 	end
 
@@ -80,7 +85,6 @@ tools.start_luact(1, nil, function ()
 		local ek, ekl = range.META2_MAX_KEY:as_slice()
 		local meta2_ranges = rm:scan(range.KIND_META2, k, kl, ek, ekl, 0)
 		-- meta2 should has KIND_VID, KIND_STATE
-		logger.info('meta2_ranges', #meta2_ranges)
 		assert(#meta2_ranges == 2, "meta2 should have KIND_VID, KIND_STATE")
 		-- Set five split keys, about evenly spaced along the range of random keys.
 		local split_keys = {"G", "R", "a", "l", "s"}

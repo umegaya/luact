@@ -169,25 +169,30 @@ function range_mt:start_raft_group(remote)
 			local a = remote.arbiter(
 				self:arbiter_id(), scanner.range_fsm_factory, { initial_node = true }, self
 			)
-			-- wait for this node becoming leader
-			-- maintain_replica_set adds new replica and it will call range_mt:change_replica_set, which increases self.replica_available.
-			while true do
-				if self:is_replica_synchorinized_with_raft() then
-					break
-				end
-				luact.clock.sleep(0.5)
-			end
-			logger.notice('start_raft_group', self)
-			ev:emit('done')
-			wait_start_replicas_event[id] = nil
-		else
-			event.join(nil, ev)
 		end
+		-- wait for this node becoming leader
+		-- maintain_replica_set adds new replica and it will call range_mt:change_replica_set, which increases self.replica_available.
+		event.join(nil, ev)
 		rft = self:raft_body()
 	end
 	return rft
 end
-
+function range_mt:is_replica_synchorinized_with_raft()
+	local rft = self:raft_body()
+	if not rft then return nil end
+	local replica_set = rft:replica_set()
+	return (1 + #replica_set) >= self.n_replica and rft or nil -- +1 for leader node (raft replica_set does not contains leader)
+end
+function range_mt:emit_if_synchronized_with_raft()
+	local id = self:arbiter_id()
+	local ev = wait_start_replicas_event[id]
+	if ev then
+		if self:is_replica_synchorinized_with_raft() then
+			ev:emit('done')
+			wait_start_replicas_event[id] = nil
+		end
+	end
+end
 function range_mt:clone(gc)
 	local p = ffi.cast('luact_dht_range_t*', memory.alloc(#self))
 	ffi.copy(p, self, #self)
@@ -286,7 +291,6 @@ function range_mt:find_replica_by(node, check_thread_id)
 		end
 	end
 end
-local wait_start_replicas_event = {}
 function range_mt:raftlog()
 	-- below may cause block due to initialization wait for raft group, 
 	-- if still split range creation is ongoing in range_mt:exec_split.
@@ -296,16 +300,11 @@ end
 function range_mt:raft_body()
 	return raft._find_body(self:arbiter_id())
 end
-function range_mt:is_replica_synchorinized_with_raft()
-	local rft = self:raft_body()
-	if not rft then return nil end
-	local replica_set = rft:replica_set()
-	return (1 + #replica_set) >= self.n_replica and rft or nil -- +1 for leader node (raft replica_set does not contains leader)
-end
 function range_mt:write(command, timeout, dictatorial)
 	if not uuid.owner_of(self.replicas[0]) then
 		return self.replicas[0]:write(command, timeout, dictatorial)
 	else
+		self:verify_command_range(command)
 		local rft = self:raftlog()
 		return rft:write({command}, timeout, dictatorial)
 	end
@@ -314,7 +313,7 @@ function range_mt:read(timeout, command)
 	if not uuid.owner_of(self.replicas[0]) then
 		return self.replicas[0]:read(timeout, command)
 	else
-		logger.info('range_mt:read')
+		self:verify_command_range(command)
 		local rft = self:raftlog()
 		return rft:read(timeout, command)
 	end
@@ -347,9 +346,9 @@ function range_mt:split(at, timeout)
 	end
 	local update, new, update_meta, new_meta = self:make_split_ranges(spk, spkl)
 	-- create split range data
+	local start = luact.clock.get()
 	local ok, r = txncoord.run_txn({
 		on_commit = function (txn, ur, nr)
-		print('on_commit', txn)
 			return cmd.split(ur.kind, ur, nr, range_manager.clock:issue(), txn)
 		end,
 	}, function (txn, ur, nr)
@@ -363,7 +362,6 @@ function range_mt:split(at, timeout)
 		range_manager:destroy_range(new) -- cleanup created range
 		error(r)
 	end
-	logger.info('split finished', update, new)
 	return update, new
 end
 -- actual processing on replica node of range
@@ -391,7 +389,6 @@ end
 function range_mt:exec_cas(storage, k, kl, o, ol, n, nl, ts, txn)
 	local ok, ov = sync_cas(storage, self.stats, k, kl, o, ol, n, nl, ts, txn)
 	self:on_write_replica_finished()
-	logger.info('syn_cas', ok, ov)
 	return ok, ov
 end
 local range_scan_filter_count
@@ -445,7 +442,6 @@ function range_mt:exec_end_txn(storage, ts, txn, commit, cmd_on_commit)
 	-- TODO : update stats
 	storage:backend():rawput(k, kl, ffi.cast('char *', rtxn), #rtxn)
 	if cmd_on_commit then
-		logger.info('apply cmd on commit:', cmd_on_commit)
 		-- use current txn (already commited) main usage is resolve version of necessary key
 		cmd_on_commit:set_txn(rtxn)
 		cmd_on_commit:apply_to(self:partition(), self)
@@ -582,6 +578,7 @@ splitのフローは以下の通り
 4. gossipでsplitを通知する
 ]]
 function range_mt:exec_split(storage, update_range, new_range, txn, ts)
+	local start = luact.clock.get()
 	local k, kl = update_range:cachekey()
 	local updated = range_manager:find_range(k, kl, update_range.kind)
 	updated.end_key:init(update_range.end_key:as_slice())
@@ -595,7 +592,7 @@ function range_mt:exec_split(storage, update_range, new_range, txn, ts)
 	-- luajit VM is single threaded, so any request to *created* never be received after here.
 	created:start_raft_group()
 	-- notify split via gossip
-	range_manager.gossiper:broadcast(cmd.gossip.replica_change(self, self.end_key), cmd.GOSSIP_RANGE_SPLIT)
+	range_manager.gossiper:notify_broadcast(cmd.gossip.replica_change(self, self.end_key), cmd.GOSSIP_RANGE_SPLIT)
 end
 function range_mt:partition()
 	return range_manager.partitions[self.kind]
@@ -691,6 +688,7 @@ end
 function range_mt:debug_add_replica(a)
 	self.replicas[self.replica_available] = manager_actor_from(a)
 	self.replica_available = self.replica_available + 1
+	self:emit_if_synchronized_with_raft()
 end
 function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if not uuid.valid(leader) then
@@ -731,6 +729,7 @@ function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 			range_manager:stop_root_range_gossiper()
 		end
 	end
+	self:emit_if_synchronized_with_raft()
 	logger.info('change_replica_set', 'range become', self)
 end
 function range_mt:snapshot(sr, rb)
@@ -1186,7 +1185,7 @@ function range_manager_mt:on_cmd_finished(command, wrapped_txn, cmd_start_wallti
 	-- if you change txn in this function, the change will propagate to caller. 
 	-- note that command:get_txn() is copied txn object, so any change will not affect caller's txn object. 
 	-- if not ok then
-	 	-- logger.info('on_cmd_finished', command, txn, ok, r, r2, 'callret:', ...)
+	-- 	 logger.info('on_cmd_finished', command)--, txn, ok, r, r2, 'callret:', ...)
 	-- end
 	local txn = self:strip(wrapped_txn)
 	self:update_txn_by_response(command, txn, ok, r, r2)
@@ -1316,21 +1315,21 @@ function range_manager_mt:read(timeout, command)
 	rng = self.ranges[kind]:find_contains(k, kl)
 	if not rng then
 		rng = self:find(kind, k, kl)
-		if rng then
-			local r = {pcall(rng.read, rng, timeout, command)}
-			if not r[1] then
-				if (not refreshed) and (r[2]:is('range_key')) then
-					self:clear_cache(rng)
-					refreshed = true
-					goto again
-				end
-				error(r[2])
-			else
-				return unpack(r, 2)
-			end
+		if not rng then
+			exception.raise('not_found', 'range', kind, ffi.string(k, kl))
 		end
 	end
-	return rng:read(timeout, command)
+	local r = {pcall(rng.read, rng, timeout, command)}
+	if not r[1] then
+		if (not refreshed) and (r[2]:is('range_key')) then
+			self:clear_cache(rng)
+			refreshed = true
+			goto again
+		end
+		error(r[2])
+	else
+		return unpack(r, 2)
+	end
 end
 function range_manager_mt:write(command, timeout, dictatorial)
 	local rng, refreshed
@@ -1338,25 +1337,23 @@ function range_manager_mt:write(command, timeout, dictatorial)
 ::again::
 	rng = self.ranges[kind]:find_contains(k, kl)
 	if not rng then
-		if not k then
-			logger.info('invalid cmd', command)
-		end
 		rng = self:find(kind, k, kl)
-		if rng then
-			local r = {pcall(rng.write, rng, command, timeout, dictatorial)}
-			if not r[1] then
-				if (not refreshed) and (r[2]:is('range_key')) then
-					self:clear_cache(rng)
-					refreshed = true
-					goto again
-				end
-				error(r[2])
-			else
-				return unpack(r, 2)
-			end
+		if not rng then
+			exception.raise('not_found', 'range', kind, ffi.string(k, kl))
 		end
 	end
-	return rng:write(command, timeout, dictatorial)
+	local r = {pcall(rng.write, rng, command, timeout, dictatorial)}
+	if not r[1] then
+		-- logger.notice('rng error', r[2])
+		if (not refreshed) and (r[2]:is('range_key')) then
+			self:clear_cache(rng)
+			refreshed = true
+			goto again
+		end
+		error(r[2])
+	else
+		return unpack(r, 2)
+	end
 end
 function range_manager_mt:strip(wtxn, kind, k, kl)
 	if wtxn then
@@ -1573,6 +1570,10 @@ function _M.destroy_manager()
 		range_manager:shutdown()
 		range_manager = nil
 	end
+end
+
+function _M.debug_new(n_replica)
+	return range_mt.alloc(n_replica)
 end
 
 return _M

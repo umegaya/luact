@@ -52,15 +52,11 @@ local g_last_ts
 
 -- init range manager
 local range_manager
-local raft_delay_emurator = luact({
-	c = function ()
-	end,
-})
 local function init_range_manager()
 	tools.use_dummy_arbiter(function (actor, ...)
-		raft_delay_emurator.c()
+		tools.delay_emurator().c()
 	end, function (actor, log, timeout, dectatorial)
-		raft_delay_emurator.c()
+		tools.delay_emurator().c()
 		g_last_ts = log[1].timestamp
 	end)
 	range.destroy_manager()

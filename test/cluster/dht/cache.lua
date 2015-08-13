@@ -19,7 +19,6 @@ local function dummy_range(start_key, end_key)
 end
 
 local c = cache.new_range(1)
-assert(c.kind == 1, "kind should be ctor argument")
 
 
 local range_start_keys = {}
