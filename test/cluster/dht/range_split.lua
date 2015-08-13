@@ -17,7 +17,7 @@ tools.start_luact(1, nil, function ()
 	tools.use_dummy_arbiter()
 
 	local rm
-	local function init_dht()
+	local function init_dht(range_max_bytes)
 		tools.use_dummy_arbiter(function (actor, ...)
 			tools.delay_emurator().c()
 		end, function (actor, log, timeout, dectatorial)
@@ -30,6 +30,7 @@ tools.start_luact(1, nil, function ()
 			datadir = "/tmp/luact/split_test", 
 			n_replica = 1, 
 			max_clock_skew = 0,
+			range_size_max = range_max_bytes,
 		}
 		-- modify arbiter message so that range can use special raft actor for debug
 		if luact.thread_id == 1 then
@@ -67,7 +68,6 @@ tools.start_luact(1, nil, function ()
 			end)
 			-- logger.warn(id, 'txn takes', luact.clock.get() - start, 'sec')
 			rc.exec = rc.exec + 1
-			-- luact.clock.sleep(0.01)
 		end
 	end
 
@@ -131,6 +131,41 @@ tools.start_luact(1, nil, function ()
 		end
 	end
 
+	local range_max_bytes = bit.lshift(1, 18)
+	local function range_write_pressure()
+		local controller = { retry = 0, done = false, exec = 0, }
+		local kind = range.KIND_STATE
+		local k, kl = range.META2_MIN_KEY:as_slice()
+		local ek, ekl = range.META2_MAX_KEY:as_slice()
+		local vlen = bit.lshift(1, 15)
+		local est_splits = math.ceil(range_max_bytes / vlen)
+
+		-- Start test writer write about a 32K/key so there aren't too many writes necessary to split 64K range.
+		local tev = luact.tentacle(start_test_writer, controller, 0, kind, vlen)
+
+		-- Check that we split 5 times in allotted time.
+		local meta2_ranges
+		assert(tools.is_true_within(function ()
+			meta2_ranges = rm:scan(range.KIND_META2, k, kl, ek, ekl, 0)
+			return #meta2_ranges >= (est_splits + 2)
+		end, 6.0), "actual split times not enough for estimated:"..#meta2_ranges.."/"..est_splits)
+
+		controller.done = true
+		luact.event.join(nil, tev)
+		logger.report('writer does', controller.exec, 'txn')
+		
+		-- This write pressure test often causes splits while resolve
+		-- intents are in flight, causing them to fail with range key
+		-- mismatch errors. However, LocalSender should retry in these
+		-- cases. Check here via MVCC scan that there are no dangling write
+		-- intents. We do this using an IsTrueWithin construct to account
+		-- for timing of finishing the test writer and a possibly-ongoing
+		-- asynchronous split.
+		assert(tools.is_true_within(function ()
+			return pcall(rm.scan, rm, kind, k, kl, ek, ekl, 0, nil, true)
+		end, 0.5), "finishing concurrent write fails within estimated time")
+	end
+
 	-- TestRangeSplitsWithConcurrentTxns does 5 consecutive splits while
 	-- 10 concurrent coroutines are each running successive transactions
 	-- composed of a random mix of puts.
@@ -145,96 +180,24 @@ tools.start_luact(1, nil, function ()
 		range_split_with_concurrent_txn(0)
 	end)
 
---[[
-// TestRangeSplitsWithWritePressure sets the zone config max bytes for
-// a range to 256K and writes data until there are five ranges.
-func TestRangeSplitsWithWritePressure(t *testing.T) {
-	defer leaktest.AfterTest(t)
-	s := createTestDB(t)
-	defer s.Stop()
-	setTestRetryOptions()
+	-- TestRangeSplitsWithWritePressure sets the zone config max bytes for
+	-- a range to 256K and writes data until there are five ranges.
+	test("TestRangeSplitsWithWritePressure", function ()
+		init_dht(range_max_bytes)
+		range_write_pressure()
+	end)
 
-	// Rewrite a zone config with low max bytes.
-	zoneConfig := &proto.ZoneConfig{
-		ReplicaAttrs: []proto.Attributes{
-			{},
-			{},
-			{},
-		},
-		RangeMinBytes: 1 << 8,
-		RangeMaxBytes: 1 << 18,
-	}
-	if err := s.DB.Put(keys.MakeKey(keys.ConfigZonePrefix, proto.KeyMin), zoneConfig); err != nil {
-		t.Fatal(err)
-	}
-
-	// Start test writer write about a 32K/key so there aren't too many writes necessary to split 64K range.
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go startTestWriter(s.DB, int64(0), 1<<15, &wg, nil, nil, done, t)
-
-	// Check that we split 5 times in allotted time.
-	if err := util.IsTrueWithin(func() bool {
-		// Scan the txn records.
-		rows, err := s.DB.Scan(keys.Meta2Prefix, keys.MetaMax, 0)
-		if err != nil {
-			t.Fatalf("failed to scan meta2 keys: %s", err)
-		}
-		return len(rows) >= 5
-	}, 6*time.Second); err != nil {
-		t.Errorf("failed to split 5 times: %s", err)
-	}
-	close(done)
-	wg.Wait()
-
-	// This write pressure test often causes splits while resolve
-	// intents are in flight, causing them to fail with range key
-	// mismatch errors. However, LocalSender should retry in these
-	// cases. Check here via MVCC scan that there are no dangling write
-	// intents. We do this using an IsTrueWithin construct to account
-	// for timing of finishing the test writer and a possibly-ongoing
-	// asynchronous split.
-	if err := util.IsTrueWithin(func() bool {
-		if _, _, err := engine.MVCCScan(s.Eng, keys.LocalMax, proto.KeyMax, 0, proto.MaxTimestamp, true, nil); err != nil {
-			log.Infof("mvcc scan should be clean: %s", err)
-			return false
-		}
-		return true
-	}, 500*time.Millisecond); err != nil {
-		t.Error("failed to verify no dangling intents within 500ms")
-	}
-}
-
-// TestRangeSplitsWithSameKeyTwice check that second range split
-// on the same splitKey should not cause infinite retry loop.
-func TestRangeSplitsWithSameKeyTwice(t *testing.T) {
-	defer leaktest.AfterTest(t)
-	s := createTestDB(t)
-	defer s.Stop()
-
-	splitKey := proto.Key("aa")
-	log.Infof("starting split at key %q...", splitKey)
-	if err := s.DB.AdminSplit(splitKey); err != nil {
-		t.Fatal(err)
-	}
-	log.Infof("split at key %q first time complete", splitKey)
-	ch := make(chan error)
-	go func() {
-		// should return error other than infinite loop
-		ch <- s.DB.AdminSplit(splitKey)
-	}()
-
-	select {
-	case err := <-ch:
-		if err == nil {
-			t.Error("range split on same splitKey should fail")
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Error("range split on same splitKey timed out")
-	}
-}
-]]
+	-- TestRangeSplitsWithSameKeyTwice check that second range split
+	-- on the same splitKey should not cause infinite retry loop.
+	test("TestRangeSplitsWithSameKeyTwice", function ()
+		local kind = range.KIND_STATE
+		local split_key = "aa"
+		logger.info("starting split at key", split_key)
+		rm:split(kind, split_key)
+		logger.info("split key first time complete", split_key)
+		local ok, r = pcall(rm.split, rm, kind, split_key)
+		assert(not ok and r:is('invalid'))
+	end)
 end)
 
 return true

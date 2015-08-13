@@ -331,4 +331,17 @@ function _M.new_fsm(thread_id)
 	})
 end
 
+function _M.is_true_within(fn, duration)
+	local total, wait = 0, 0.01
+	while total < duration do
+		if fn() then
+			return true
+		end
+		luact.clock.sleep(wait)
+		total = total + wait
+		wait = wait * 2
+	end
+	return false
+end
+
 return _M

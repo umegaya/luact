@@ -1519,6 +1519,12 @@ function range_manager_mt:resolve(wtxn, n, s, sl, e, el, ts, timeout)
 	end
 end
 
+-- range management (split/merge/rebalance)
+-- range_manager only provide manual split. 
+function range_manager_mt:split(kind, split_at)
+	self:find(kind, split_at, #split_at):split(split_at)
+end
+
 
 
 
