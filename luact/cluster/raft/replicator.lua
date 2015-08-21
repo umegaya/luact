@@ -11,6 +11,7 @@ local util = require 'pulpo.util'
 local clock = require 'luact.clock'
 local uuid = require 'luact.uuid'
 local rio = require 'luact.util.rio'
+local rpc = require 'luact.cluster.raft.rpc'
 local actor_module = require 'luact.actor'
 
 local _M = {}
@@ -42,11 +43,11 @@ end
 function replicator_index:commit_add()
 	self.added = 1
 end
-function replicator_index:start(leader_actor, actor, state, activate)
+function replicator_index:start(controller, actor, state, activate)
 	self:init(state)
 	if activate then self:commit_add() end
 	local hbev = tentacle(self.run_heartbeat, self, actor, state)
-	local runev = tentacle(self.run, self, leader_actor, actor, state, hbev)
+	local runev = tentacle(self.run, self, controller, actor, state, hbev)
 	state:kick_replicator()
 	return runev
 end
@@ -60,21 +61,21 @@ local function err_handler(e)
 end
 function replicator_index:run_replication(t)
 	t.running = true
-	local ok, r = xpcall(self.replicate, err_handler, self, t.leader_actor, t.actor, t.state)
+	local ok, r = xpcall(self.replicate, err_handler, self, t.controller, t.actor, t.state)
 	if not ok then
 		logger.report('error is:', t.actor, r)
 	end
 	if (not ok) and r:is('actor_no_body') then
-		t.leader_actor:stop_replicator(t.actor)
+		t.controller:stop_replicator(t.actor)
 	end
 	t.rep_thread = nil
 	t.running = false
 end
-function replicator_index:run(leader_actor, actor, state, hbev)
+function replicator_index:run(controller, actor, state, hbev)
 	event.select({
 		self = self, 
 		actor = actor, 
-		leader_actor = leader_actor, 
+		controller = controller, 
 		state = state, 
 		hb_thread = hbev, 
 		[state.ev_close] = function (t)
@@ -91,11 +92,11 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 				local obj = ({...})[2]
 				if (not obj) or (obj == self) then
 					if t.rep_thread then
-						logger.warn(state:group_id(), 'stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
+						logger.warn(state:gid_for_log(), 'stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
 						tentacle.cancel(t.rep_thread)
 					end
 					if t.hb_thread then
-						logger.warn(state:group_id(), 'stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
+						logger.warn(state:gid_for_log(), 'stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
 						tentacle.cancel(t.hb_thread)
 					end
 					return true
@@ -104,20 +105,20 @@ function replicator_index:run(leader_actor, actor, state, hbev)
 		end,
 	})
 end
-function replicator_index:handle_stale_term(leader_actor, state)
+function replicator_index:handle_stale_term(controller, state)
 	state:become_follower()
 	self:on_leader_auth_result(false) -- no more leader
 end
 function replicator_index:update_last_access()
 	self.last_access = clock.get()
 end
-function replicator_index:update_last_appended(leader_actor, state, entries)
+function replicator_index:update_last_appended(controller, state, entries)
 	if entries and #entries > 0 then
 		-- Mark any proposals as committed
 		-- logger.info('entries:', #entries, first and first.index, last and last.index)
 		local first, last = entries[1], entries[#entries]
-		logger.debug(state:group_id(), 'range commit:', first.index, last.index)
-		state.proposals:range_commit(leader_actor, first.index, last.index)
+		logger.debug(state:gid_for_log(), 'range commit:', first.index, last.index)
+		state.proposals:range_commit(controller, first.index, last.index)
 
 		-- Update the indexes
 		self.match_idx = last.index
@@ -133,8 +134,8 @@ end
 function replicator_index:failure_cooldown(n_failure)
 	clock.sleep(0.5 * n_failure)
 end
-function replicator_index:replicate(leader_actor, actor, state)
-	logger.report('replicate start', state:group_id(), leader_actor, actor)
+function replicator_index:replicate(controller, actor, state)
+	logger.report('replicate start', state:gid_for_log(), actor)
 	-- arguments
 	local current_term, leader, 
 		prev_log_idx, prev_log_term, 
@@ -144,7 +145,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 	local term, success, last_index
 ::START::
 	if self.added == 0 then
-		logger.debug(state:group_id(), 'replicaiton to ', actor, 'has not committed yet')
+		logger.debug(state:gid_for_log(), 'replicaiton to ', actor, 'has not committed yet')
 		return
 	end
 	if self.failures > 0 then
@@ -159,7 +160,7 @@ function replicator_index:replicate(leader_actor, actor, state)
 		logger.notice('sync')
 		goto SYNC
 	end
-	logger.notice(state:group_id(), 'replicate', prev_log_idx, 'to', actor)
+	logger.notice(state:gid_for_log(), 'replicate', prev_log_idx, 'to', actor)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
@@ -172,15 +173,17 @@ function replicator_index:replicate(leader_actor, actor, state)
 		end
 	end
 	--]]
-	term, success, last_index = actor:timed_append_entries(
+	term, success, last_index = actor.timed_rpc(
 									self.heartbeat_span_sec, 
+									rpc.APPEND_ENTRIES,
+									state:group_id(),
 									current_term, leader, leader_commit_idx, 
 									prev_log_idx, prev_log_term, 
 									entries)
 -- print(term, success, last_index)
 	-- term is updated, step down leader
 	if term > current_term then
-		self:handle_stale_term(leader_actor, state)
+		self:handle_stale_term(controller, state)
 		return true
 	end
 
@@ -190,14 +193,14 @@ function replicator_index:replicate(leader_actor, actor, state)
 	-- Update based on success
 	if success then
 		-- Update our replication state
-		self:update_last_appended(leader_actor, state, entries)
+		self:update_last_appended(controller, state, entries)
 		-- Clear any failures, allow pipelining
 		self.failures = 0
 	else
 		self.next_idx = math.max(math.min(tonumber(self.next_idx)-1, tonumber(last_index)+1), 1)
 		self.match_idx = self.next_idx - 1
 		self.failures = self.failures + 1
-		logger.warn(state:group_id(), util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
+		logger.warn(state:gid_for_log(), util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
 	end
 
 ::CHECK_MORE::
@@ -213,18 +216,18 @@ function replicator_index:replicate(leader_actor, actor, state)
 	-- SYNC is used when we fail to get a log, usually because the follower
 	-- is too far behind, and we must ship a snapshot down instead
 ::SYNC::
-	local stop, err = self:sync(leader_actor, actor, state)
+	local stop, err = self:sync(controller, actor, state)
 	if stop then
 		return true
 	elseif err then
-		logger.error(state:group_id(), ("[ERR] raft: Failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
+		logger.error(state:gid_for_log(), ("[ERR] raft: Failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
 		return
 	end
 	-- Check if there is more to replicate
 	goto CHECK_MORE
 end
 -- send snap shot and sync fsm 
-function replicator_index:sync(leader_actor, actor, state)
+function replicator_index:sync(controller, actor, state)
 	-- Get the snapshot path
 	local path, last_snapshot_index = state.snapshot:latest_snapshot_path()
 	-- no snapshot
@@ -233,8 +236,8 @@ function replicator_index:sync(leader_actor, actor, state)
 	end
 	-- create remote io and send install snapshot RPC
 	local fd = rio.file(path)
-	local ok, success = pcall(
-		actor.timed_install_snapshot, actor, 120, -- 2 min timeout 
+	local ok, success = pcall( -- 120 == 2 min timeout 
+		actor.timed_rpc, 120, rpc.INSTALL_SNAPSHOT, state:group_id(), 
 		state:current_term(), state:leader(), last_snapshot_index, fd
 	)
 	-- remove rio
@@ -247,7 +250,7 @@ function replicator_index:sync(leader_actor, actor, state)
 	-- Check for success
 	if success then
 		-- Mark any proposals are committed
-		state.proposals:range_commit(leader_actor, self.match_idx+1, last_snapshot_index)
+		state.proposals:range_commit(controller, self.match_idx+1, last_snapshot_index)
 
 		-- Update the indexes
 		self.match_idx = last_snapshot_index
@@ -260,7 +263,7 @@ function replicator_index:sync(leader_actor, actor, state)
 		self:on_leader_auth_result(true)
 	else
 		self.failures = self.failures + 1
-		logger.warn(state:group_id(), ("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
+		logger.warn(state:gid_for_log(), ("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
 	end
 	return false -- keep on checking replication log is exist.
 end
@@ -270,9 +273,9 @@ function replicator_index:run_heartbeat(actor, state)
 		clock.sleep(util.random_duration(self.heartbeat_span_sec))
 
 		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
-		ok, term, success, last_index = pcall(actor.append_entries, actor, state:current_term(), state:leader())
+		ok, term, success, last_index = pcall(actor.rpc, rpc.APPEND_ENTRIES, state:group_id(), state:current_term(), state:leader())
 		if (not ok) or (not success) then
-			logger.warn(state:group_id(), ("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
+			logger.warn(state:gid_for_log(), ("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else
@@ -289,14 +292,14 @@ ffi.metatype('luact_raft_replicator_t', replicator_mt)
 
 
 -- module functions
-function _M.new(leader_actor, actor, state, activate)
+function _M.new(controller, actor, state, activate)
 	local r
 	if #cache > 0 then
 		r = table.remove(cache)
 	else
 		r = memory.alloc_fill_typed('luact_raft_replicator_t')
 	end
-	return r, r:start(leader_actor, actor, state, activate)
+	return r, r:start(controller, actor, state, activate)
 end
 
 return _M

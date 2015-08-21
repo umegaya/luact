@@ -222,15 +222,16 @@ function _M.delay_emurator()
 	return delay_actor
 end
 function _M.use_dummy_arbiter(on_read, on_write)
-	local range_arbiters = {}
+	local raft = require 'luact.cluster.raft'
+	local range = require 'luact.cluster.dht.range'
 	local range_arbiter_bodies = {}
-	local consistent_flag
+	local mact = raft.manager_actor()
 	function luact.root.arbiter(id, func, opts, rng)
-		local rm = (require 'luact.cluster.dht.range').get_manager()
+		local rm = range.get_manager()
 		rng = rm:create_fsm_for_arbiter(rng)
 		local storage = rng:partition()
 		-- logger.notice('arbiter_id = ', ('%q'):format(id), range_arbiters[id])
-		local a = range_arbiters[id]
+		local a = range_arbiter_bodies[id]
 		if not a then
 			local body = {
 				read = function (self, timeout, ...)
@@ -247,24 +248,53 @@ function _M.use_dummy_arbiter(on_read, on_write)
 				leader = function (self)
 					return self.ldr
 				end,
-				change_replcia_set = function (self)
-					rng:debug_add_replica(a)
+				change_replica_set = function (self)
+					rng:debug_add_replica(mact)
 				end,
 				rs = {},
 			}
-			a = luact(body)
-			body.ldr = a
-			range_arbiters[id] = a
+			body.ldr = mact
 			range_arbiter_bodies[id] = body
-			a:notify_change_replcia_set()
+			luact.tentacle(function ()
+				-- emurate delay of election. 
+				-- difference of luact.clock.sleep is, luact.clock.sleep may ignore causality order of function call when luact.root.arbiter called via actor messaging.
+				-- e.g. luact.root.arbiter call should returns before change_replica_set is called. but if queue has plenty of un-processed response, 
+				-- response of luact.root.arbiter is far more after than fixed wait time of luact.clock.sleep. then body:change_replica_set called before
+				-- body:change_replica_set called, that is not true for actual arbiter environment. 
+				--
+				-- ranges in bootstrap uses this thread's rpc queue to achieve finish election and change_replica_set, 
+				-- for ranges created by split, if communication with another node is more smooth than local rpc queue interaction, change_replica_set may call 
+				-- before luact.root.arbiter returns to caller (so, range_mt:start_raft_group called luact.root.arbiter directly)
+				--
+				-- if you use rpc to make delay, this rpc surely returns after luact.root.arbiter returns (because both used same rpc queue, causality order preserved)
+				_M.delay_emurator().c() -- make delay
+				body:change_replica_set()
+			end)
 		else
 			assert(false, "same arbiter should not called")
 		end
-		return a
+		return mact
 	end
-	local raft = require 'luact.cluster.raft'
 	function raft._find_body(id)
 		return range_arbiter_bodies[id]
+	end
+	function raft.rpc(kind, id, ...)
+		local rft = range_arbiter_bodies[id]
+		if not rft then
+			exception.raise('raft', 'not_found', id)
+		end
+		if kind == raft.APPEND_ENTRIES then
+			return rft:append_entries(...)
+		elseif kind == raft.REQUEST_VOTE then
+			return rft:request_vote(...)
+		elseif kind == raft.INSTALL_SNAPSHOT then
+			return rft:install_snapshot(...)
+		else
+			exception.raise('raft', 'invalid_rpc', kind)
+		end
+	end
+	function raft.manager_actor()
+		return mact
 	end
 end
 

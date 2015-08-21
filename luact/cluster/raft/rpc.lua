@@ -1,0 +1,7 @@
+local _M = {}
+
+_M.APPEND_ENTRIES = 1
+_M.REQUEST_VOTE = 2
+_M.INSTALL_SNAPSHOT = 3
+
+return _M

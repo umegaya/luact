@@ -138,7 +138,7 @@ tools.start_luact(1, nil, function ()
 		local k, kl = range.META2_MIN_KEY:as_slice()
 		local ek, ekl = range.META2_MAX_KEY:as_slice()
 		local vlen = bit.lshift(1, 15)
-		local est_splits = math.ceil(range_max_bytes / vlen)
+		local est_splits = 5
 
 		-- Start test writer write about a 32K/key so there aren't too many writes necessary to split 64K range.
 		local tev = luact.tentacle(start_test_writer, controller, 0, kind, vlen)

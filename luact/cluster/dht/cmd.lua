@@ -810,7 +810,8 @@ function range_split_mt:__len()
 end
 ffi.metatype('luact_dht_gossip_range_split_t', range_split_mt)
 function _M.gossip.range_split(rng, split_at)
-	return range_split_mt.new(rng.kind, rng:cachekey(), split_at)
+	local k, kl = rng:cachekey()
+	return range_split_mt.new(rng.kind, k, kl, split_at)
 end
 
 

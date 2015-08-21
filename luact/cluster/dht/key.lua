@@ -308,11 +308,11 @@ end
 -- key generation helper
 -- TODO : use statical memory buffer and copy buffer
 function _M.make_arbiter_id(kind, k, kl)
-	return string.char(kind)..ffi.string(k, kl)
+	return ffi.string(k, kl)
 end
 function _M.make_metakey(kind, k, kl)
 	if kind > const.KIND_META2 then
-		local kind = kind_map[kind]
+		kind = kind_map[kind]
 		local p = memory.managed_alloc_typed('char', kl + 1)
 		ffi.copy(p, kind.prefix, 1)
 		ffi.copy(p + 1, k, kl)

@@ -4,6 +4,7 @@ local clock = require 'luact.clock'
 local serde_common = require 'luact.serde.common'
 
 local pulpo = require 'pulpo.init'
+local event = require 'pulpo.event'
 local memory = require 'pulpo.memory'
 local socket = require 'pulpo.socket'
 local exception = require 'pulpo.exception'
@@ -147,14 +148,23 @@ function _M.initialize(mt, startup_at, local_address)
 	-- TODO : register machine_id/ip address pair to consul.
 end
 
+local serial_ts_change_event = event.new()
+local serial_ts_change_wait
 function _M.new()
 	if idgen.seed.__detail__.serial >= _M.MAX_SERIAL_ID then
-		local current = _M.timestamp(idgen.seed)
-		repeat
-			clock.sleep(0.01)
-			_M.set_timestamp(idgen.seed, msec_timestamp())
-		until current ~= _M.timestamp(idgen.seed)
-		idgen.seed.__detail__.serial = 0
+		if not serial_ts_change_wait then
+			serial_ts_change_wait = true
+			local current = _M.timestamp(idgen.seed)
+			repeat
+				clock.sleep(0.01)
+				_M.set_timestamp(idgen.seed, msec_timestamp())
+			until current ~= _M.timestamp(idgen.seed)
+			idgen.seed.__detail__.serial = 0
+			serial_ts_change_event:emit('done')
+			serial_ts_change_wait = false
+		else
+			event.join(serial_ts_change_event)
+		end
 	else
 		idgen.seed.__detail__.serial = idgen.seed.__detail__.serial + 1
 	end
@@ -180,8 +190,10 @@ function _M.first(machine_id, thread_id, alloc)
 	end
 	return r
 end
-function _M.from(ptr)
-	return ffi.cast('luact_uuid_t*', ptr)
+function _M.first_with_serial(machine_id, thread_id, serial)
+	local id = _M.first(machine_id, thread_id, true)
+	id.__detail__.serial = serial
+	return id
 end
 function _M.owner_of(uuid)
 	return _M.owner_machine_of(uuid) and _M.thread_id(uuid) == pulpo.thread_id

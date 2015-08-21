@@ -67,6 +67,7 @@ typedef struct luact_dht_range {
 	luact_dht_key_t end_key;
 	uint8_t n_replica, kind, replica_available, padd;
 	luact_mvcc_stats_t stats;
+	luact_uuid_t id;				//range's id
 	luact_uuid_t replicas[0];		//range_managers' uuid
 } luact_dht_range_t;
 ]]
@@ -103,6 +104,7 @@ end
 function range_mt:init(start_key, end_key, kind, replicas)
 	self.start_key = start_key
 	self.end_key = end_key
+	self.id = uuid.new()
 	self.kind = kind
 	self.replica_available = 0
 	self.stats:init()
@@ -116,7 +118,7 @@ function range_mt:__len()
 	return range_mt.size(self.n_replica)
 end
 function range_mt:__tostring()
-	local s = 'range('..tonumber(self.kind)..')['..self.start_key:as_digest().."]..["..self.end_key:as_digest().."]"
+	local s = 'range('..tonumber(self.kind)..'/'..tostring(self.id)..')['..self.start_key:as_digest().."]..["..self.end_key:as_digest().."]"
 	s = s..' ('..tostring(ffi.cast('void *', self))..')\n'
 	if self.replica_available > 0 then
 		s = s .. "replicas"
@@ -154,7 +156,7 @@ function range_mt:copy_to(rng)
 end
 -- initiate initial arbiter and wait until replica set sufficiently formed
 local wait_start_replicas_event = {}
-function range_mt:start_raft_group(remote)
+function range_mt:start_raft_group(bootstrap)
 	local id = self:arbiter_id()
 	local rft = self:is_replica_synchorinized_with_raft()
 	if not rft then
@@ -162,12 +164,13 @@ function range_mt:start_raft_group(remote)
 		if not ev then
 			ev = event.new()
 			wait_start_replicas_event[id] = ev
-
-			remote = remote or actor.root_of(nil, luact.thread_id)
 			-- after this arbiter become leader, range_mt:change_replica_set is called, and it starts scanner.
 			-- scanner check number of replica and if short, call add_replica_set to add replica.
-			local a = remote.arbiter(
-				self:arbiter_id(), scanner.range_fsm_factory, { initial_node = true }, self
+			luact.root.arbiter(
+				self:arbiter_id(), scanner.range_fsm_factory, { 
+					initial_node = bootstrap, 
+					replica_set = (not bootstrap) and self:computed_raft_replicas(), 
+				}, self
 			)
 		end
 		-- wait for this node becoming leader
@@ -177,11 +180,26 @@ function range_mt:start_raft_group(remote)
 	end
 	return rft
 end
+-- compute_raft_replicas computes raft replica set which will be created by these range replicas
+-- its just compute replica set, not initialize reft itself.
+function range_mt:computed_raft_replicas()
+	local r = {}
+	for i=0,self.replica_available-1 do
+		local m, t = uuid.machine_id(r[i]), uuid.thread_id(r[i])
+		if (luact.machine_id ~= m) or (luact.thread_id ~= t) then
+			table.insert(r, actor.system_process_of(m, t, luact.SYSTEM_PROCESS_RAFT_MANAGER))
+		end
+	end
+	return r
+end
 function range_mt:is_replica_synchorinized_with_raft()
 	local rft = self:raft_body()
 	if not rft then return nil end
+	local leader = rft:leader()
 	local replica_set = rft:replica_set()
-	return (1 + #replica_set) >= self.n_replica and rft or nil -- +1 for leader node (raft replica_set does not contains leader)
+	-- leader + replica_set should be greater than required replica num 
+	-- (luact's raft replica_set does not contains leader)
+	return ((uuid.valid(leader) and 1 or 0) + #replica_set) >= self.n_replica and rft or nil 
 end
 function range_mt:emit_if_synchronized_with_raft()
 	local id = self:arbiter_id()
@@ -203,13 +221,10 @@ function range_mt:clone(gc)
 end
 function range_mt:fin()
 	-- TODO : consider when range need to be removed, and do correct finalization
-	local rft = raft.find(self:arbiter_id())
-	if rft then
-		rft:destroy()
-	end
+	raft.destroy(self:arbiter_id())
 end
 function range_mt:arbiter_id()
-	return key.make_arbiter_id(self.kind, self:cachekey())
+	return key.make_arbiter_id(self.kind, ffi.cast('char *', self.id), ffi.sizeof('luact_uuid_t'))
 end
 function range_mt:ts_cache()
 	return range_manager:ts_cache_by_range(self)
@@ -358,11 +373,11 @@ function range_mt:split(at, timeout)
 		nr:update_address(txn)
 		ur:update_address(txn)
 	end, update, new)
-	if not ok then
-		range_manager:destroy_range(new) -- cleanup created range
-		error(r)
-	end
 	return update, new
+end
+function range_mt:move_to(machine_id, thread_id)
+	local a = actor.root_of(machine_id, thread_id)
+
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn, consistent)
@@ -584,7 +599,7 @@ function range_mt:exec_split(storage, update_range, new_range, txn, ts)
 	updated.end_key:init(update_range.end_key:as_slice())
 	updated:compute_stats()
 	-- update new range's ts_cache. it should be same as split source's, without initializing raft group
-	local created = range_manager:new_range(new_range.start_key, new_range.end_key, new_range.kind, new_range.replicas, true)
+	local created = range_manager:new_range(new_range.start_key, new_range.end_key, new_range.kind, new_range.replicas)
 	created:ts_cache():merge(updated:ts_cache(), true)
 	range_manager:cache_range(created) -- add to cache.
 	created:compute_stats()
@@ -668,22 +683,8 @@ end
 -- raft2rm maintains mapping of ip => range manager actor
 local machine_and_thread_to_rm = {}
 local function manager_actor_from(raft_uuid)
-	-- TODO : this affects performance, using cache like below.
-	--[[
-	local mid, tid = uuid.addr(raft_uuid), uuid.thread_id(raft_uuid)
-	local threads = machine_and_thread_to_rm[mid]
-	if not threads then
-		threads = {}
-		machine_and_thread_to_rm[mid] = threads
-	end
-	local ma = threads[tid]
-	if not ma then
-		ma = actor.root_of(mid, tid).dhtm()
-		threads[tid] = ma
-	end
-	return ma]]
-	local n = actor.root_of(uuid.addr(raft_uuid), uuid.thread_id(raft_uuid))
-	return n.dhtm()
+	return actor.system_process_of(
+		uuid.machine_id(raft_uuid), uuid.thread_id(raft_uuid), luact.SYSTEM_PROCESS_RANGE_MANAGER)
 end
 function range_mt:debug_add_replica(a)
 	self.replicas[self.replica_available] = manager_actor_from(a)
@@ -793,16 +794,18 @@ function range_manager_mt:bootstrap(nodelist)
 	-- primary thread create initial cluster data structure
 	if not nodelist then
 		-- create root range. 
-		self.root_range = self:new_range(_M.META1_MIN_KEY, _M.META1_MAX_KEY, _M.KIND_META1, nil, true)
+		self.root_range = self:new_range(_M.META1_MIN_KEY, _M.META1_MAX_KEY, _M.KIND_META1)
 		-- because of check in range:change_replica_set, first we need to initialize root_range before start_raft_group of it.
-		self.root_range:start_raft_group()
+		self.root_range:start_raft_group(true)
 		-- put initial meta2 storage into root_range (with writing raft log)
 		local meta2 = self:new_range(_M.META2_MIN_KEY, _M.META2_MAX_KEY, _M.KIND_META2)
+		meta2:start_raft_group(true)
 		local meta2_key, meta2_key_len = meta2:metakey()
 		self:rawput(_M.KIND_META1, meta2_key, meta2_key_len, ffi.cast('char *', meta2), #meta2, nil, nil, true)
 		-- put initial default storage into meta2_range (with writing raft log)
 		for kind=_M.NON_METADATA_KIND_START,_M.NON_METADATA_KIND_END do
 			local rng = self:new_range(_M.NON_META_MIN_KEY, _M.NON_META_MAX_KEY, kind)
+			rng:start_raft_group(true)
 			local mk, mkl = rng:metakey()
 			self:rawput(_M.KIND_META2, mk, mkl, ffi.cast('char *', rng), #rng, nil, nil, true)
 		end
@@ -832,7 +835,8 @@ function range_manager_mt:bootstrap_kind(name, kind)
 		local ok, prev = self.root_range:cas(syskey, nil, name) 
 		if ok then
 			self:new_partition(k)
-			self:new_range(_M.NON_META_MIN_KEY, _M.NON_META_MAX_KEY, k)
+			local rng = self:new_range(_M.NON_META_MIN_KEY, _M.NON_META_MAX_KEY, k)
+			rng:start_raft_group(true)
 			return k
 		elseif prev == name then
 			return k
@@ -863,9 +867,6 @@ function range_manager_mt:new_range(start_key, end_key, kind, replica_set, dont_
 	r:init(start_key, end_key, kind, replica_set)
 	self:add_owned_range(r)
 	self:cache_range(r)
-	if not dont_start_raft then
-		r:start_raft_group()
-	end
 	return r
 end
 function range_manager_mt:destroy_range(rng)
@@ -1344,7 +1345,7 @@ function range_manager_mt:write(command, timeout, dictatorial)
 	end
 	local r = {pcall(rng.write, rng, command, timeout, dictatorial)}
 	if not r[1] then
-		-- logger.notice('rng error', r[2])
+		logger.notice('rng error', r[2])
 		if (not refreshed) and (r[2]:is('range_key')) then
 			self:clear_cache(rng)
 			refreshed = true
@@ -1557,6 +1558,7 @@ function _M.get_manager(nodelist, datadir, opts)
 		}, range_manager_mt)
 		-- start range manager
 		range_manager:bootstrap(nodelist)
+		assert(_M.manager_actor())
 	end
 	return range_manager
 end
@@ -1564,9 +1566,13 @@ end
 local manager_actor
 function _M.manager_actor()
 	if not manager_actor then
-		manager_actor = luact.supervise(function ()
-			return range_manager
-		end, {})
+		manager_actor = luact.supervise(range_manager, { 
+			actor = {
+				uuid = actor.system_process_of(
+					nil, luact.thread_id, luact.SYSTEM_PROCESS_RANGE_MANAGER
+				)
+			},
+		})
 	end
 	return manager_actor
 end
@@ -1575,6 +1581,10 @@ function _M.destroy_manager()
 	if range_manager then
 		range_manager:shutdown()
 		range_manager = nil
+	end
+	if manager_actor then
+		actor.destroy(manager_actor)
+		manager_actor = nil
 	end
 end
 

@@ -20,12 +20,18 @@ local fs = require 'pulpo.fs'
 local exception = require 'pulpo.exception'
 exception.define('raft')
 
-local _M = {}
+local _M = require 'luact.cluster.raft.rpc'
+local raft_actor
 local raftmap = {}
 local raft_bodymap = {}
 
 -- tick interval
 local tick_intval_sec = 0.05
+
+-- raft rpc type
+local APPEND_ENTRIES = _M.APPEND_ENTRIES
+local REQUEST_VOTE = _M.REQUEST_VOTE
+local INSTALL_SNAPSHOT = _M.INSTALL_SNAPSHOT
 
 -- raft object methods
 local raft_index = {}
@@ -38,19 +44,15 @@ function raft_index:fin()
 	self.state:fin()
 end	
 function raft_index:group_id()
-	return ('%q'):format(self.id):sub(1, 16)
+	return self.id
+end
+function raft_index:gid_for_log()
+	return tostring(ffi.cast('luact_uuid_t*', self.id))
 end
 function raft_index:destroy()
-	local a = actor.of(self)
+	local a = self.manager
 	logger.notice(('node %x:%d (%s) removed from raft group "%s"'):format(
-		uuid.addr(a), uuid.thread_id(a), a, self:group_id()))
-	local rft = raftmap[self.id]
-	if rft then
-		raftmap[self.id] = nil
-		actor.destroy(rft)
-	end
-end
-function raft_index:__actor_destroy__()
+		uuid.addr(a), uuid.thread_id(a), a, self:gid_for_log()))
 	self.alive = nil
 	if self.main_thread then
 		tentacle.cancel(self.main_thread)
@@ -71,16 +73,24 @@ function raft_index:tick()
 	if self.state:is_follower() then
 		-- logger.info('follower election timeout check', self.timeout_limit - clock.get())
 		if self:check_election_timeout() then
-			logger.info('follower election timeout', self:group_id(), self.timeout_limit, clock.get())
+			logger.info('follower election timeout', self:gid_for_log(), self.timeout_limit, clock.get())
 			if self.state:has_enough_nodes_for_election() then
 				-- if election timeout (and has enough node), become candidate
 				self.state:become_candidate()
 			else
-				logger.warn('election timeout but # of nodes not enough', self:group_id(), 
+				logger.warn('election timeout but # of nodes not enough', self:gid_for_log(), 
 					tostring(self.state.initial_node), #self.state.replica_set)
 				self:reset_timeout() -- wait for receiving replica set from leader
 			end
 		end
+	end
+end
+-- init_replica_set initializes this raft's replica set, if specified by given option.
+-- replica set is initialized as if add_replica_set log is accepted., so that after replica set initialized, 
+-- all nodes can be start election as usual. (like leader suddenly stepping down)
+function raft_index:init_replica_set()
+	if self.opts.replica_set then
+		self.state:init_replica_set(self.opts.replica_set)
 	end
 end
 function raft_index:start()
@@ -91,6 +101,7 @@ function raft_index:launch()
 	self.main_thread = nil
 end
 function raft_index:run()
+	self:init_replica_set()
 	self.state:become_follower() -- become follower first
 	self:reset_timeout()
 	while self.alive do
@@ -107,9 +118,9 @@ function raft_index:launch_election()
 	self.election_thread = nil
 end
 function raft_index:run_election()
-	local myid = actor.of(self)
+	local myid = self.manager
 	self:reset_timeout()
-	logger.notice('raft', self:group_id(), 'start election', myid)
+	logger.notice('raft', self:gid_for_log(), 'start election', myid)
 	while self.state:is_candidate() do
 		self.state:new_term()
 		self.state:vote_for_self()
@@ -118,10 +129,13 @@ function raft_index:run_election()
 		local votes = {}
 		local quorum = math.ceil((#set + 1) / 2)
 		for i=1,#set,1 do
+			logger.info('set[i]', i, set[i])
 			if not uuid.equals(set[i], myid) then
-				table.insert(votes, set[i]:async_request_vote(
+				table.insert(votes, set[i]:async_rpc(
+					REQUEST_VOTE,
+					self.id,
 					self.state:current_term(), 
-					actor.of(self), self.state.wal:last_index_and_term()
+					myid, self.state.wal:last_index_and_term()
 				))
 			else
 				myid_pos = i
@@ -137,7 +151,7 @@ function raft_index:run_election()
 				-- but if it takes long time, another follower node may get timeout again (at here, heartbeat RPC have not started yet), 
 				-- and start election with higher term.
 				-- then this node may receive request vote from another node (with higher term), and become follower.
-				logger.notice('raft', self:group_id(), 'another leader seems to be elected (or on going)')
+				logger.notice('raft', self:gid_for_log(), 'another leader seems to be elected (or on going)')
 				break
 			end
 			local id
@@ -148,7 +162,7 @@ function raft_index:run_election()
 						id = set[(i < myid_pos) and i or i + 1]
 					end
 				end
-				logger.debug('vote result', self:group_id(), id, tp, ok, term, granted)
+				logger.debug('vote result', self:gid_for_log(), id, tp, ok, term, granted)
 				-- not timeout and call itself success and vote granted
 				if tp ~= 'timeout' and ok and granted then
 					grant = grant + 1
@@ -157,11 +171,11 @@ function raft_index:run_election()
 		end
 		-- check still candidate (to prevent error in become_leader())
 		if grant >= quorum then
-			logger.notice('raft', self:group_id(), 'get quorum: become leader', grant, quorum)
+			logger.notice('raft', self:gid_for_log(), 'get quorum: become leader', grant, quorum)
 			self.state:become_leader()
 			break
 		else
-			logger.notice('raft', self:group_id(), 'cannot get quorum: re-election', grant, quorum)
+			logger.notice('raft', self:gid_for_log(), 'cannot get quorum: re-election', grant, quorum)
 		end
 		-- if election fails, give chance to another candidate.
 		clock.sleep(util.random_duration(self.opts.election_timeout_sec))
@@ -276,7 +290,7 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
-		logger.warn('raft', self:group_id(), 'append_entries', 'receive older term', term, self.state:current_term())
+		logger.warn('raft', self:gid_for_log(), 'append_entries', 'receive older term', term, self.state:current_term())
 		return self.state:current_term(), false, last_index
 	end
 	-- (part of 2.) If AppendEntries RPC received from new leader: convert to follower
@@ -296,14 +310,14 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 		else
 			local log = self.state.wal:at(prev_log_idx)
 			if not log then
-				logger.warn('raft', self:group_id(), 'fail to get prev log', prev_log_idx)
+				logger.warn('raft', self:gid_for_log(), 'fail to get prev log', prev_log_idx)
 				return self.state:current_term(), false, last_index	
 			end
 			tmp_prev_log_term = log.term
 		end
 		if tmp_prev_log_term ~= prev_log_term then
 			-- 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-			logger.warn('raft', self:group_id(), 'last term does not match', tmp_prev_log_term, prev_log_term)
+			logger.warn('raft', self:gid_for_log(), 'last term does not match', tmp_prev_log_term, prev_log_term)
 			return self.state:current_term(), false, last_index
 		end
 	end
@@ -313,18 +327,18 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 		local first, last = entries[1], entries[#entries]
 		-- Delete any conflicting entries
 		if first.index <= last_index then
-			logger.warn('raft', self:group_id(), 'clearing log suffix range', first.index, last_index)
+			logger.warn('raft', self:gid_for_log(), 'clearing log suffix range', first.index, last_index)
 			local wal = self.state.wal
 			ok, r = pcall(wal.delete_range, wal, first.index, last_index)
 			if not ok then
-				logger.error('raft', self:group_id(), 'failed to clear log suffix', r)
+				logger.error('raft', self:gid_for_log(), 'failed to clear log suffix', r)
 				return self.state:current_term(), false, last_index
 			end
 		end
 
 		-- 4. Append any new entries not already in the log
 		if not self.state.wal:copy(entries) then
-			logger.error('raft', self:group_id(), 'failed to append logs')
+			logger.error('raft', self:gid_for_log(), 'failed to append logs')
 			return self.state:current_term(), false, last_index
 		end
 	end
@@ -355,7 +369,7 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
-		logger.warn('raft', self:group_id(), 'request_vote', 'receive older term', term, self.state:current_term())
+		logger.warn('raft', self:gid_for_log(), 'request_vote', 'receive older term', term, self.state:current_term())
 		return self.state:current_term(), false
 	end
 	if term > self.state:current_term() then
@@ -364,20 +378,20 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	end
 	-- and candidate’s log is at least as up-to-date as receiver’s log, 
 	if cand_last_log_idx < last_index then
-		logger.warn('raft', self:group_id(), 'request_vote', 'log is not up-to-date', cand_last_log_idx, last_index)
+		logger.warn('raft', self:gid_for_log(), 'request_vote', 'log is not up-to-date', cand_last_log_idx, last_index)
 		return self.state:current_term(), false		
 	end
 	if cand_last_log_term < last_term then
-		logger.warn('raft', self:group_id(), 'request_vote', 'term is not up-to-date', cand_last_log_term, last_term)
+		logger.warn('raft', self:gid_for_log(), 'request_vote', 'term is not up-to-date', cand_last_log_term, last_term)
 		return self.state:current_term(), false		
 	end
 	-- 2. If votedFor is null or candidateId, 
 	if not self.state:vote_for(candidate_id, term) then
-		logger.warn('raft', self:group_id(), 'request_vote', 'already vote', v, candidate_id, term)
+		logger.warn('raft', self:gid_for_log(), 'request_vote', 'already vote', v, candidate_id, term)
 		return self.state:current_term(), false
 	end
 	-- grant vote (§5.2, §5.4)
-	logger.debug('raft', self:group_id(), 'request_vote', 'vote for', candidate_id, term)
+	logger.debug('raft', self:gid_for_log(), 'request_vote', 'vote for', candidate_id, term)
 	return self.state:current_term(), true
 end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
@@ -397,7 +411,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	local ok, rb = pcall(self.snapshot.copy, self.snapshot, fd, last_snapshot_index) 
 	if not ok then
 		self.snapshot:remove_tmp()
-		logger.error("raft", self:group_id(), 'install_snapshot', "Failed to copy snapshot", rb)
+		logger.error("raft", self:gid_for_log(), 'install_snapshot', "Failed to copy snapshot", rb)
 		return
 	end
 	-- Restore snapshot
@@ -408,7 +422,7 @@ function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
 	self.state.wal:compaction(last_snapshot_index)
 	-- reset timeout to prevent election timeout
 	self:reset_timeout()
-	logger.debug("raft", self:group_id(), 'install_snapshot', "Installed remote snapshot")
+	logger.debug("raft", self:gid_for_log(), 'install_snapshot', "Installed remote snapshot")
 	return true
 end
 
@@ -427,73 +441,87 @@ local default_opts = {
 	initial_node = false,
 }
 local function configure_datadir(id, opts)
+	local strid = tostring(ffi.cast('luact_uuid_t *', id))
 	if not opts.datadir then
-		exception.raise('invalid', self:group_id(), 'config', 'options must contain "datadir"')
+		exception.raise('invalid', strid, 'config', 'options must contain "datadir"')
 	end
 	local p = fs.path(opts.datadir, tostring(pulpo.thread_id), "raft")
-	logger.notice('raft datadir', p, 'for group', ('%q'):format(id):sub(1, 16))
+	logger.notice('raft datadir', p, 'for group', strid)
 	return p
 end
 local function configure_serde(opts)
 	return serde[serde.kind[opts.serde]]
 end
-local function create(id, fsm_factory, opts, ...)
-	local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
-	local dir = configure_datadir(id, opts)
-	local sr = configure_serde(opts)
-	-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
-	-- create column_family which name is "id" in database at dir
-	-- TODO : use unified column family for raft stable storage. related data such as hardstate/log key will be prefixed by "id".
-	local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(id))
-	local ss = snapshot.new(dir, sr)
-	local wal = wal.new(fsm:metadata(), store, sr, opts)
-	local rft = setmetatable({
-		id = id,
-		state = state.new(id, fsm, wal, ss, opts), 
-		-- TODO : finalize store when this raft group no more assigned to this node.
-		store = store,
-		opts = opts,
-		alive = true,
-		timeout_limit = 0,
-	}, raft_mt)
-	rft.state.actor_body = rft
-	rft:start()
-	raft_bodymap[id] = rft
-	return rft
-end
--- create new raft state machine
+local raft_manager
 _M.default_opts = default_opts
-_M.create_ev = event.new()
 function _M.new(id, fsm_factory, opts, ...)
-	local rft = raftmap[id]
-	if not rft then
-		if rft == nil then
-			raftmap[id] = false
-			opts = util.merge_table(_M.default_opts, opts or {})
-			rft = luact.supervise(create, opts.supervise_options, id, fsm_factory, opts, ...)
-			raftmap[id] = rft
-			_M.create_ev:emit('create', id, rft)
-		else
-			local create_id
-			while true do
-				create_id, rft = select(3, event.wait(nil, clock.alarm(5.0), _M.create_ev))
-				if not create_id then
-					exception.raise('actor_timeout', 'raft', 'object creation ptimeout', self:group_id())
-				end
-				if id == create_id then
-					break
-				end
-			end
-		end
+	if not raft_bodymap[id] then
+		local ma = _M.manager_actor()
+		opts = util.merge_table(_M.default_opts, opts or {})
+		local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
+		local dir = configure_datadir(id, opts)
+		local sr = configure_serde(opts)
+		-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
+		-- create column_family which name is "id" in database at dir
+		-- TODO : use unified column family for raft stable storage. related data such as hardstate/log key will be prefixed by "id".
+		local store = (require ('luact.cluster.store.'..opts.storage)).new(dir, tostring(id))
+		local ss = snapshot.new(dir, sr)
+		local wal = wal.new(fsm:metadata(), store, sr, opts)
+		local rft = setmetatable({
+			id = id,
+			manager = ma,
+			state = state.new(id, fsm, wal, ss, opts), 
+			-- TODO : finalize store when this raft group no more assigned to this node.
+			store = store,
+			opts = opts,
+			alive = true,
+			timeout_limit = 0,
+		}, raft_mt)
+		rft.state.controller = rft
+		rft:start()
+		raft_bodymap[id] = rft
 	end
-	return rft
+	return raft_manager
 end
-function _M.find(id)
-	return raftmap[id]
+function _M.manager_actor()
+	if not raft_manager then
+		raft_manager = luact.supervise(_M, { 
+			actor = {
+				uuid = actor.system_process_of(
+					nil, luact.thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER
+				)
+			},
+		})
+	end
+	return raft_manager
 end
--- get raft body. internal use only.
-function _M._find_body(id)
+local function find_body(id)
 	return raft_bodymap[id]
+end
+-- id : uuid
+function _M.destroy(id)
+	local rft = find_body(id)
+	if rft then
+		rft:destroy()
+	end
+end
+-- get raft body. internal use only. (id : uuid)
+_M._find_body = find_body
+
+function _M.rpc(kind, id, ...)
+	local rft = raft_bodymap[id]
+	if not rft then
+		exception.raise('raft', 'not_found', id)
+	end
+	if kind == APPEND_ENTRIES then
+		return rft:append_entries(...)
+	elseif kind == REQUEST_VOTE then
+		return rft:request_vote(...)
+	elseif kind == INSTALL_SNAPSHOT then
+		return rft:install_snapshot(...)
+	else
+		exception.raise('raft', 'invalid_rpc', kind)
+	end
 end
 
 return _M

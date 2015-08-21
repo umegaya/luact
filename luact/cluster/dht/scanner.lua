@@ -58,9 +58,9 @@ local function maintain_replica(self, gossiper, opts)
 			end
 		end
 	else
-		-- split range should be processed here
+		--[[ split range should be processed here
 		-- because it copies raft's replica set from original range but no raft replica set exists.
-		if not self:is_replica_synchorinized_with_raft() then -- +1 for leader node
+		if not self:is_replica_synchorinized_with_raft() then
 			local replica_set = self:raft_body():replica_set()
 			logger.info('scanner', 'maintain_replica phase2', self)
 			local n_require = self.replica_available - #replica_set
@@ -91,12 +91,13 @@ local function maintain_replica(self, gossiper, opts)
 				end
 			end
 		end
+		]]--
 	end
 ::add_replica_set::
 	if #replica_added > 0 then
-		local leader = self:raft_body():leader()
+		local rft = self:raft_body()
 		-- this eventually calls range:change_replica_set, which changes this range data.
-		local ok, r = pcall(leader.add_replica_set, leader, replica_added)
+		local ok, r = pcall(rft.add_replica_set, rft, replica_added)
 		if ok then
 			-- broadcast
 			gossiper:broadcast(cmd.gossip.replica_change(self), cmd.GOSSIP_REPLICA_CHANGE)
@@ -134,7 +135,7 @@ function _M.start(rng, range_manager)
 		scanner(maintain_replica, opts.replica_maintain_interval, rng, range_manager),
 		scanner(collect_garbage, opts.collect_garbage_interval, rng, range_manager),
 	}
-	logger.info('scanner start', ('%q'):format(key))
+	logger.info('scanner start', tostring(ffi.cast('luact_uuid_t *', key)))
 end
 
 function _M.stop(rng)

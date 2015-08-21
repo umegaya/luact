@@ -164,7 +164,7 @@ local vid_metatable = {
 		end
 		v.id = t
 		return v
-	end,	
+	end,
 }
 _M.vid_metatable = vid_metatable
 
@@ -191,6 +191,14 @@ function _M.new_root(ctor, ...)
 	end
 	local opts = { uuid = root_actor_id }
 	return _M.new_link_with_opts(nil, opts, ctor, ...)
+end
+function _M.new_system_process(sys_id, ctor, ...)
+	if bodymap[mod_id] then
+		return actormap[bodymap[mod_id]]
+	end
+	local actor_id = uuid.first_with_serial(uuid.node_address, pulpo.thread_id, sys_id)
+	local opts = { uuid = actor_id }
+	return _M.new_link_with_opts(nil, opts, ctor, ...)	
 end
 function _M.new_link(to, ctor, ...)
 	return _M.new_link_with_opts(to, default_opts, ctor, ...)
@@ -237,6 +245,9 @@ end
 function _M.root_of(machine_id, thread_id)
 	assert(thread_id, "thread_id should specified:"..debug.traceback())
 	return uuid.first(machine_id or uuid.node_address, thread_id)
+end
+function _M.system_process_of(machine_id, thread_id, sys_id)
+	return uuid.first_with_serial(machine_id or uuid.node_address, thread_id, sys_id)
 end
 
 local ACTOR_WAIT_RESTART = false

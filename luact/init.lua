@@ -39,6 +39,9 @@ _M.machine_id = false
 
 
 _M.DEFAULT_ROOT_DIR = fs.abspath("tmp", "luact")
+-- system process definition
+_M.SYSTEM_PROCESS_RANGE_MANAGER = 1
+_M.SYSTEM_PROCESS_RAFT_MANAGER = 2
 
 -- command line option definitions
 local opts_defs = {
@@ -194,7 +197,7 @@ function _M.initialize(opts)
 		_M.root = {
 			arbiter = function (group, fsm_factory, opts, ...)
 				return fsm_factory and arbiter_module.new(group, fsm_factory, util.merge_table(arbiter_opts.config, opts or {}), ...)
-					or arbiter_module.find(group)
+					or arbiter_module.manager_actor()
 			end,
 			dhtm = function ()
 				return dht_module.manager_actor()

@@ -7,11 +7,13 @@ local _M = {}
 
 local supervisor_index = {}
 local supervisor_mt = { __index = supervisor_index }
+local default_child_opts = { supervised = true }
 _M.opts = {
 	maxt = 5.0, maxr = 5, -- torelate 5 failure in 5.0 seconds
 	count = 1,
 	always = false, 
 	restart_pause = 0.1,
+	actor = default_child_opts,
 }
 local opts_mt = { __index = _M.opts }
 
@@ -90,10 +92,9 @@ function supervisor_index:restart_child(died_actor_id)
 		self:remove_restarting_id(died_actor_id)
 	end
 end
-local supervise_opts = { supervised = true }
 function supervisor_index:start_children()
 	while #self.children < self.opts.count do
-		local child = actor.new_link_with_opts(actor.of(self), supervise_opts, self.ctor, unpack(self.args))
+		local child = actor.new_link_with_opts(actor.of(self), self.opts.actor, self.ctor, unpack(self.args))
 		if self.opts.sources then
 			for i=1,#self.opts.sources do
 				deploy.set_actor_dependency(child, self.opts.sources[i])
@@ -105,10 +106,20 @@ function supervisor_index:start_children()
 end
 
 local function supervisor(ctor, opts, ...)
+	if not opts then
+		opts = _M.opts
+	elseif opts.actor then
+		for k,v in pairs(default_child_opts) do
+			opts.actor[k] = v
+		end
+		setmetatable(opts, opts_mt)
+	else
+		opts.actor = default_child_opts
+		setmetatable(opts, opts_mt)
+	end
 	local sv = setmetatable({
 		ctor = ctor, args = {...}, alen = select('#', ...),
-		children = {}, restarting = {}, 
-		opts = opts and setmetatable(opts, opts_mt) or _M.opts,
+		children = {}, restarting = {}, opts = opts,
 	}, supervisor_mt)
 	return sv
 end

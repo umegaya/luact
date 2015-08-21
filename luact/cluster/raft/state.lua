@@ -109,11 +109,14 @@ function raft_state_container_index:apply_debug_opts(opts)
 	end
 end
 function raft_state_container_index:group_id()
-	return ('%q'):format(self.id):sub(1, 16)
+	return self.id
+end
+function raft_state_container_index:gid_for_log()
+	return tostring(ffi.cast('luact_uuid_t*', self.id))
 end
 function raft_state_container_index:fin()
 	-- TODO : recycle
-	self.actor_body = nil
+	self.controller = nil
 	self.ev_log:destroy()
 	self.ev_close:destroy()
 	self:stop_replication()
@@ -139,9 +142,9 @@ function raft_state_container_index:write_any_logs(kind, msgid, logs)
 	elseif kind then -- only system logs are able to commit by leader itself (eg. initial add nodes)
 		local start_idx, end_idx = self.wal:write(kind, self.state.current.term, logs, msgid)
 		-- add and commit 
-		self.proposals:dictatorial_add(actor.of(self.actor_body), start_idx, end_idx)
+		self.proposals:dictatorial_add(self.controller, start_idx, end_idx)
 	else
-		exception.raise('invalid', self:group_id(), 'quorum too short', q)
+		exception.raise('invalid', self:gid_for_log(), 'quorum too short', q)
 	end
 end
 function raft_state_container_index:kick_replicator()
@@ -178,7 +181,7 @@ function raft_state_container_index:set_term(term)
 	self.state.current:set_term(term)
 end
 function raft_state_container_index:vote_for_self()
-	self.state.current:force_vote_for(actor.of(self.actor_body))
+	self.state.current:force_vote_for(self.controller.manager)
 	self.wal:write_state(self.state.current)
 end
 function raft_state_container_index:vote_for(v, term)
@@ -194,7 +197,7 @@ function raft_state_container_index:set_leader(leader_id)
 	if leader_id then
 		if not uuid.equals(self.state.leader_id, leader_id) then
 			changed = true
-			if uuid.equals(actor.of(self.actor_body), leader_id) then
+			if uuid.equals(self.controller.manager, leader_id) then
 				change_self = true
 			end
 		end		
@@ -202,7 +205,7 @@ function raft_state_container_index:set_leader(leader_id)
 	else
 		if uuid.valid(self.state.leader_id) then
 			changed = true
-			if uuid.equals(actor.of(self.actor_body), self.state.leader_id) then
+			if uuid.equals(self.controller.manager, self.state.leader_id) then
 				change_self = true
 			end
 		end
@@ -218,19 +221,19 @@ function raft_state_container_index:debug_set_node_kind(k)
 end
 function raft_state_container_index:become_leader()
 	if not self:is_candidate() then
-		exception.raise('raft', self:group_id(), 'invalid state change', 'leader', self.state.node_kind)
+		exception.raise('raft', self:gid_for_log(), 'invalid state change', 'leader', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_LEADER
-	self:set_leader(actor.of(self.actor_body))
+	self:set_leader(self.controller.manager)
 	self:start_replication(true)
 end
 function raft_state_container_index:become_candidate()
 	if self.state.node_kind ~= NODE_FOLLOWER then
-		exception.raise('raft', self:group_id(), 'invalid state change', 'candidate', self.state.node_kind)
+		exception.raise('raft', self:gid_for_log(), 'invalid state change', 'candidate', self.state.node_kind)
 	end
 	self.state.node_kind = NODE_CANDIDATE
 	self:set_leader(nil)
-	self.actor_body:start_election()
+	self.controller:start_election()
 end
 function raft_state_container_index:become_follower()
 	if self:is_leader() then
@@ -257,9 +260,9 @@ function raft_state_container_index:stop_replication()
 	for machine, reps in pairs(self.replicators) do
 		for k,v in pairs(reps) do
 			if not self:is_leader() then
-				logger.error('bug: no-leader node have valid replicator', self:group_id(), machine, k)
+				logger.error('bug: no-leader node have valid replicator', self:gid_for_log(), machine, k)
 			end
-			logger.debug('stop replicator', self:group_id(), machine, k)
+			logger.debug('stop replicator', self:gid_for_log(), machine, k)
 			v:fin()
 			reps[k] = nil
 		end
@@ -278,21 +281,26 @@ function raft_state_container_index:start_replication(activate, replica_set)
 				self.replicators[machine] = m
 			end
 			if not m[thread] then
-				m[thread] = replicator.new(leader_id, id, self, activate)
+				m[thread] = replicator.new(self.controller, id, self, activate)
 				-- in here, replicator only do heartbeat, never involve replication
 				-- until previous replica agrees this operation.
 				-- heartbeat is necessary because in our use case, 
 				-- typically need to prevent newly added node from causing election timeout.
 				if activate then
-					logger.debug('start replicator', self:group_id(), id)
+					logger.debug('start replicator', self:gid_for_log(), id)
 				else
-					logger.debug('add replicator', self:group_id(), id)
+					logger.debug('add replicator', self:gid_for_log(), id)
 				end
 			end
 		end
 	end
 	self:kick_replicator()
 end
+-- init_replica_set set initial replica set by calling add_replica_set with dictatorial mode
+function raft_state_container_index:init_replica_set(rs)
+	self:write_syslog(SYSLOG_ADD_REPLICA_SET, nil, rs)
+end
+
 -- replica_set are list of luact_uuid_t
 function raft_state_container_index:set_replica_transition(on)
 	self.replica_transition = (on and 1 or 0)
@@ -304,7 +312,7 @@ end
 -- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
 -- newly added replicator only starts replication after this operation agreed by previous replica set.
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
-	local self_actor = actor.of(self.actor_body)
+	local self_actor = self.controller.manager
 	if applied then
 		local add_self, changed
 		for i = 1,#replica_set do
@@ -334,7 +342,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 					if m and m[thread] then
 						-- from here, this replicator actually involve replication
 						m[thread]:commit_add()
-						logger.debug('start replicator', self:group_id(), id)
+						logger.debug('start replicator', self:gid_for_log(), id)
 					end
 				end
 			end
@@ -358,7 +366,7 @@ end
 -- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
 -- actual replica set only changed if previous replica set commit this proposal.
 function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
-	local self_actor = actor.of(self.actor_body)
+	local self_actor = self.controller.manager
 	if applied then
 		local remove_self, changed
 		for i = 1,#replica_set do
@@ -385,7 +393,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 			-- 4. stop_replicator emit stop event to target replicator
 			-- 5. target repliactor cancel all coroutines
 		elseif remove_self then
-			self.actor_body:destroy()
+			self.controller:destroy()
 		end
 		if changed then
 			self.fsm:change_replica_set('remove', remove_self, self.state.leader_id, self.replica_set)
@@ -396,7 +404,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 		end
 		for i = 1,#replica_set do
 			if uuid.equals(replica_set[i], self_actor) then
-				logger.warn('get a grip!! you are leader and try to remove yourself!!', self:group_id())
+				logger.warn('get a grip!! you are leader and try to remove yourself!!', self:gid_for_log())
 				table.remove(replica_set, i)
 				break
 			end
@@ -419,7 +427,7 @@ function raft_state_container_index:request_routing_id(timeout)
 		timeout = timeout - (clock.get() - start)
 		goto RETRY
 	end
-	exception.raise('runtime', self:group_id(), 'raft state', "no leader but don't know who is leader")
+	exception.raise('runtime', self:gid_for_log(), 'raft state', "no leader but don't know who is leader")
 end
 function raft_state_container_index:leader()
 	return self.state.leader_id
@@ -448,12 +456,12 @@ end
 function raft_state_container_index:snapshot_if_needed()
 	if (self.state.last_applied_idx - self.snapshot:last_index()) >= self.opts.logsize_snapshot_threshold then
 		-- print('if_needed', self.state.last_applied_idx, self.snapshot:last_index(), self.opts.logsize_snapshot_threshold)
-		logger.debug('snapshot', self:group_id(), self.state.last_applied_idx)
+		logger.debug('snapshot', self:gid_for_log(), self.state.last_applied_idx)
 		self:write_snapshot()
 	end
 end
 function raft_state_container_index:has_enough_nodes_for_election()
-	logger.warn('initial_node', self.opts.initial_node)
+	-- logger.warn('initial_node', self.opts.initial_node)
 	if self.opts.initial_node then
 		return true
 	end
@@ -462,13 +470,13 @@ end
 -- after replication to majority success, apply called
 function raft_state_container_index:committed(log_idx)
 	if (self:last_commit_index() > 0) and (log_idx - self:last_commit_index()) ~= 1 then
-		logger.warn('raft', self:group_id(), 'commit log idx leap (may be previous leader stale)', self:last_commit_index(), log_idx)
+		logger.warn('raft', self:gid_for_log(), 'commit log idx leap (may be previous leader stale)', self:last_commit_index(), log_idx)
 	end
 	self:set_last_commit_index(log_idx)
 end
 function raft_state_container_index:applied(log_idx)
 	if (self.state.last_applied_idx > 0) and (log_idx - self.state.last_applied_idx) ~= 1 then
-		exception.raise('fatal', self:group_id(), 'invalid committed log idx', log_idx, self.state.last_applied_idx)
+		exception.raise('fatal', self:gid_for_log(), 'invalid committed log idx', log_idx, self.state.last_applied_idx)
 	end	
 	self.state.last_applied_idx = log_idx
 	self:snapshot_if_needed()
@@ -493,12 +501,12 @@ function raft_state_container_index:apply(log)
 	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
 		return self:do_apply(log, self.remove_replica_set, self, nil, log.log, true)
 	else
-		logger.warn('invalid raft system log committed', self:group_id(), log.kind)
+		logger.warn('invalid raft system log committed', self:gid_for_log(), log.kind)
 	end
 end
 function raft_state_container_index:restore()
 	if not self.wal:can_restore() then
-		logger.warn('persistent data is not for current fsm', self:group_id())
+		logger.warn('persistent data is not for current fsm', self:gid_for_log())
 		self.wal:create_metadata_entry()
 		return 
 	end
@@ -564,7 +572,7 @@ function raft_state_container_index:append_param_for(replicator)
 		-- TODO : this actually happens because quorum of this index is already satisfied, 
 		-- log may be compacted already. compaction margin make some help, but not perfect.
 		if not log then
-			return false, exception.new('raft', self:group_id(), 'invalid', 'next_index', replicator.next_idx)
+			return false, exception.new('raft', self:gid_for_log(), 'invalid', 'next_index', replicator.next_idx)
 		end
 		prev_log_idx = log.index
 		prev_log_term = log.term
