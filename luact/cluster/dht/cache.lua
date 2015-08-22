@@ -20,10 +20,6 @@ typedef struct luact_dht_ts_cache_entry {
 local range_cache_mt = {}
 range_cache_mt.__index = range_cache_mt
 function range_cache_mt:find(k, kl)
-	if not k then
-		logger.error('invalid key:', k)
-		os.exit(-1)
-	end
 	kl = kl or #k
 	for i=1,#self do
 		-- logger.info('cache search', self[i].start_key, self[i]:contains(k, kl))
@@ -39,13 +35,17 @@ function range_cache_mt:sort()
 	end)
 end
 function range_cache_mt:add(r)
-	local tmp = self:find(r:cachekey())
-	if not tmp then
-		table.insert(self, r)
-		self:sort()
-		return r
+	local k, kl = r:cachekey()
+	for i=1,#self do
+		-- logger.info('cache search', self[i].start_key, self[i]:contains(k, kl))
+		if self[i]:contains(k, kl) then
+			self[i] = r
+			return r
+		end
 	end
-	return tmp
+	table.insert(self, r)
+	self:sort()
+	return r
 end
 function range_cache_mt:remove(r)
 	local k, kl = r:cachekey()

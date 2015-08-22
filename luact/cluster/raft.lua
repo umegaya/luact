@@ -74,9 +74,12 @@ end
 function raft_index:check_election_timeout()
 	return clock.get() >= self.timeout_limit
 end
-function raft_index:reset_timeout()
-	local dur = util.random_duration(self.opts.election_timeout_sec)
+function raft_index:reset_timeout(dur)
+	dur = dur or util.random_duration(self.opts.election_timeout_sec)
 	self.timeout_limit = clock.get() + dur
+end
+function raft_index:reset_stepdown_timeout()
+	self:reset_timeout(math.max(5, self.opts.election_timeout_sec * 5))
 end
 function raft_index:tick()
 	if self.state:is_follower() then
@@ -237,6 +240,16 @@ function raft_index:add_replica_set(replica_set, timeout)
 end
 function raft_index:remove_replica_set(replica_set, timeout)
 	if not self.alive then exception.raise('raft_invalid') end
+	if self.state:is_leader() then
+		for i=1,#replica_set do
+			if uuid.equals(replica_set[i], self.state:leader()) then
+				logger.warn('leader try to remove itself, stepdown first', self.state:leader())
+				self:stepdown()
+				logger.warn('finish to stepdown now leader:', self.state:leader())
+				break
+			end
+		end
+	end
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
 	if l then return l.rpc(INTERNAL_REMOVE_REPLICA_SET, self.id, replica_set, timeout) end
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
@@ -281,9 +294,13 @@ end
 function raft_index:probe(prober, ...)
 	return pcall(prober, self, ...)
 end
-function raft_index:stepdown()
+function raft_index:stepdown(timeout)
+	if not self.alive then exception.raise('raft_invalid') end
+	timeout = timeout or self.opts.proposal_timeout_sec
+	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	assert(self.state:is_leader(), "invalid node try to stepdown")
-	return self.state:become_follower()
+	self.state:become_follower(msgid)
+	return self:make_response(tentacle.yield(msgid))
 end
 --[[--
 from https://ramcloud.stanford.edu/raft.pdf
@@ -303,7 +320,6 @@ function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx
 	local ok, r
 	local last_index, last_term = self.state.wal:last_index_and_term()
 	if added_idx then
-		logger.info('added_idx', added_idx)
 		self.state:set_added_index(added_idx)
 	end
 	if term < self.state:current_term() then

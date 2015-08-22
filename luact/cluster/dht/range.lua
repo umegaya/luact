@@ -65,7 +65,7 @@ ffi.cdef [[
 typedef struct luact_dht_range {
 	luact_dht_key_t start_key;
 	luact_dht_key_t end_key;
-	uint8_t n_replica, kind, replica_available, padd;
+	uint8_t n_replica, kind, replica_available, size;
 	luact_mvcc_stats_t stats;
 	luact_uuid_t id;				//range's id
 	luact_uuid_t replicas[0];		//range_managers' uuid
@@ -89,19 +89,20 @@ end
 -- range
 local range_mt = {}
 range_mt.__index = range_mt
-function range_mt.size(n_replica)
-	return ffi.sizeof('luact_dht_range_t') + (n_replica * ffi.sizeof('luact_uuid_t'))
+function range_mt.size(size)
+	return ffi.sizeof('luact_dht_range_t') + (size * ffi.sizeof('luact_uuid_t'))
 end
-function range_mt.n_replica_from_size(size)
+function range_mt.size_from_bytes(size)
 	return math.ceil((size - ffi.sizeof('luact_dht_range_t')) / ffi.sizeof('luact_uuid_t'))
 end
-function range_mt.alloc(n_replica)
-	local p = ffi.cast('luact_dht_range_t*', memory.alloc(range_mt.size(n_replica)))
-	p.n_replica = n_replica
+function range_mt.alloc(size, n_replica)
+	local p = ffi.cast('luact_dht_range_t*', memory.alloc(range_mt.size(size)))
+	p.size = size
+	p.n_replica = n_replica or size
 	p.replica_available = 0
 	return p
 end
-function range_mt:init(start_key, end_key, kind, replicas)
+function range_mt:init(start_key, end_key, kind, replicas, n_replica)
 	self.start_key = start_key
 	self.end_key = end_key
 	self.id = uuid.new()
@@ -111,11 +112,12 @@ function range_mt:init(start_key, end_key, kind, replicas)
 	if not replicas then
 		uuid.invalidate(self.replicas[0])
 	else
+		assert(n_replica <= self.size)
 		ffi.copy(self.replicas, replicas, self.n_replica * ffi.sizeof(self.replicas[0]))
 	end
 end
 function range_mt:__len()
-	return range_mt.size(self.n_replica)
+	return range_mt.size(self.size)
 end
 function range_mt:__tostring()
 	local s = 'range('..tonumber(self.kind)..'/'..tostring(self.id)..')['..self.start_key:as_digest().."]..["..self.end_key:as_digest().."]"
@@ -182,12 +184,16 @@ function range_mt:start_raft_group(bootstrap)
 end
 -- compute_raft_replicas computes raft replica set which will be created by these range replicas
 -- its just compute replica set, not initialize reft itself.
-function range_mt:computed_raft_replicas()
+function range_mt:raft_replica_from_actor_id(id)
+	local m, t = uuid.machine_id(id), uuid.thread_id(id)
+	return actor.system_process_of(m, t, luact.SYSTEM_PROCESS_RAFT_MANAGER)
+end
+function range_mt:computed_raft_replicas(rs)
 	local r = {}
 	for i=0,self.replica_available-1 do
-		local m, t = uuid.machine_id(r[i]), uuid.thread_id(r[i])
-		if (luact.machine_id ~= m) or (luact.thread_id ~= t) then
-			table.insert(r, actor.system_process_of(m, t, luact.SYSTEM_PROCESS_RAFT_MANAGER))
+		local rep = self.replicas[i]
+		if not uuid.owner_of(rep) then
+			table.insert(r, self:raft_replica_from_actor_id(rep))
 		end
 	end
 	return r
@@ -349,7 +355,7 @@ function range_mt:make_split_ranges(a, al)
 		exception.raise('invalid', 'split key out of range', ('%q'):format(ffi.string(a, al)), self)
 	end
 end
-function range_mt:split(at, timeout)
+function range_mt:split(at)
 	local spk, spkl
 	if at then
 		spk, spkl = at, #at
@@ -375,9 +381,74 @@ function range_mt:split(at, timeout)
 	end, update, new)
 	return update, new
 end
-function range_mt:move_to(machine_id, thread_id)
-	local a = actor.root_of(machine_id, thread_id)
 
+local ADD_REPLICA = 1
+local REMOVE_REPLICA = 2
+function range_mt:make_ranges_with_new_replica_set(op, replica_set)
+	local updated
+	if op == ADD_REPLICA then
+		updated = range_mt.alloc(self.n_replica + #replica_set)
+		updated:init(self.start_key, self.end_key, self.kind, self.replicas, self.n_replica)
+		for i=1,#replica_set do
+			updated.replicas[self.n_replica + i - 1] = replica_set[i]
+		end
+	elseif op == REMOVE_REPLICA then
+		updated = range_mt.alloc(self.n_replica, 0)
+		updated:init(self.start_key, self.end_key, self.kind)
+		for i=0, self.replica_available do
+			for j=1,#replica_set do
+				local found 
+				if uuid.equals(self.replica_available[i], replica_set[j]) then
+					found = true
+					break
+				end
+			end
+			if not found then
+				updated.replicas[updated.n_replica] = self.replica_available[i]
+				updated.n_replica = updated.n_replica + 1
+			end
+		end
+	end
+	return updated
+end
+function range_mt:add_replica_set(replica_set)
+	local update = self:make_ranges_with_new_replica_set(ADD_REPLICA, replica_set)
+	local ok, r = txncoord.run_txn({
+		on_commit = function (txn, ur, rs)
+			return cmd.change_replicas(ur.kind, ur, range_manager.clock:issue(), txn)
+		end,
+	}, function (txn, ur, rs)
+		-- Create range descriptor for second half of split.
+		-- Note that this put must go first in order to locate the
+		-- transaction record on the correct range.
+		ur:update_address(txn)
+		local rft = ur:raft_body()
+		rft:add_replica_set(rs)
+	end, update, replica_set)
+	return update
+end
+function range_mt:remove_replica_set(replica_set)
+	local update = self:make_ranges_with_new_replica_set(REMOVE_REPLICA, replica_set) -- false for 'remove' replicas
+	local ok, r = txncoord.run_txn({
+		on_commit = function (txn, ur, rs)
+			return cmd.change_replicas(ur.kind, ur, range_manager.clock:issue(), txn)
+		end,
+	}, function (txn, ur, rs)
+		-- Create range descriptor for second half of split.
+		-- Note that this put must go first in order to locate the
+		-- transaction record on the correct range.
+		ur:update_address(txn)
+		local rft = ur:raft_body()
+		rft:remove_replica_set(rs)
+	end, update, replica_set)
+	return update
+end
+function range_mt:move_to(machine_id, thread_id)
+	local from, to = 
+		actor.system_process_of(nil, luact.thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER)
+		actor.system_process_of(machine_id, thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER)
+	self:add_replica_set({to})
+	self:remove_replica_set({from})
 end
 -- actual processing on replica node of range
 function range_mt:exec_get(storage, k, kl, ts, txn, consistent)
@@ -599,15 +670,26 @@ function range_mt:exec_split(storage, update_range, new_range, txn, ts)
 	updated.end_key:init(update_range.end_key:as_slice())
 	updated:compute_stats()
 	-- update new range's ts_cache. it should be same as split source's, without initializing raft group
-	local created = range_manager:new_range(new_range.start_key, new_range.end_key, new_range.kind, new_range.replicas)
+	local created = range_manager:new_range(new_range.start_key, new_range.end_key, new_range.kind, new_range.replicas, new_range.n_replica)
 	created:ts_cache():merge(updated:ts_cache(), true)
-	range_manager:cache_range(created) -- add to cache.
+	range_manager:add_cache_range(created) -- add to cache.
 	created:compute_stats()
 	-- here, all range related setup is done, then start raft group.
 	-- luajit VM is single threaded, so any request to *created* never be received after here.
 	created:start_raft_group()
 	-- notify split via gossip
-	range_manager.gossiper:notify_broadcast(cmd.gossip.replica_change(self, self.end_key), cmd.GOSSIP_RANGE_SPLIT)
+	range_manager.gossiper:notify_broadcast(cmd.gossip.range_split(self, self.end_key), cmd.GOSSIP_RANGE_SPLIT)
+end
+function range_mt:exec_change_replica(storage, update_range, txn, ts)
+	local k, kl = update_range:cachekey()
+	local prev = range_manager:find_range(k, kl, update_range.kind)
+	assert(update_range:raft_body().fsm == prev)
+	local updated = update_range:clone()
+	range_manager:add_owned_range(updated)
+	updated:raft_body().fsm = updated -- replace fsm of raft
+	memory.free(prev)
+	-- notify replica change via gossip
+	range_manager.gossiper:notify_broadcast(cmd.gossip.replica_change(self), cmd.GOSSIP_REPLICA_CHANGE)
 end
 function range_mt:partition()
 	return range_manager.partitions[self.kind]
@@ -615,9 +697,21 @@ end
 function range_mt:start_scan()
 	-- become new leader of this range
 	scanner.start(self, range_manager)
+	if self:is_root_range() then
+		if self ~= range_manager.root_range then
+			exception.raise('fatal', 'invalid status', self, range_manager.root_range)
+		end
+		range_manager:start_root_range_gossiper()
+	end
 end
 function range_mt:stop_scan()
 	scanner.stop(self)
+	if self:is_root_range() then
+		if self ~= range_manager.root_range then
+			exception.raise('fatal', 'invalid status', self, range_manager.root_range)
+		end
+		range_manager:stop_root_range_gossiper()
+	end
 end
 function range_mt:on_write_replica_finished()
 	-- split if necessary
@@ -714,21 +808,9 @@ function range_mt:change_replica_set(type, self_affected, leader, replica_set)
 	if (not prev_leader) and current_leader then
 		-- become new leader of this range
 		self:start_scan()
-		if self:is_root_range() then
-			if self ~= range_manager.root_range then
-				exception.raise('fatal', 'invalid status', self, range_manager.root_range)
-			end
-			range_manager:start_root_range_gossiper()
-		end
 	elseif prev_leader and (not current_leader) then
 		-- step down leader of this range
 		self:stop_scan()
-		if self:is_root_range() then
-			if self ~= range_manager.root_range then
-				exception.raise('fatal', 'invalid status', self, range_manager.root_range)
-			end
-			range_manager:stop_root_range_gossiper()
-		end
 	end
 	self:emit_if_synchronized_with_raft()
 	logger.info('change_replica_set', 'range become', self)
@@ -749,15 +831,15 @@ end
 serde_common.register_ctype('struct', 'luact_dht_range', {
 	msgpack = {
 		packer = function (pack_procs, buf, ctype_id, obj, length)
-			local used = range_mt.size(obj.n_replica)
+			local used = range_mt.size(obj.size)
 			local p, ofs = pack_procs.pack_ext_cdata_header(buf, used, ctype_id)
 			buf:reserve(used)
 			ffi.copy(p + ofs, obj, used)
 			return ofs + used
 		end,
 		unpacker = function (rb, len)
-			local n_replica = range_mt.n_replica_from_size(len)
-			local ptr = range_mt.alloc(n_replica)
+			local size = range_mt.size_from_bytes(len)
+			local ptr = range_mt.alloc(size)
 			ffi.copy(ptr, rb:curr_byte_p(), len)
 			rb:seek_from_curr(len)
 			return ptr
@@ -795,7 +877,7 @@ function range_manager_mt:bootstrap(nodelist)
 	if not nodelist then
 		-- create root range. 
 		self.root_range = self:new_range(_M.META1_MIN_KEY, _M.META1_MAX_KEY, _M.KIND_META1)
-		-- because of check in range:change_replica_set, first we need to initialize root_range before start_raft_group of it.
+		-- because of check in range:change_replica_set, first we need to initialize root_range before starts_raft_group of it.
 		self.root_range:start_raft_group(true)
 		-- put initial meta2 storage into root_range (with writing raft log)
 		local meta2 = self:new_range(_M.META2_MIN_KEY, _M.META2_MAX_KEY, _M.KIND_META2)
@@ -862,11 +944,11 @@ function range_manager_mt:shutdown_kind(kind, truncate)
 	self:destroy_partition(kind, truncate)
 end
 -- create new range
-function range_manager_mt:new_range(start_key, end_key, kind, replica_set, dont_start_raft)
-	local r = range_mt.alloc(_M.NUM_REPLICA)
-	r:init(start_key, end_key, kind, replica_set)
+function range_manager_mt:new_range(start_key, end_key, kind, replica_set, n_replica)
+	local r = range_mt.alloc(n_replica and math.max(n_replica, _M.NUM_REPLICA) or _M.NUM_REPLICA)
+	r:init(start_key, end_key, kind, replica_set, n_replica)
 	self:add_owned_range(r)
-	self:cache_range(r)
+	self:add_cache_range(r)
 	return r
 end
 function range_manager_mt:destroy_range(rng)
@@ -902,7 +984,7 @@ function range_manager_mt:create_fsm_for_arbiter(rng)
 		r = rng:clone() -- rng is from packet, so volatile
 		self:new_partition(rng.kind)
 		self:add_owned_range(r)
-		self:cache_range(r)
+		self:add_cache_range(r)
 	end
 	return r
 end
@@ -913,7 +995,7 @@ function range_manager_mt:add_owned_range(rng)
 		self.ts_caches[k] = cache.new_ts(self)
 	end
 end
-function range_manager_mt:cache_range(rng)
+function range_manager_mt:add_cache_range(rng)
 	if rng.kind > _M.KIND_META1 then
 		self.caches[rng.kind]:add(rng)
 	end
@@ -974,7 +1056,7 @@ function range_manager_mt:find(kind, k, kl, wtxn)
 		if type(r) == 'table' then
 			-- cache all fetched range
 			for i=1,#r do
-				self:cache_range(r[i])
+				self:add_cache_range(r[i])
 			end
 			-- first one is our target.
 			r = r[1]
@@ -1052,10 +1134,14 @@ function range_manager_mt:process_user_event(subkind, p, len)
 		local ptr, len = p.key:as_slice()
 		local r = self:find_range_from_cache(ptr, len, p.kind) 
 		if r then
-			if p.n_replica > r.n_replica then
-				exception.raise('fatal', 'invalid replica set size', p.n_replica, r.n_replica)
+			if p.n_replica > r.size then
+				local new = range_mt.alloc(p.n_replica)
+				new:init(r.start_key, r.end_key, r.kind, p.replicas, p.n_replica)
+				self:add_cache_range(new) -- update cache
+				memory.free(r)
+			else
+				ffi.copy(r.replicas, p.replicas, ffi.sizeof('luact_uuid_t') * p.n_replica)
 			end
-			ffi.copy(r.replicas, p.replicas, ffi.sizeof('luact_uuid_t') * p.n_replica)
 			r.replica_available = p.n_replica
 			logger.info('replica change', r)
 		end
@@ -1069,11 +1155,11 @@ function range_manager_mt:process_user_event(subkind, p, len)
 	elseif subkind == cmd.GOSSIP_ROOT_RANGE then
 		p = ffi.cast('luact_dht_range_t*', p)
 		if not self.root_range then
-			local r = range_mt.alloc(p.n_replica)
-			ffi.copy(r, p, range_mt.size(p.n_replica))
+			local r = range_mt.alloc(p.size)
+			ffi.copy(r, p, range_mt.size(p.size))
 			self.root_range = r
 		else
-			ffi.copy(self.root_range, p, range_mt.size(p.n_replica))
+			ffi.copy(self.root_range, p, range_mt.size(p.size))
 		end
 		logger.notice('received root range', self.root_range)
 	else

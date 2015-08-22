@@ -2,6 +2,7 @@ local ffi = require 'ffiex.init'
 local actor = require 'luact.actor'
 local uuid = require 'luact.uuid'
 local pbuf = require 'luact.pbuf'
+local router = require 'luact.router'
 local clock = require 'luact.clock'
 local proposal = require 'luact.cluster.raft.proposal'
 local replicator = require 'luact.cluster.raft.replicator'
@@ -45,6 +46,7 @@ typedef struct luact_raft_state {
 									// used for preventing newly added raft object from removing itself by old (already processed) log.
 	luact_uuid_t vote;				// voted raft actor id (not valid, not voted yet)
 	luact_uuid_t leader_id; 		// raft actor id of leader
+	uint32_t stepdown_msgid;		// if ~= 0 means this node try to stepdown from raft leader
 	uint8_t node_kind, padd[3];		// node type (follower/candidate/leader)
 } luact_raft_state_t;
 ]]
@@ -220,6 +222,12 @@ function raft_state_container_index:set_leader(leader_id)
 		uuid.invalidate(self.state.leader_id)
 	end
 	if changed then
+		if self.state.stepdown_msgid ~= 0 and uuid.valid(self.state.leader_id) and 
+			(not uuid.equals(self.state.leader_id, self.controller.manager)) then
+			local msgid = tonumber(self.state.stepdown_msgid)
+			self.state.stepdown_msgid = 0
+			router.respond_by_msgid(msgid, true, true)
+		end
 		self.fsm:change_replica_set('change_leader', change_self, self.state.leader_id, self.replica_set)
 	end
 end
@@ -243,9 +251,13 @@ function raft_state_container_index:become_candidate()
 	self:set_leader(nil)
 	self.controller:start_election()
 end
-function raft_state_container_index:become_follower()
+function raft_state_container_index:become_follower(stepdown_msgid)
 	if self:is_leader() then
 		self:stop_replication()
+		if stepdown_msgid then
+			self.state.stepdown_msgid = stepdown_msgid
+			self.controller:reset_stepdown_timeout()
+		end
 	end
 	self.state.node_kind = NODE_FOLLOWER
 	self:set_leader(nil)

@@ -25,6 +25,7 @@ tools.start_luact(5, nil, function ()
 		luact.root.arbiter('test_group', tools.new_fsm, {
 			replica_set = raft_manager_actors,
 		}, luact.thread_id)
+		p:wait(1)
 		clock.sleep(3)
 		local arbiter = raft._find_body('test_group')
 		local found
@@ -38,7 +39,7 @@ tools.start_luact(5, nil, function ()
 		assert(not raft._find_body('test_group'))
 	end
 	logger.info('success')
-	p:wait(1)
+	p:wait(2)
 end)
 
 return true

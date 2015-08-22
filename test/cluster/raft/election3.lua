@@ -14,7 +14,7 @@ tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 		thread_id_leader_map[thread_id] = leader_id
 	end
 	if thread_id == 1 then
-		arbiter:stepdown()
+		arbiter:become_follower()
 		clock.sleep(3)
 		local count, leader_id = 0, nil
 		for k,v in pairs(thread_id_leader_map) do
