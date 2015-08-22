@@ -116,6 +116,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 		}, 
 	}, function (p)
 		local luact = require 'luact.init'
+		local raft = require 'luact.cluster.raft'
 		local ffi = require 'ffiex.init'
 		local pulpo = require 'pulpo.init'
 		local util = require 'pulpo.util'
@@ -129,35 +130,37 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local ptr = ffi.cast('luact_thread_payload_t*', p)
 			local leader_thread_id = ptr[2]:decode()
 			local n_core = ptr[3]:decode()
-			local arb, rs
+			local arb, rft, rs
 			if pulpo.thread_id == leader_thread_id then
 				local factory = ptr[0]:decode()
 				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, { initial_node = true }, pulpo.thread_id)
 				logger.info('arb1', arb)
 				clock.sleep(2.5) -- wait for this thread become raft leader (max election timeout (2.0) + margin (0.5))
-				assert(uuid.equals(arb, arb:leader()), "this is only raft object to bootstrap, so should be leader")
+				rft = raft._find_body('test_group')
+				assert(uuid.equals(arb, rft:leader()), "this is only raft object to bootstrap, so should be leader")
 				rs = {}
 				for i=1,n_core do
 					local replica = actor.root_of(nil, i).arbiter('test_group', factory, nil, i)
 					assert(replica, "arbiter should be created")
 					table.insert(rs, replica)
 				end
-				arb:add_replica_set(rs)
+				rft:add_replica_set(rs)
 			else
-				while not arb do
+				while not (rft and arb) do
 					clock.sleep(0.1)
 					arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
+					rft = raft._find_body('test_group')
 				end
 				logger.info('arb2', arb)
 				 -- wait for replica_set is replicated.
-				rs = arb:replica_set()
+				rs = rft:replica_set()
 				while #rs < n_core do
 					clock.sleep(0.1)
-					rs = arb:replica_set()
+					rs = rft:replica_set()
 				end
 			end
-			arb:probe(function (rft)
-				assert(rft.state:has_enough_nodes_for_election(), "all nodes should be election-ready")
+			rft:probe(function (r)
+				assert(r.state:has_enough_nodes_for_election(), "all nodes should be election-ready")
 			end)
 			local found
 			for i=1,n_core do
@@ -168,7 +171,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			end
 			assert(found, "each thread's uuid should be included in replica set:"..tostring(arb))
 			local fn = ffi.cast('luact_thread_payload_t*', p)[1]:decode()
-			fn(arb, pulpo.thread_id)
+			fn(rft, pulpo.thread_id)
 		end, function (e)
 			logger.fatal(e, debug.traceback())
 			os.exit(-2)
@@ -350,7 +353,7 @@ function _M.new_fsm(thread_id)
 			change_replica_set = function (self, type, self_affected, replica_set)
 			end,
 			apply = function (self, data)
-			logger.warn('apply', data[1], data[2])
+			-- logger.warn('apply', data[1], data[2])
 				self[ data[1] ] = data[2]
 			end,
 			attach = function (self)

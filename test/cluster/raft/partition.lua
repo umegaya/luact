@@ -69,18 +69,16 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 	local arb, l
 	local ok, r
 	local evs = {}
+	local rm = actor.root_of(nil, luact.thread_id).arbiter('test_group')
 	if is_group1(thread_id) then
-		for _,tid in ipairs(group1) do
-			arb = actor.root_of(nil, tid).arbiter('test_group')
-			l = arb:leader()
-			assert(uuid.equals(initial_leader, l), "group1: leader should not change:"..tostring(initial_leader).."|"..tostring(l))			
-		end
+		l = arbiter:leader()
+		assert(uuid.equals(initial_leader, l), "group1: leader should not change:"..tostring(initial_leader).."|"..tostring(l))			
 		-- confirm any operation end in failure
 		ok, r = pcall(arbiter.propose, arbiter, {{'hoge', 'fuga'}}, 1)
 		assert((not ok) and r:is('actor_timeout'), "propose should fail because of not enough quorum")
-		ok, r = pcall(arbiter.add_replica_set, arbiter, {arbiter}, 1)
+		ok, r = pcall(arbiter.add_replica_set, arbiter, {rm}, 1)
 		assert(not ok and r:is('actor_timeout'), "add_replica_set should fail because of not enough quorum")
-		ok, r = pcall(arbiter.remove_replica_set, arbiter, {arbiter}, 1)
+		ok, r = pcall(arbiter.remove_replica_set, arbiter, {rm}, 1)
 		assert(not ok and r:is('actor_timeout'), "remove_replica_set should fail because of not enough quorum")
 	else
 		local cnt = 0

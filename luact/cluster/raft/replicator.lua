@@ -18,8 +18,8 @@ local _M = {}
 
 ffi.cdef[[
 typedef struct luact_raft_replicator {
-	uint64_t next_idx, match_idx;
-	uint8_t alive, failures, added, padd;
+	uint64_t next_idx, match_idx, added_idx;
+	uint8_t failures, added, padd[2];
 	double last_access, heartbeat_span_sec;
 } luact_raft_replicator_t;
 ]]
@@ -32,43 +32,48 @@ local cache = {}
 function replicator_index:init(state)
 	self.next_idx = state:last_index() + 1
 	self.match_idx = 0
-	self.added = 0
-	self.alive = 1
 	self.heartbeat_span_sec = state.opts.heartbeat_timeout_sec
 end
 function replicator_index:fin()
-	self.alive = 0
+	self:stop_append()
 	table.insert(cache, self)
 end
-function replicator_index:commit_add()
+function replicator_index:start_append(added_idx)
 	self.added = 1
+	self.added_idx = added_idx
+end
+function replicator_index:stop_append()
+	self.added = 0
+	self.added_idx = 0
 end
 function replicator_index:start(controller, actor, state, activate)
 	self:init(state)
-	if activate then self:commit_add() end
+	if activate then self:start_append(state:last_applied_index()) end
 	local hbev = tentacle(self.run_heartbeat, self, actor, state)
 	local runev = tentacle(self.run, self, controller, actor, state, hbev)
 	state:kick_replicator()
 	return runev
 end
 local function err_handler(e)
-	if type(e) == 'table' then
+	--[[if type(e) == 'table' then
 		logger.report('raft', 'replicate', e)
 	else
 		logger.error('raft', 'replicate', tostring(e))
-	end
+	end]]
 	return e
 end
 function replicator_index:run_replication(t)
 	t.running = true
 	local ok, r = xpcall(self.replicate, err_handler, self, t.controller, t.actor, t.state)
 	if not ok then
-		logger.report('error is:', t.actor, r)
+		logger.report('replicate error', t.actor, r)
 	end
-	if (not ok) and r:is('actor_no_body') then
+	t.rep_thread = nil -- this thread will be stop without canceling.
+	if (not ok) and r:is('raft_not_found') then
+		-- we can remove this replicator, because raft_not_found only returns when raft object will removed by destination node, 
+		-- that means destination node process remove_replica_set log correctly.
 		t.controller:stop_replicator(t.actor)
 	end
-	t.rep_thread = nil
 	t.running = false
 end
 function replicator_index:run(controller, actor, state, hbev)
@@ -93,13 +98,13 @@ function replicator_index:run(controller, actor, state, hbev)
 				if (not obj) or (obj == self) then
 					if t.rep_thread then
 						logger.warn(state:gid_for_log(), 'stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
-						tentacle.cancel(t.rep_thread)
+						pcall(tentacle.cancel, t.rep_thread)
 					end
 					if t.hb_thread then
 						logger.warn(state:gid_for_log(), 'stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
-						tentacle.cancel(t.hb_thread)
+						pcall(tentacle.cancel, t.hb_thread)
 					end
-					return true
+					t.self:stop_append()
 				end
 			end
 		end,
@@ -135,18 +140,22 @@ function replicator_index:failure_cooldown(n_failure)
 	clock.sleep(0.5 * n_failure)
 end
 function replicator_index:replicate(controller, actor, state)
-	logger.report('replicate start', state:gid_for_log(), actor)
+	logger.report('replicate start', state:gid_for_log(), actor, self.added_idx)
 	-- arguments
 	local current_term, leader, 
 		prev_log_idx, prev_log_term, 
 		entries, leader_commit_idx
 	-- response
 	local ev
+	local added_idx 
 	local term, success, last_index
 ::START::
 	if self.added == 0 then
 		logger.debug(state:gid_for_log(), 'replicaiton to ', actor, 'has not committed yet')
 		return
+	elseif self.added_idx ~= 0 then
+		added_idx = self.added_idx
+		self.added_idx = 0
 	end
 	if self.failures > 0 then
 		self:failure_cooldown(self.failures)
@@ -160,7 +169,7 @@ function replicator_index:replicate(controller, actor, state)
 		logger.notice('sync')
 		goto SYNC
 	end
-	logger.notice(state:gid_for_log(), 'replicate', prev_log_idx, 'to', actor)
+	logger.notice(state:gid_for_log(), 'replicate', prev_log_idx, 'to', actor, added_idx)
 
 	-- call AppendEntries RPC 
 	-- TODO : how long timeout should be?
@@ -179,7 +188,7 @@ function replicator_index:replicate(controller, actor, state)
 									state:group_id(),
 									current_term, leader, leader_commit_idx, 
 									prev_log_idx, prev_log_term, 
-									entries)
+									entries, added_idx)
 -- print(term, success, last_index)
 	-- term is updated, step down leader
 	if term > current_term then

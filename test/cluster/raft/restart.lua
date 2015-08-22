@@ -4,6 +4,7 @@ local tools = require 'test.tools.cluster'
 tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 	local tools = require 'test.tools.cluster'
 	local clock = require 'luact.clock'
+	local raft = require 'luact.cluster.raft'
 	local uuid = require 'luact.uuid'
 	local actor = require 'luact.actor'
 	local event = require 'pulpo.event'
@@ -21,7 +22,7 @@ tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 	if thread_id == 4 then
 		-- arbiter is died, so any action to it fails
 		local ok, r = pcall(arbiter.propose, arbiter, {{'fuga', 'hoge'}})
-		assert((not ok) and r:is('actor_no_body'), "raft object in removed node should die")
+		assert((not ok) and r:is('raft_invalid'), "raft object in removed node should die:"..tostring(r))
 	else
 		-- each thread write enough number of record which causes snapshotting
 		-- and wait for completion
@@ -43,8 +44,8 @@ tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 	if thread_id == 4 then
 		-- wait replication to thread 4 finished
 		clock.sleep(1.0)
-		arbiter = actor.root_of(nil, 4).arbiter('test_group')
-		assert(arbiter and uuid.valid(arbiter), "thread 4's arbiter should be recovered")
+		arbiter = raft._find_body('test_group')
+		assert(arbiter.alive, "thread 4's arbiter should be recovered")
 	end
 	local replica_set = arbiter:replica_set()
 	assert(#replica_set == 5, "replica set should be size 5")

@@ -11,6 +11,7 @@ local luact = require 'luact.init'
 local ok,r = xpcall(function ()
 
 	local state = require 'luact.cluster.raft.state'
+	local rpc = require 'luact.cluster.raft.rpc'
 	local wal = require 'luact.cluster.raft.wal'
 	local snapshot = require 'luact.cluster.raft.snapshot'
 	local replicator = require 'luact.cluster.raft.replicator'
@@ -68,11 +69,15 @@ local ok,r = xpcall(function ()
 
 	local FIRST_LOGSIZE = 20
 	local function new_actor_body()
-		return setmetatable({}, {
+		local b = {}
+		return setmetatable(b, {
 			__index = {
-				append_entries = function (term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
-				end,
-				install_snapshot = function (term, leader, fd)
+				rpc = function (kind, id, ...)
+					if kind == rpc.APPEND_ENTRIES then
+						return b:append_entries(...)
+					elseif kind == rpc.INSTALL_SNAPSHOT then
+						return b:install_snapshot(...)
+					end
 				end,
 			}
 		})
@@ -112,7 +117,7 @@ local ok,r = xpcall(function ()
 		return term, true, 0
 	end
 
-	local rep, endev = replicator.new(actor, actor, st, true)
+	local rep, endev = replicator.new(body, actor, st, true)
 	local logs = {}
 	for i=1,FIRST_LOGSIZE do
 		table.insert(logs, { value = i })

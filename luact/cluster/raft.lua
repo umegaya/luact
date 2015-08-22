@@ -19,6 +19,9 @@ local fs = require 'pulpo.fs'
 
 local exception = require 'pulpo.exception'
 exception.define('raft')
+exception.define('raft_invalid', { recoverable = true })
+exception.define('raft_not_found', { recoverable = true })
+exception.define('raft_invalid_rpc', { recoverable = true })
 
 local _M = require 'luact.cluster.raft.rpc'
 local raft_actor
@@ -32,6 +35,11 @@ local tick_intval_sec = 0.05
 local APPEND_ENTRIES = _M.APPEND_ENTRIES
 local REQUEST_VOTE = _M.REQUEST_VOTE
 local INSTALL_SNAPSHOT = _M.INSTALL_SNAPSHOT
+
+local INTERNAL_ACCEPTED = _M.INTERNAL_ACCEPTED
+local INTERNAL_PROPOSE = _M.INTERNAL_PROPOSE
+local INTERNAL_ADD_REPLICA_SET = _M.INTERNAL_ADD_REPLICA_SET
+local INTERNAL_REMOVE_REPLICA_SET = _M.INTERNAL_REMOVE_REPLICA_SET
 
 -- raft object methods
 local raft_index = {}
@@ -53,6 +61,7 @@ function raft_index:destroy()
 	local a = self.manager
 	logger.notice(('node %x:%d (%s) removed from raft group "%s"'):format(
 		uuid.addr(a), uuid.thread_id(a), a, self:gid_for_log()))
+	raft_bodymap[self.id] = nil
 	self.alive = nil
 	if self.main_thread then
 		tentacle.cancel(self.main_thread)
@@ -129,9 +138,9 @@ function raft_index:run_election()
 		local votes = {}
 		local quorum = math.ceil((#set + 1) / 2)
 		for i=1,#set,1 do
-			logger.info('set[i]', i, set[i])
+			logger.debug('send req vote to', set[i])
 			if not uuid.equals(set[i], myid) then
-				table.insert(votes, set[i]:async_rpc(
+				table.insert(votes, set[i].async_rpc(
 					REQUEST_VOTE,
 					self.id,
 					self.state:current_term(), 
@@ -162,7 +171,7 @@ function raft_index:run_election()
 						id = set[(i < myid_pos) and i or i + 1]
 					end
 				end
-				logger.debug('vote result', self:gid_for_log(), id, tp, ok, term, granted)
+				logger.info('vote result', self:gid_for_log(), id, tp, ok, term, granted)
 				-- not timeout and call itself success and vote granted
 				if tp ~= 'timeout' and ok and granted then
 					grant = grant + 1
@@ -196,12 +205,15 @@ function raft_index:make_response(ok, r, ...)
 		return r, ...
 	end
 end
+-- async_propose asynchronously process proposed log. 
+-- returns event which is emitted when operation complete.
+function raft_index:async_propose(...)
+	return tentacle(self.propose, self, ...)
+end
 function raft_index:propose(logs, timeout, dictatorial)
-	if #logs > 1 then
-		exception.raise('fatal', 'too long log', type(logs), #logs)
-	end
+	if not self.alive then exception.raise('raft_invalid') end
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
-	if l then return l:propose(logs, timeout) end
+	if l then return l.rpc(INTERNAL_PROPOSE, self.id, logs, timeout) end
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	if dictatorial then
@@ -214,8 +226,9 @@ function raft_index:propose(logs, timeout, dictatorial)
 end
 raft_index.write = raft_index.propose
 function raft_index:add_replica_set(replica_set, timeout)
+	if not self.alive then exception.raise('raft_invalid') end
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
-	if l then return l:add_replica_set(replica_set, timeout) end
+	if l then return l.rpc(INTERNAL_ADD_REPLICA_SET, self.id, replica_set, timeout) end
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:add_replica_set(msgid, replica_set)
@@ -223,8 +236,9 @@ function raft_index:add_replica_set(replica_set, timeout)
 	return self:make_response(tentacle.yield(msgid))
 end
 function raft_index:remove_replica_set(replica_set, timeout)
+	if not self.alive then exception.raise('raft_invalid') end
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
-	if l then return l:remove_replica_set(replica_set, timeout) end
+	if l then return l.rpc(INTERNAL_REMOVE_REPLICA_SET, self.id, replica_set, timeout) end
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
@@ -241,7 +255,7 @@ function raft_index:accepted()
 		self.state:committed(log.index)
 		-- apply log and respond to waiter
 		for idx=tonumber(self.state:last_applied_index()) + 1, tonumber(log.index) do
-			-- logger.info('apply_log', i)
+			-- logger.info('apply_log', i, log.msgid)
 			self:apply_log(self.state.wal:at(idx))
 		end
 	end
@@ -285,9 +299,13 @@ follow it (§5.3)
 4. Append any new entries not already in the log
 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 ]]
-function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries)
+function raft_index:append_entries(term, leader, leader_commit_idx, prev_log_idx, prev_log_term, entries, added_idx)
 	local ok, r
 	local last_index, last_term = self.state.wal:last_index_and_term()
+	if added_idx then
+		logger.info('added_idx', added_idx)
+		self.state:set_added_index(added_idx)
+	end
 	if term < self.state:current_term() then
 		-- 1. Reply false if term < currentTerm (§5.1)
 		logger.warn('raft', self:gid_for_log(), 'append_entries', 'receive older term', term, self.state:current_term())
@@ -511,16 +529,26 @@ _M._find_body = find_body
 function _M.rpc(kind, id, ...)
 	local rft = raft_bodymap[id]
 	if not rft then
-		exception.raise('raft', 'not_found', id)
+		exception.raise('raft_not_found', id, kind)
 	end
+	-- rpc for consensus
 	if kind == APPEND_ENTRIES then
 		return rft:append_entries(...)
 	elseif kind == REQUEST_VOTE then
 		return rft:request_vote(...)
 	elseif kind == INSTALL_SNAPSHOT then
 		return rft:install_snapshot(...)
+	-- internal rpcs
+	elseif kind == INTERNAL_ACCEPTED then
+		return rft:accepted()
+	elseif kind == INTERNAL_PROPOSE then
+		return rft:propose(...)
+	elseif kind == INTERNAL_ADD_REPLICA_SET then
+		return rft:add_replica_set(...)
+	elseif kind == INTERNAL_REMOVE_REPLICA_SET then
+		return rft:remove_replica_set(...)
 	else
-		exception.raise('raft', 'invalid_rpc', kind)
+		exception.raise('raft_invalid_rpc', kind)
 	end
 end
 

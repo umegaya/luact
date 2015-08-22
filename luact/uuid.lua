@@ -107,6 +107,9 @@ function _M.addr(t)
 end
 _M.machine_id = _M.addr
 function _M.equals(t, cmp)
+	if (not t.__tag__) or (not cmp.__tag__) then
+		logger.error('invalid t or cmp', t.__tag__, cmp.__tag__)
+	end
 	return t.__tag__.local_id == cmp.__tag__.local_id and t.__tag__.machine_id == cmp.__tag__.machine_id
 end
 

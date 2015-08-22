@@ -41,6 +41,9 @@ typedef struct luact_raft_state {
 	//raft working state
 	uint64_t last_applied_idx; 		// index of highest log entry applied to state machine
 	uint64_t last_commit_idx;		// index of highest log entry committed.
+	uint64_t added_idx;				// log index which causes this node add to replica set. 
+									// used for preventing newly added raft object from removing itself by old (already processed) log.
+	luact_uuid_t vote;				// voted raft actor id (not valid, not voted yet)
 	luact_uuid_t leader_id; 		// raft actor id of leader
 	uint8_t node_kind, padd[3];		// node type (follower/candidate/leader)
 } luact_raft_state_t;
@@ -116,6 +119,8 @@ function raft_state_container_index:gid_for_log()
 end
 function raft_state_container_index:fin()
 	-- TODO : recycle
+	self.fsm:detach()
+	self.fsm = nil
 	self.controller = nil
 	self.ev_log:destroy()
 	self.ev_close:destroy()
@@ -123,7 +128,6 @@ function raft_state_container_index:fin()
 	self.proposals:fin()
 	self.wal:fin()
 	self.snapshot:fin()
-	self.fsm:detach()
 	if self.state then
 		memory.free(self.state)
 	end
@@ -191,6 +195,10 @@ function raft_state_container_index:vote_for(v, term)
 	end
 	return false
 end
+function raft_state_container_index:update_last_removal_index(idx)
+	self.state.current.last_removal_idx = idx
+	self.wal:write_state(self.state.current)	
+end
 function raft_state_container_index:set_leader(leader_id)
 	-- logger.info('set leader', leader_id)
 	local changed, change_self
@@ -244,7 +252,7 @@ function raft_state_container_index:become_follower()
 end
 -- nodes are list of luact_uuid_t
 function raft_state_container_index:stop_replicator(target_actor)
-	local machine, thread = uuid.addr(target_actor), uuid.thread_id(target_actor)
+	local machine, thread = uuid.machine_id(target_actor), uuid.thread_id(target_actor)
 	local m = self.replicators[machine]
 	if m and m[thread] then
 		local r = m[thread]
@@ -274,7 +282,7 @@ function raft_state_container_index:start_replication(activate, replica_set)
 	for i = 1,#replica_set do
 		id = replica_set[i]
 		if not uuid.equals(leader_id, id) then
-			local machine, thread = uuid.addr(id), uuid.thread_id(id)
+			local machine, thread = uuid.machine_id(id), uuid.thread_id(id)
 			local m = self.replicators[machine]
 			if not m then
 				m = {}
@@ -287,9 +295,9 @@ function raft_state_container_index:start_replication(activate, replica_set)
 				-- heartbeat is necessary because in our use case, 
 				-- typically need to prevent newly added node from causing election timeout.
 				if activate then
-					logger.debug('start replicator', self:gid_for_log(), id)
+					logger.info('start replicator', self:gid_for_log(), id)
 				else
-					logger.debug('add replicator', self:gid_for_log(), id)
+					logger.info('add replicator', self:gid_for_log(), id)
 				end
 			end
 		end
@@ -311,9 +319,9 @@ end
 
 -- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
 -- newly added replicator only starts replication after this operation agreed by previous replica set.
-function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
+function raft_state_container_index:add_replica_set(msgid, replica_set, applied_idx)
 	local self_actor = self.controller.manager
-	if applied then
+	if applied_idx then
 		local add_self, changed
 		for i = 1,#replica_set do
 			local found
@@ -341,8 +349,8 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 					local m = self.replicators[machine]
 					if m and m[thread] then
 						-- from here, this replicator actually involve replication
-						m[thread]:commit_add()
-						logger.debug('start replicator', self:gid_for_log(), id)
+						m[thread]:start_append(applied_idx)
+						logger.debug('start replicator', self:gid_for_log(), id, applied_idx)
 					end
 				end
 			end
@@ -365,10 +373,11 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied)
 end
 -- prevent immediate change of replica_set allows network partitioned minority to execute un-authorized write,
 -- actual replica set only changed if previous replica set commit this proposal.
-function raft_state_container_index:remove_replica_set(msgid, replica_set, applied)
+function raft_state_container_index:remove_replica_set(msgid, replica_set, applied_idx)
 	local self_actor = self.controller.manager
-	if applied then
+	if applied_idx then
 		local remove_self, changed
+		local fsm = self.fsm
 		for i = 1,#replica_set do
 			local found
 			for j = 1,#self.replica_set do
@@ -381,22 +390,38 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 				end
 			end
 			if found then
+				-- we cannot stop replicator here because after that replicator will notify
+				-- 'applied' to removed replica, too.
 				table.remove(self.replica_set, found)
 				changed = true
 			end
 		end
 		if self:is_leader() then
-			-- replicator removal is occured at following order
-			-- 1. replicator knows replicate target is gone (by error:is('actor_no_body'))
-			-- 2. send message to parent actor (leader_actor:stop_replication())
-			-- 3. actor call state:stop_replicator
-			-- 4. stop_replicator emit stop event to target replicator
-			-- 5. target repliactor cancel all coroutines
+			-- actual replicator removal is occured at following order
+			-- 1. replicator knows replicate target is gone (by error:is('raft_not_found'))
+			-- 2. call state:stop_replicator
+			-- 3. stop_replicator emit stop event to target replicator
+			-- 4. target repliactor cancel all coroutines, stop_append().
+			-- TODO : we need to care about re-addition of the node before above sequence occurs (usually occurs within 100msec)? 
 		elseif remove_self then
-			self.controller:destroy()
+			-- suppose node N has instance of raft object for group G, and once remove it by rebalance or something, 
+			-- then group G is back to this node (by calling add_replica_set again by leader node).
+			--
+			-- if add_replica_set of N and remove_replica_set of N are both replayed, re-created raft object at N 
+			-- will be destroyed again, because there is no way to distinguish old and new raft object.
+			--
+			-- so we keep track log index which adds this raft object as replication target. and when recovery, skip removal by comparing
+			-- tracked log index and actual log index. this is bit hacky and may have pathological corner case.
+			local processed = (self.state.added_idx >= applied_idx)
+			if not processed then
+				self.controller:destroy()
+			else
+				logger.info('ignore removal of this node', self.state.added_idx, applied_idx)
+			end
 		end
 		if changed then
-			self.fsm:change_replica_set('remove', remove_self, self.state.leader_id, self.replica_set)
+			-- TODO : for correctness, should we move this to stop_replicator?
+			fsm:change_replica_set('remove', remove_self, self.state.leader_id, self.replica_set)
 		end
 	elseif self:is_leader() then
 		if type(replica_set) ~= 'table' then
@@ -453,6 +478,9 @@ end
 function raft_state_container_index:last_index()
 	return self.wal:last_index()
 end
+function raft_state_container_index:set_added_index(added_idx)
+	self.state.added_idx = added_idx
+end
 function raft_state_container_index:snapshot_if_needed()
 	if (self.state.last_applied_idx - self.snapshot:last_index()) >= self.opts.logsize_snapshot_threshold then
 		-- print('if_needed', self.state.last_applied_idx, self.snapshot:last_index(), self.opts.logsize_snapshot_threshold)
@@ -497,9 +525,9 @@ function raft_state_container_index:apply(log)
 	elseif log.kind == SYSLOG_DICTATORIAL_PROPOSE then
 		return self:do_apply(log, self.fsm.apply, self.fsm, log.log)		
 	elseif log.kind == SYSLOG_ADD_REPLICA_SET then
-		return self:do_apply(log, self.add_replica_set, self, nil, log.log, true)
+		return self:do_apply(log, self.add_replica_set, self, nil, log.log, log.index)
 	elseif log.kind == SYSLOG_REMOVE_REPLICA_SET then
-		return self:do_apply(log, self.remove_replica_set, self, nil, log.log, true)
+		return self:do_apply(log, self.remove_replica_set, self, nil, log.log, log.index)
 	else
 		logger.warn('invalid raft system log committed', self:gid_for_log(), log.kind)
 	end

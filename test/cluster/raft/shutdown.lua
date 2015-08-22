@@ -20,7 +20,7 @@ tools.start_local_cluster(5, 1, tools.new_fsm, function (arbiter, thread_id)
 	if thread_id == 4 then
 		-- arbiter is died, so any action to it fails
 		local ok, r = pcall(arbiter.propose, arbiter, {{'fuga', 'hoge'}})
-		assert((not ok) and r:is('actor_no_body'), "raft object in removed node should die")
+		assert((not ok) and r:is('raft_invalid'), "raft object in removed node should die")
 	else
 		local replicas = arbiter:replica_set()
 		-- check replica set size is 4

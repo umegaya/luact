@@ -7,6 +7,7 @@ local exception = require 'pulpo.exception'
 local fs = require 'pulpo.fs'
 
 local ringbuf = require 'luact.util.ringbuf'
+local rpc = require 'luact.cluster.raft.rpc'
 local pbuf = require 'luact.pbuf'
 
 local _M = {}
@@ -100,7 +101,7 @@ function proposals_index:dictatorial_add(controller, start_idx, end_idx)
 			st:init(1)
 		end, quorum)
 	end
-	self:range_commit(controller, start_idx, end_idx)
+	self:range_commit(controller, start_idx, end_idx, true)
 end
 function proposals_index:commit(index)
 	local header = self.progress.header
@@ -146,7 +147,7 @@ function proposals_index:commit(index)
 		return true
 	end
 end
-function proposals_index:range_commit(controller, sidx, eidx)
+function proposals_index:range_commit(controller, sidx, eidx, delay)
 	local accepted
 	for i=tonumber(sidx),tonumber(eidx) do
 		if self:commit(i) then
@@ -154,8 +155,12 @@ function proposals_index:range_commit(controller, sidx, eidx)
 		end
 	end
 	if accepted then
-		logger.debug('notify_accepted', actor)
-		controller:accepted()
+		logger.debug('notify_accepted', controller)
+		if delay then
+			controller.manager.notify_rpc(rpc.INTERNAL_ACCEPTED, controller.id)
+		else
+			controller:accepted()
+		end
 	end
 end
 

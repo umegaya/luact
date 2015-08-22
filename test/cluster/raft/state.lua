@@ -138,6 +138,7 @@ local ok,r = xpcall(function ()
 	local p = st.proposals
 	local body = new_actor_body(p, st)
 	local actor = luact(body)
+	body.manager = actor
 	st.controller = body
 	local n_quorum = 3
 	function st:quorum()
