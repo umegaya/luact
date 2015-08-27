@@ -64,17 +64,23 @@ typedef struct luact_dht_cmd_watch {
 
 typedef struct luact_dht_cmd_split {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, txn_f, n_replica, padd;
+	uint8_t kind, txn_f, padd[2];
 	luact_dht_txn_t txn;
 	char p[0];
 } luact_dht_cmd_split_t;
 
 typedef struct luact_dht_cmd_join {
 	pulpo_hlc_t timestamp;
-	uint8_t kind, txn_f, n_replica, padd;
+	uint8_t kind, txn_f, padd[2];
 	luact_dht_txn_t txn;
 	char p[0];	
 } luact_dht_cmd_join_t;
+
+typedef struct luact_dht_cmd_change_replicas {
+	pulpo_hlc_t timestamp;
+	luact_dht_txn_t txn;
+	char p[0];		
+} luact_dht_cmd_change_replicas_t;
 
 typedef struct luact_dht_cmd_scan {
 	pulpo_hlc_t timestamp;
@@ -754,6 +760,45 @@ function split_mt:apply_to(storage, range)
 	return range:exec_split(storage, self:update_rng(), self:new_rng(), self.timestamp, self:get_txn())
 end
 ffi.metatype('luact_dht_cmd_split_t', split_mt)
+
+
+-- change replicas command
+local change_replicas_mt = util.copy_table(base_mt)
+change_replicas_mt.__index = change_replicas_mt
+function change_replicas_mt.size(update_rng, txn)
+	return ffi.sizeof('luact_dht_cmd_split_t') + #update_rng + #txn
+end
+function change_replicas_mt.new(kind, update_rng, timestamp, txn)
+	local p = ffi.cast('luact_dht_cmd_split_t*', memory.alloc(split_mt.size(update_rng, txn)))
+	p.kind = kind
+	p.timestamp = timestamp
+	ffi.copy(p:update_rng(), update_rng, #update_rng)
+	p:set_txn(txn)
+	return p
+end
+_M.change_replicas = change_replicas_mt.new
+function change_replicas_mt:key()
+	return self:update_rng().end_key.p
+end
+function change_replicas_mt:keylen()
+	return self:update_rng().end_key.len
+end
+function change_replicas_mt:__len()
+	return change_replicas_mt.size(self:update_rng(), self:get_txn())
+end
+function change_replicas_mt:txn_p()
+	return self.p + #(self:update_rng())
+end
+function change_replicas_mt:flags()
+	return 0
+end
+function change_replicas_mt:update_rng()
+	return ffi.cast('luact_dht_range_t *', self.p)
+end
+function change_replicas_mt:apply_to(storage, range)
+	return range:exec_change_replicas(storage, self:update_rng(), self.timestamp, self:get_txn())
+end
+ffi.metatype('luact_dht_cmd_change_replicas_t', split_mt)
 
 
 

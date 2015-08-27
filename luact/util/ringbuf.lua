@@ -80,6 +80,10 @@ function ringbuf_header_index:init(n_size)
 	self.end_idx = 0
 	self.n_size = n_size
 end
+function ringbuf_header_index:reset_index()
+	self.start_idx = 0
+	self.end_idx = 0
+end
 function ringbuf_header_index:verify_range(idx)
 	return idx >= self.start_idx
 end
@@ -245,6 +249,9 @@ function ringbuf_index:from(sidx)
 end
 function ringbuf_index:available()
 	return self.header:available()
+end
+function ringbuf_index:reset()
+	self.header:reset_index()
 end
 function ringbuf_index:dump(title)
 	logger.info('----------------------------------------', title, debug.traceback())

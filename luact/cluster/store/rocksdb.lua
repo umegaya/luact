@@ -158,7 +158,7 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 	local txn = self.db:new_txn()
 	start_idx = start_idx or self.min_idx
 	if self.min_idx < start_idx and end_idx < self.max_idx then
-		return nil, exception.new('invalid', 'it seems *bug* that delete_logs creates index gap', 
+		exception.raise('invalid', 'it seems *bug* that delete_logs creates index gap', 
 			self.min_idx, start_idx, self.max_idx, end_idx)
 	else
 		local ok, r = pcall(self.unsafe_delete_logs, self, txn, start_idx, end_idx) 
@@ -166,7 +166,12 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 			if self.min_idx < start_idx and end_idx < self.max_idx then
 				exception.raise('invalid', 'it seems *bug* that delete_logs creates index gap', 
 					self.min_idx, start_idx, self.max_idx, end_idx)
+			elseif self.min_idx == start_idx and end_idx == self.max_idx then
+				-- current entire stored logs are deleted: indexes are rollback to prev of min_idx
+				self.min_idx = start_idx - 1
+				self.max_idx = start_idx - 1
 			else
+				logger.warn('delete_logs', start_idx,end_idx, self.min_idx,self.max_idx)
 				if self.min_idx >= start_idx then
 					self.min_idx = end_idx + 1
 				end
@@ -178,7 +183,7 @@ function store_rocksdb_index:delete_logs(start_idx, end_idx)
 			return self.max_idx
 		end
 		logger.error('raft', 'fail to delete_logs', r)
-		return nil, r
+		error(r)
 	end
 end
 function store_rocksdb_index:unsafe_delete_logs(txn, start_idx, end_idx)

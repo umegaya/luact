@@ -316,15 +316,6 @@ function raft_state_container_index:start_replication(activate, replica_set)
 	end
 	self:kick_replicator()
 end
--- init_replica_set set initial replica set by calling add_replica_set with dictatorial mode
-function raft_state_container_index:init_replica_set(rs)
-	self:write_syslog(SYSLOG_ADD_REPLICA_SET, nil, rs)
-end
-
--- replica_set are list of luact_uuid_t
-function raft_state_container_index:set_replica_transition(on)
-	self.replica_transition = (on and 1 or 0)
-end
 -- TODO : arbitrary replica set change should do with sequencial flow like
 -- add_replica => (wait for completion) => remove_replica 
 -- like "6 Cluster membership changes" of original raft paper.
@@ -334,6 +325,10 @@ end
 function raft_state_container_index:add_replica_set(msgid, replica_set, applied_idx)
 	local self_actor = self.controller.manager
 	if applied_idx then
+		if applied_idx <= self.initial_replica_set_ver_idx then
+			logger.info('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
+			return
+		end
 		local add_self, changed
 		for i = 1,#replica_set do
 			local found
@@ -368,10 +363,6 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied_
 			end
 			self:kick_replicator()
 		end
-		-- allow this node to be leader even if single node.
-		if add_self and (not self.opts.initial_node) then
-			self.opts.initial_node = true
-		end
 		if changed then
 			self.fsm:change_replica_set('add', add_self, self.state.leader_id, self.replica_set)
 		end
@@ -388,6 +379,10 @@ end
 function raft_state_container_index:remove_replica_set(msgid, replica_set, applied_idx)
 	local self_actor = self.controller.manager
 	if applied_idx then
+		if applied_idx <= self.initial_replica_set_ver_idx then
+			logger.info('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
+			return
+		end
 		local remove_self, changed
 		local fsm = self.fsm
 		for i = 1,#replica_set do
@@ -416,20 +411,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 			-- 4. target repliactor cancel all coroutines, stop_append().
 			-- TODO : we need to care about re-addition of the node before above sequence occurs (usually occurs within 100msec)? 
 		elseif remove_self then
-			-- suppose node N has instance of raft object for group G, and once remove it by rebalance or something, 
-			-- then group G is back to this node (by calling add_replica_set again by leader node).
-			--
-			-- if add_replica_set of N and remove_replica_set of N are both replayed, re-created raft object at N 
-			-- will be destroyed again, because there is no way to distinguish old and new raft object.
-			--
-			-- so we keep track log index which adds this raft object as replication target. and when recovery, skip removal by comparing
-			-- tracked log index and actual log index. this is bit hacky and may have pathological corner case.
-			local processed = (self.state.added_idx >= applied_idx)
-			if not processed then
-				self.controller:destroy()
-			else
-				logger.info('ignore removal of this node', self.state.added_idx, applied_idx)
-			end
+			self.controller:destroy()
 		end
 		if changed then
 			-- TODO : for correctness, should we move this to stop_replicator?
@@ -452,6 +434,9 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 end
 function raft_state_container_index:request_routing_id(timeout)
 ::RETRY::
+	if type(timeout) ~= 'number' then
+		logger.error('no number')
+	end
 	if self:is_leader() then 
 		return nil, timeout
 	elseif uuid.valid(self.state.leader_id) then
@@ -501,10 +486,10 @@ function raft_state_container_index:snapshot_if_needed()
 	end
 end
 function raft_state_container_index:has_enough_nodes_for_election()
-	-- logger.warn('initial_node', self.opts.initial_node)
-	if self.opts.initial_node then
-		return true
+	if self.opts.debug_dictatorial then
+	 	return true
 	end
+	-- at least 2 replica needed (because total quorum need to be >= 3)
 	return #self.replica_set > 1
 end
 -- after replication to majority success, apply called
@@ -557,8 +542,9 @@ function raft_state_container_index:restore()
 		-- we have unapplied WAL but its unclear all contents of it, is committed.
 		-- so, we wait for next commit (whether if this node become leader or follower)
 		if not r then
+			local i, t = self.snapshot:last_index_and_term()
 			-- restore state from snapshot
-			self.state.current.term = self.snapshot:last_index()
+			self.state.current.term = t
 			-- start with no vote
 		end
 	end
@@ -570,7 +556,8 @@ function raft_state_container_index:restore_from_snapshot(ssrb)
 		-- we have unapplied WAL but its unclear all contents of it, is committed.
 		-- so, we wait for next commit (whether if this node become leader or follower)
 		-- restore state from snapshot
-		self.state.current.term = self.snapshot:last_index()
+		local i, t = self.snapshot:last_index_and_term()
+		self.state.current.term = t
 		-- start with no vote
 	end
 end
@@ -581,7 +568,6 @@ function raft_state_container_index:write_snapshot_header(hd)
 	hd.term = self:current_term()
 	hd.index = self.state.last_applied_idx
 	hd.n_replica = #self.replica_set
-	hd.replica_transition = self.replica_transition
 	for i=1,#self.replica_set do
 		hd.replicas[i - 1] = self.replica_set[i]
 	end
@@ -591,7 +577,7 @@ function raft_state_container_index:read_snapshot_header(hd)
 	-- should use latest state (by self:read_state()) for term
 	-- self.state.current.term = hd.term
 	self.state.last_applied_idx = hd.index
-	self.replica_transition = 0 -- hd.replica_transition
+	self.initial_replica_set_ver_idx = hd.index
 	for i=1,hd.n_replica do
 		table.insert(self.replica_set, hd.replicas[i - 1])
 	end	
@@ -630,6 +616,9 @@ end
 
 
 -- module function
+local function compute_initial_replica_set(opts)
+	return opts.replica_set or {}
+end
 function _M.new(id, fsm, wal, snapshot, opts)
 	local r = setmetatable({
 		id = id,
@@ -639,10 +628,13 @@ function _M.new(id, fsm, wal, snapshot, opts)
 		ev_close = event.new(),
 		wal = wal, -- logs index is self.offset_idx to self.offset_idx + #logs - 1
 		replicators = {}, -- replicators to replicate logs. initialized and sync'ed by replica_set
-		replica_transition = 0, -- is replica_set transition ongoing?
-		replica_set = {}, -- current replica set. array of actor (luact_uuid_t)
-		fsm = fsm, 
-		snapshot = snapshot,
+		-- replica_set is array of actor (luact_uuid_t) which represents current replica set, include leader replica.
+		replica_set = compute_initial_replica_set(opts), 
+		-- initial_replica_set_ver_idx is applied log index of raft instance which provide opts.replica_set.
+		-- this is used for skipping (add|remove)_replica_set log which is already outdated.
+		initial_replica_set_ver_idx = opts.replica_set and opts.initial_replica_set_ver_idx or 0, 
+		fsm = fsm, -- finite state machine (FSM) which this raft group maintains.
+		snapshot = snapshot, -- snapshotter of fsm and raft hardstate.
 		opts = opts,
 	}, raft_state_container_mt)
 	r:init()

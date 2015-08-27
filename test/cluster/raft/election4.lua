@@ -26,7 +26,7 @@ tools.start_luact(5, nil, function ()
 			replica_set = raft_manager_actors,
 		}, luact.thread_id)
 		p:wait(1)
-		clock.sleep(3)
+		clock.sleep(2.5)
 		local arbiter = raft._find_body('test_group')
 		local found
 		for i=1,#raft_manager_actors do

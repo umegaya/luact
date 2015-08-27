@@ -81,6 +81,13 @@ end
 function raft_index:reset_stepdown_timeout()
 	self:reset_timeout(math.max(5, self.opts.election_timeout_sec * 5))
 end
+function raft_index:initial_set_timeout()
+	if self.opts.debug_leader_uuid and (not uuid.equals(_M.manager_actor(), self.opts.debug_leader_uuid)) then
+		self:reset_stepdown_timeout()
+		return
+	end
+	self:reset_timeout()
+end
 function raft_index:tick()
 	if self.state:is_follower() then
 		-- logger.info('follower election timeout check', self.timeout_limit - clock.get())
@@ -97,14 +104,6 @@ function raft_index:tick()
 		end
 	end
 end
--- init_replica_set initializes this raft's replica set, if specified by given option.
--- replica set is initialized as if add_replica_set log is accepted., so that after replica set initialized, 
--- all nodes can be start election as usual. (like leader suddenly stepping down)
-function raft_index:init_replica_set()
-	if self.opts.replica_set then
-		self.state:init_replica_set(self.opts.replica_set)
-	end
-end
 function raft_index:start()
 	self.main_thread = tentacle(self.launch, self)
 end
@@ -113,9 +112,8 @@ function raft_index:launch()
 	self.main_thread = nil
 end
 function raft_index:run()
-	self:init_replica_set()
 	self.state:become_follower() -- become follower first
-	self:reset_timeout()
+	self:initial_set_timeout()
 	while self.alive do
 		clock.sleep(tick_intval_sec)
 		self:tick()
@@ -169,9 +167,9 @@ function raft_index:run_election()
 			local id
 			for i=1,#ret-1 do -- -1 to ignore last result (is timeout event)
 				local tp, obj, ok, term, granted, id = unpack(ret[i])
-				for i=1,#votes do
-					if votes[i] == obj then
-						id = set[(i < myid_pos) and i or i + 1]
+				for j=1,#votes do
+					if votes[j] == obj then
+						id = set[(j < myid_pos) and j or j + 1]
 					end
 				end
 				logger.info('vote result', self:gid_for_log(), id, tp, ok, term, granted)
@@ -241,9 +239,12 @@ end
 function raft_index:remove_replica_set(replica_set, timeout)
 	if not self.alive then exception.raise('raft_invalid') end
 	if self.state:is_leader() then
+		if type(replica_set) ~= 'table' then
+			replica_set = {replica_set}
+		end
 		for i=1,#replica_set do
 			if uuid.equals(replica_set[i], self.state:leader()) then
-				logger.warn('leader try to remove itself, stepdown first', self.state:leader())
+				logger.warn('leader try to remove itself, stepdown first', self.state:leader(), debug.traceback())
 				self:stepdown()
 				logger.warn('finish to stepdown now leader:', self.state:leader())
 				break
@@ -301,6 +302,9 @@ function raft_index:stepdown(timeout)
 	assert(self.state:is_leader(), "invalid node try to stepdown")
 	self.state:become_follower(msgid)
 	return self:make_response(tentacle.yield(msgid))
+end
+function raft_index:become_follower()
+	self.state:become_follower()
 end
 --[[--
 from https://ramcloud.stanford.edu/raft.pdf
@@ -472,7 +476,7 @@ local default_opts = {
 	serde = "msgpack",
 	storage = "rocksdb", 
 	datadir = luact.DEFAULT_ROOT_DIR,
-	initial_node = false,
+	debug_dictatorial = false,
 }
 local function configure_datadir(id, opts)
 	local strid = tostring(ffi.cast('luact_uuid_t *', id))

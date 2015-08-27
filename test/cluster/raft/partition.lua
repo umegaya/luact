@@ -78,7 +78,9 @@ tools.start_local_cluster(5, 3, tools.new_fsm, function (arbiter, thread_id)
 		assert((not ok) and r:is('actor_timeout'), "propose should fail because of not enough quorum")
 		ok, r = pcall(arbiter.add_replica_set, arbiter, {rm}, 1)
 		assert(not ok and r:is('actor_timeout'), "add_replica_set should fail because of not enough quorum")
-		ok, r = pcall(arbiter.remove_replica_set, arbiter, {rm}, 1)
+		if luact.thread_id ~= 3 then -- leader first do stepdown, so only non-leader node in group1, test remove fails
+			ok, r = pcall(arbiter.remove_replica_set, arbiter, {rm}, 1)
+		end
 		assert(not ok and r:is('actor_timeout'), "remove_replica_set should fail because of not enough quorum")
 	else
 		local cnt = 0

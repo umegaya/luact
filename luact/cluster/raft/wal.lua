@@ -72,7 +72,7 @@ function wal_writer_index:write(store, kind, term, logs, serde, logcache, msgid)
 	self.last_term = term
 	return first_index, last_index
 end
--- called from append entries. just copy received logs.
+-- copy called from append entries. just copy received logs.
 function wal_writer_index:copy(store, logs, serde, logcache)
 	local last_index = self.last_index
 	local last_term = self.last_term
@@ -88,7 +88,7 @@ function wal_writer_index:copy(store, logs, serde, logcache)
 		last_index = log.index
 		last_term = log.term
 		logcache:put_at(last_index, log)
-		logger.debug('copy', 'logat', last_index, tostring(logcache:at(last_index)))
+		logger.debug('copy', 'logat', last_index, log, logcache:at(last_index))
 	end
 	local first_index = self.last_index + 1
 	local ok, r = store:put_logs(logcache, serde, first_index, last_index)
@@ -168,9 +168,15 @@ end
 function wal_index:delete_range(start_idx, end_idx)
 	local new_end_idx = self.store:delete_logs(start_idx, end_idx)
 	self.logcache:delete_range(start_idx, end_idx)
-	local log = self.logcache:at(new_end_idx)
-	self.writer.last_index, self.writer.last_term = log.index, log.term
-
+	if new_end_idx > 0 then
+		local log = self.logcache:at(new_end_idx)
+		self.writer.last_index, self.writer.last_term = log.index, log.term
+	else
+		logger.report('delete_range', 'all logs deleted', start_idx, end_idx)
+		-- all logs are removed. wal become initial state.
+		self.logcache:reset()
+		self.writer.last_index, self.writer.last_term = 0, 0
+	end
 end
 function wal_index:last_index()
 	return self.writer.last_index
@@ -188,7 +194,7 @@ function _M.new(meta, store, serde, opts)
 		writer = memory.alloc_fill_typed('luact_raft_wal_writer_t'),
 		-- store does not fin by normal finalization for faster restart when superviser restart raft actor
 		store = store,
-		-- TODO : using cdata array if serde is such kind.
+		-- logcache is ring buffer which is expanded when fully used N=>2*N
 		logcache = ringbuf.new(opts.log_compaction_margin),
 		meta = meta, 
 		serde = serde,

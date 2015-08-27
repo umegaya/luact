@@ -14,61 +14,14 @@ tools.start_luact(1, nil, function ()
 	local fs = require 'pulpo.fs'
 	local util = require 'pulpo.util'
 
-	tools.use_dummy_arbiter()
-
 	local rm
 	local function init_dht(range_max_bytes)
-		tools.use_dummy_arbiter(function (actor, ...)
-			tools.delay_emurator().c()
-		end, function (actor, log, timeout, dectatorial)
-			tools.delay_emurator().c()
-			g_last_ts = log[1].timestamp
-		end)
-		dht.finalize()
-		fs.rmdir("/tmp/luact/split_test")
-		local test_config = {
+		rm = tools.init_dht({
 			datadir = "/tmp/luact/split_test", 
 			n_replica = 1, 
 			max_clock_skew = 0,
 			range_size_max = range_max_bytes,
-		}
-		-- modify arbiter message so that range can use special raft actor for debug
-		if luact.thread_id == 1 then
-			dht.initialize(nil, test_config)
-		else
-			dht.initialize(luact.machine_id, test_config)
-		end	
-		rm = range.get_manager()
-	end
-
-	-- start_test_writer creates a writer which initiates a sequence of
-	-- transactions, each which writes up to 10 times to random keys with
-	-- random values. If not nil, txnChannel is written to every time a
-	-- new transaction starts.
-	local function start_test_writer(rc, id, kind, vlen)
-		while true do
-			if rc.done then
-				logger.info('writer', id, 'done')
-				break
-			end
-			local first = true
-			-- local start = luact.clock.get()
-			txncoord.run_txn(function (txn)
-				if first then
-					first = false
-				else
-					logger.info('retry', rc.retry)
-					rc.retry = rc.retry + 1
-				end
-				for i=1,10 do
-					local key, val = util.random_byte_str(10), util.random_byte_str(vlen)
-					local ok, r = pcall(rm.put, rm, kind, key, val, txn)
-					-- logger.notice('start_test_writer end', ('%q'):format(key), ok or r)
-				end
-			end)
-			-- logger.warn(id, 'txn takes', luact.clock.get() - start, 'sec')
-			rc.exec = rc.exec + 1
-		end
+		}, true)
 	end
 
 	local function range_split_with_concurrent_txn(concurrency)
@@ -78,7 +31,7 @@ tools.start_luact(1, nil, function ()
 		local evs = {}
 		if concurrency > 0 then
 			for i=1,concurrency do
-				table.insert(evs, luact.tentacle(start_test_writer, controller, i, kind, bit.lshift(1, 7)))
+				table.insert(evs, luact.tentacle(tools.start_test_writer, rm, controller, i, kind, bit.lshift(1, 7)))
 			end
 		end
 		local k, kl = range.META2_MIN_KEY:as_slice()
@@ -141,7 +94,7 @@ tools.start_luact(1, nil, function ()
 		local est_splits = 5
 
 		-- Start test writer write about a 32K/key so there aren't too many writes necessary to split 64K range.
-		local tev = luact.tentacle(start_test_writer, controller, 0, kind, vlen)
+		local tev = luact.tentacle(tools.start_test_writer, rm, controller, 0, kind, vlen)
 
 		-- Check that we split 5 times in allotted time.
 		local meta2_ranges
@@ -166,18 +119,18 @@ tools.start_luact(1, nil, function ()
 		end, 0.5), "finishing concurrent write fails within estimated time")
 	end
 
+	-- TestRangeSplits does 5 consecutive splits
+	test("TestRangeSplits", function ()
+		init_dht()
+		range_split_with_concurrent_txn(0)
+	end)
+
 	-- TestRangeSplitsWithConcurrentTxns does 5 consecutive splits while
 	-- 10 concurrent coroutines are each running successive transactions
 	-- composed of a random mix of puts.
 	test("TestRangeSplitsWithConcurrentTxns", function ()
 		init_dht()
 		range_split_with_concurrent_txn(10)
-	end)
-
-	-- TestRangeSplits does 5 consecutive splits
-	test("TestRangeSplits", function ()
-		init_dht()
-		range_split_with_concurrent_txn(0)
 	end)
 
 	-- TestRangeSplitsWithWritePressure sets the zone config max bytes for

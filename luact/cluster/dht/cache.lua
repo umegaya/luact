@@ -22,7 +22,7 @@ range_cache_mt.__index = range_cache_mt
 function range_cache_mt:find(k, kl)
 	kl = kl or #k
 	for i=1,#self do
-		-- logger.info('cache search', self[i].start_key, self[i]:contains(k, kl))
+		-- logger.info('cache search', self[i], self[i]:contains(k, kl))
 		if self[i]:contains(k, kl) then
 			return self[i]
 		end

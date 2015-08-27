@@ -1,5 +1,6 @@
 local luact = require 'luact.init'
 local clock = require 'luact.clock'
+local txncoord = require 'luact.storage.txncoord'
 local ffi = require 'ffiex.init'
 local util = require 'pulpo.util'
 local fs = require 'pulpo.fs'
@@ -118,50 +119,34 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 		local luact = require 'luact.init'
 		local raft = require 'luact.cluster.raft'
 		local ffi = require 'ffiex.init'
-		local pulpo = require 'pulpo.init'
 		local util = require 'pulpo.util'
 		local fs = require 'pulpo.fs'
 		local clock = require 'luact.clock'
 		local actor = require 'luact.actor'
 		local uuid = require 'luact.uuid'
 		local tools = require 'test.tools.cluster'
-		fs.rmdir('/tmp/luact/'..tostring(pulpo.thread_id))
+		fs.rmdir('/tmp/luact/'..tostring(luact.thread_id))
 		local ok,r = xpcall(function ()
 			local ptr = ffi.cast('luact_thread_payload_t*', p)
 			local leader_thread_id = ptr[2]:decode()
 			local n_core = ptr[3]:decode()
+			local initial_rs = tools.create_initial_replica_set(n_core)
 			local arb, rft, rs
-			if pulpo.thread_id == leader_thread_id then
-				local factory = ptr[0]:decode()
-				arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group', factory, { initial_node = true }, pulpo.thread_id)
-				logger.info('arb1', arb)
-				clock.sleep(2.5) -- wait for this thread become raft leader (max election timeout (2.0) + margin (0.5))
-				rft = raft._find_body('test_group')
+			local factory = ptr[0]:decode()
+			arb = actor.root_of(nil, luact.thread_id).arbiter('test_group', factory, { 
+				replica_set = initial_rs, 
+				debug_leader_uuid = actor.system_process_of(nil, leader_thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER) 
+			}, luact.thread_id)
+			logger.info('arb', arb)
+			clock.sleep(2.5) -- wait for this thread become raft leader (max election timeout (2.0) + margin (0.5))
+			rft = raft._find_body('test_group')
+			if luact.thread_id == leader_thread_id then
 				assert(uuid.equals(arb, rft:leader()), "this is only raft object to bootstrap, so should be leader")
-				rs = {}
-				for i=1,n_core do
-					local replica = actor.root_of(nil, i).arbiter('test_group', factory, nil, i)
-					assert(replica, "arbiter should be created")
-					table.insert(rs, replica)
-				end
-				rft:add_replica_set(rs)
-			else
-				while not (rft and arb) do
-					clock.sleep(0.1)
-					arb = actor.root_of(nil, pulpo.thread_id).arbiter('test_group')
-					rft = raft._find_body('test_group')
-				end
-				logger.info('arb2', arb)
-				 -- wait for replica_set is replicated.
-				rs = rft:replica_set()
-				while #rs < n_core do
-					clock.sleep(0.1)
-					rs = rft:replica_set()
-				end
 			end
 			rft:probe(function (r)
 				assert(r.state:has_enough_nodes_for_election(), "all nodes should be election-ready")
 			end)
+			rs = rft:replica_set()
 			local found
 			for i=1,n_core do
 				if uuid.equals(rs[i], arb) then
@@ -171,7 +156,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			end
 			assert(found, "each thread's uuid should be included in replica set:"..tostring(arb))
 			local fn = ffi.cast('luact_thread_payload_t*', p)[1]:decode()
-			fn(rft, pulpo.thread_id)
+			fn(rft, luact.thread_id)
 		end, function (e)
 			logger.fatal(e, debug.traceback())
 			os.exit(-2)
@@ -300,6 +285,69 @@ function _M.use_dummy_arbiter(on_read, on_write)
 		return mact
 	end
 end
+
+function _M.create_initial_replica_set(num_thread)
+	local actor = require 'luact.actor'
+	local r = {}
+	for i=1,num_thread do
+		table.insert(r, actor.system_process_of(nil, i, luact.SYSTEM_PROCESS_RAFT_MANAGER))
+	end
+	return r
+end
+
+-- init_dht cleanup and re-initialize dht modules and its related status
+function _M.init_dht(test_config, use_dummy_arbiter)
+	local dht = require 'luact.cluster.dht'
+	local range = require 'luact.cluster.dht.range'
+	if use_dummy_arbiter then
+		_M.use_dummy_arbiter(function (actor, ...)
+			_M.delay_emurator().c()
+		end, function (actor, log, timeout, dectatorial)
+			_M.delay_emurator().c()
+		end)
+	end
+	dht.finalize()
+	fs.rmdir(test_config.datadir)
+	-- modify arbiter message so that range can use special raft actor for debug
+	if luact.thread_id == 1 then
+		dht.initialize(nil, test_config)
+	else
+		dht.initialize(luact.machine_id, test_config)
+	end	
+	return range.get_manager()
+end
+
+-- start_test_writer creates a writer which initiates a sequence of
+-- transactions, each which writes up to 10 times to random keys with
+-- random values. If not nil, txnChannel is written to every time a
+-- new transaction starts.
+function _M.start_test_writer(rm, rc, id, kind, vlen)
+	while true do
+		if rc.done then
+			logger.info('writer', id, 'done')
+			break
+		end
+		local first = true
+		-- local start = luact.clock.get()
+		txncoord.run_txn(function (txn)
+			if first then
+				first = false
+			else
+				logger.info('retry', rc.retry)
+				rc.retry = rc.retry + 1
+			end
+			for i=1,10 do
+				local key, val = util.random_byte_str(10), util.random_byte_str(vlen)
+				local ok, r = pcall(rm.put, rm, kind, key, val, txn)
+				-- logger.notice('start_test_writer end', ('%q'):format(key), ok or r)
+			end
+		end)
+		-- logger.warn(id, 'txn takes', luact.clock.get() - start, 'sec')
+		rc.exec = rc.exec + 1
+	end
+end
+
+
 
 local function test_err_handle(e)
 	return exception.new_with_bt('runtime', debug.traceback(), e)

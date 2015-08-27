@@ -199,9 +199,6 @@ function _M.initialize(opts)
 				return fsm_factory and arbiter_module.new(group, fsm_factory, util.merge_table(arbiter_opts.config, opts or {}), ...)
 					or arbiter_module.manager_actor()
 			end,
-			dhtm = function ()
-				return dht_module.manager_actor()
-			end,
 			gossiper = function (port, opts)
 				return gossiper_module.new(port or options.conn.internal_port, util.merge_table(gossiper_opts.config, opts or {}))
 			end,

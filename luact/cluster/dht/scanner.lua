@@ -38,10 +38,10 @@ end
 -- so we can assure that leader node already added as range replica. 
 local function maintain_replica(self, gossiper, opts)
 	local replica_added = {}
-	if self.replica_available < self.n_replica then
+	if self.replica_available < self.required_replica then
 		logger.info('scanner', 'maintain_replica phase1', self)
 		-- initial ranges should be processed in here.
-		local n_require = self.n_replica - self.replica_available
+		local n_require = self.required_replica - self.replica_available
 		local list = gossip.nodelist(opts.gossip_port)
 		for i=1, #list do
 			local n = list[i]

@@ -177,7 +177,13 @@ function replicator_index:replicate(controller, actor, state)
 	if entries then
 		for idx,ent in pairs(entries) do
 			for k,v in pairs(ent) do
-				logger.info('entries', idx, k, v)
+				if type(v) == 'table' then
+					for kk,vv in pairs(v) do
+						logger.info('entries', idx, k, kk, vv)
+					end
+				else
+					logger.info('entries', idx, k, v)
+				end
 			end
 		end
 	end
