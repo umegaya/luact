@@ -100,8 +100,7 @@ typedef struct luact_dht_cmd_resolve {
 typedef struct luact_dht_cmd_resolve_txn {
 	pulpo_hlc_t timestamp;
 	pulpo_hlc_t cmd_ts;
-	uint8_t kind, how;
-	uint16_t kl;
+	uint8_t kind, how, txn_f, padd;
 	char p[0];
 } luact_dht_cmd_resolve_txn_t;
 
@@ -482,37 +481,31 @@ ffi.metatype('luact_dht_cmd_resolve_t', resolve_mt)
 -- resolve_txn command
 local resolve_txn_mt = util.copy_table(base_mt)
 resolve_txn_mt.__index = resolve_txn_mt
-function resolve_txn_mt.size(txn, conflict_txn)
-	return ffi.sizeof('luact_dht_cmd_resolve_txn_t') + #txn + #conflict_txn
+function resolve_txn_mt.size(conflict_txn, txn)
+	return ffi.sizeof('luact_dht_cmd_resolve_txn_t') + #conflict_txn + (txn and #txn or 0)
 end
 function resolve_txn_mt.new(kind, timestamp, txn, conflict_txn, how, cmd_ts)
-	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size(txn, conflict_txn)))
+	local p = ffi.cast('luact_dht_cmd_resolve_txn_t*', memory.alloc(resolve_txn_mt.size(conflict_txn, txn)))
 	p.kind = kind
 	p.timestamp = timestamp
 	p.cmd_ts = cmd_ts
-	p:set_txn(txn)
 	p:set_conflict_txn(conflict_txn)
+	p:set_txn(txn)
 	p.how = how
 	return p
 end
 _M.resolve_txn = resolve_txn_mt.new
 function resolve_txn_mt:key()
-	return self:get_txn().key
+	return self:get_conflict_txn().key
 end
 function resolve_txn_mt:keylen()
-	return self:get_txn().kl
+	return self:get_conflict_txn().kl
 end
 function resolve_txn_mt:txn_p()
-	return self.p
-end
-function resolve_txn_mt:set_txn(txn)
-	ffi.copy(self:txn_p(), txn, #txn)
-end
-function resolve_txn_mt:has_txn()
-	return true
+	return self.p + #(self:get_conflict_txn())
 end
 function resolve_txn_mt:conflict_txn_p()
-	return self.p + #(self:get_txn())
+	return self.p
 end
 function resolve_txn_mt:set_conflict_txn(conflict_txn)
 	ffi.copy(self:conflict_txn_p(), conflict_txn, #conflict_txn)
@@ -524,7 +517,7 @@ function resolve_txn_mt:flags()
 	return bit.bor(write_f)
 end
 function resolve_txn_mt:__len()
-	return resolve_txn_mt.size(self:get_txn(), self:get_conflict_txn())
+	return resolve_txn_mt.size(self:get_conflict_txn(), self:get_txn())
 end
 function resolve_txn_mt:apply_to(storage, range)
 	return range:exec_resolve_txn(storage, self.timestamp, self:get_txn(), self:get_conflict_txn(), self.how, self.cmd_ts)
@@ -533,7 +526,7 @@ ffi.metatype('luact_dht_cmd_resolve_txn_t', resolve_txn_mt)
 
 
 -- hb_txn command
-local heartbeat_txn_mt = util.copy_table(resolve_txn_mt)
+local heartbeat_txn_mt = util.copy_table(base_mt)
 heartbeat_txn_mt.__index = heartbeat_txn_mt
 function heartbeat_txn_mt.size(txn)
 	return ffi.sizeof('luact_dht_cmd_heartbeat_txn_t') + #txn
@@ -549,6 +542,21 @@ _M.heartbeat_txn = heartbeat_txn_mt.new
 function heartbeat_txn_mt:txn_p()
 	return self.p
 end
+function heartbeat_txn_mt:key()
+	return self:get_txn().key
+end
+function heartbeat_txn_mt:keylen()
+	return self:get_txn().kl
+end
+function heartbeat_txn_mt:set_txn(txn)
+	ffi.copy(self:txn_p(), txn, #txn)
+end
+function heartbeat_txn_mt:has_txn()
+	return true
+end
+function heartbeat_txn_mt:flags()
+	return bit.bor(write_f)
+end
 function heartbeat_txn_mt:__len()
 	return heartbeat_txn_mt.size(self:get_txn())
 end
@@ -559,7 +567,7 @@ ffi.metatype('luact_dht_cmd_heartbeat_txn_t', heartbeat_txn_mt)
 
 
 -- end_txn command
-local end_txn_mt = util.copy_table(resolve_txn_mt)
+local end_txn_mt = util.copy_table(heartbeat_txn_mt)
 end_txn_mt.__index = end_txn_mt
 function end_txn_mt.size(txn, cmd_on_commit)
 	return ffi.sizeof('luact_dht_cmd_end_txn_t') + #txn + (cmd_on_commit and #cmd_on_commit or 0)
@@ -591,9 +599,6 @@ function end_txn_mt:apply_to(storage, range)
 end
 function end_txn_mt:__len()
 	return end_txn_mt.size(self:get_txn(), self:cmd_on_commit())
-end
-function end_txn_mt:txn_p()
-	return self.p
 end
 function end_txn_mt:on_commit_p()
 	return self.p + #(self:get_txn())
@@ -835,7 +840,7 @@ function _M.gossip.replica_change(rng)
 			exception.raise('fatal', 'invalid replica')
 		end
 	end
-	return replica_change_mt.new(rng.kind, rng.start_key, rng.replicas, rng.replica_available)
+	return replica_change_mt.new(rng.kind, rng:cachekey_object(), rng.replicas, rng.replica_available)
 end
 
 

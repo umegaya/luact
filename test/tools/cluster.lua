@@ -135,7 +135,7 @@ function _M.start_local_cluster(n_core, leader_thread_id, fsm_factory, proc)
 			local factory = ptr[0]:decode()
 			arb = actor.root_of(nil, luact.thread_id).arbiter('test_group', factory, { 
 				replica_set = initial_rs, 
-				debug_leader_uuid = actor.system_process_of(nil, leader_thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER) 
+				preset_leader_uuid = actor.system_process_of(nil, leader_thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER) 
 			}, luact.thread_id)
 			logger.info('arb', arb)
 			clock.sleep(2.5) -- wait for this thread become raft leader (max election timeout (2.0) + margin (0.5))
@@ -187,6 +187,15 @@ function thread_latch_index:wait(value, thread_id)
 		end
 		clock.sleep(1.0)
 	end	
+end
+function thread_latch_index:progress(thread_id)
+	thread_id = thread_id or pulpo.thread_id
+	return self.values[thread_id - 1]
+end
+function thread_latch_index:set(value, thread_id)
+	thread_id = thread_id or pulpo.thread_id
+	local p = self.values
+	p[thread_id - 1] = value		
 end
 ffi.metatype('luact_thread_latch_t', thread_latch_mt)
 function _M.create_latch(name, num_thread)

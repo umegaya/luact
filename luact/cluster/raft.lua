@@ -72,7 +72,15 @@ function raft_index:destroy()
 	self:fin()
 end
 function raft_index:check_election_timeout()
-	return clock.get() >= self.timeout_limit
+	local now = clock.get()
+	if self.stop_election_limit then
+		if self.stop_election_limit <= now then
+			self.stop_election_limit = nil
+		else
+			return false
+		end
+	end
+	return now >= self.timeout_limit
 end
 function raft_index:reset_timeout(dur)
 	dur = dur or util.random_duration(self.opts.election_timeout_sec)
@@ -82,7 +90,7 @@ function raft_index:reset_stepdown_timeout()
 	self:reset_timeout(math.max(5, self.opts.election_timeout_sec * 5))
 end
 function raft_index:initial_set_timeout()
-	if self.opts.debug_leader_uuid and (not uuid.equals(_M.manager_actor(), self.opts.debug_leader_uuid)) then
+	if self.opts.preset_leader_uuid and (not uuid.equals(_M.manager_actor(), self.opts.preset_leader_uuid)) then
 		self:reset_stepdown_timeout()
 		return
 	end
@@ -172,7 +180,7 @@ function raft_index:run_election()
 						id = set[(j < myid_pos) and j or j + 1]
 					end
 				end
-				logger.info('vote result', self:gid_for_log(), id, tp, ok, term, granted)
+				logger.debug('vote result', self:gid_for_log(), id, tp, ok, term, granted)
 				-- not timeout and call itself success and vote granted
 				if tp ~= 'timeout' and ok and granted then
 					grant = grant + 1
@@ -244,7 +252,7 @@ function raft_index:remove_replica_set(replica_set, timeout)
 		end
 		for i=1,#replica_set do
 			if uuid.equals(replica_set[i], self.state:leader()) then
-				logger.warn('leader try to remove itself, stepdown first', self.state:leader(), debug.traceback())
+				logger.warn('leader try to remove itself, stepdown first', self.state:leader())
 				self:stepdown()
 				logger.warn('finish to stepdown now leader:', self.state:leader())
 				break
@@ -252,12 +260,24 @@ function raft_index:remove_replica_set(replica_set, timeout)
 		end
 	end
 	local l, timeout = self.state:request_routing_id(timeout or self.opts.proposal_timeout_sec)
-	if l then return l.rpc(INTERNAL_REMOVE_REPLICA_SET, self.id, replica_set, timeout) end
+	if l then 
+		local r =  {pcall(l.rpc, INTERNAL_REMOVE_REPLICA_SET, self.id, replica_set, timeout)}
+		if not r[1] then
+			logger.info('rrs error', r[2])
+			error(r[2])
+		end
+		return unpack(r, 2)
+	end
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	-- ...then write log and kick snapshotter/replicator
 	self.state:remove_replica_set(msgid, replica_set)
 	-- wait until logs are committed
-	return self:make_response(tentacle.yield(msgid))
+	local r = {pcall(self.make_response, self, tentacle.yield(msgid))}
+	if not r[1] then
+		logger.info('rrs error', r[2])
+		error(r[1])
+	end
+	return unpack(r, 2)
 end
 function raft_index:accepted()
 	local a = self.state.proposals.accepted
@@ -292,15 +312,33 @@ end
 function raft_index:replica_set()
 	return self.state.replica_set
 end
+function raft_index:replace_fsm(fsm)
+	assert(self.state.fsm)
+	--logger.warn('raft', self:gid_for_log(), 'set fsm:', self.state.fsm, '=>', fsm)
+	self.state.fsm = fsm
+end
+function raft_index:get_fsm()
+	return self.state.fsm
+end
+function raft_index:last_applied_index()
+	return self.state:last_applied_index()
+end
 function raft_index:probe(prober, ...)
 	return pcall(prober, self, ...)
 end
-function raft_index:stepdown(timeout)
+-- stepdown steps down from leader. timeout is how long seconds wait for stepdown completion.
+-- stop_election_period is time in seconds, 
+-- which represent how long period this node never involve election process.
+-- this is only for debug purpose, so correctness is not so high. 
+function raft_index:stepdown(timeout, stop_election_period)
 	if not self.alive then exception.raise('raft_invalid') end
-	timeout = timeout or self.opts.proposal_timeout_sec
+	timeout = timeout or self.opts.stepdown_timeout_sec
 	local msgid = router.regist(tentacle.running(), timeout + clock.get())
 	assert(self.state:is_leader(), "invalid node try to stepdown")
 	self.state:become_follower(msgid)
+	if stop_election_period then
+		self.stop_election_limit = clock.get() + timeout + stop_election_period
+	end
 	return self:make_response(tentacle.yield(msgid))
 end
 function raft_index:become_follower()
@@ -430,6 +468,8 @@ function raft_index:request_vote(term, candidate_id, cand_last_log_idx, cand_las
 	end
 	-- grant vote (§5.2, §5.4)
 	logger.debug('raft', self:gid_for_log(), 'request_vote', 'vote for', candidate_id, term)
+	-- reset timeout to prevent election timeout, because this node granting vote.
+	self:reset_timeout()
 	return self.state:current_term(), true
 end
 function raft_index:install_snapshot(term, leader, last_snapshot_index, fd)
@@ -473,32 +513,32 @@ local default_opts = {
 	election_timeout_sec = 1.0,
 	heartbeat_timeout_sec = 0.1,
 	proposal_timeout_sec = 5.0,
+	stepdown_timeout_sec = 60.0,
 	serde = "msgpack",
 	storage = "rocksdb", 
 	datadir = luact.DEFAULT_ROOT_DIR,
 	debug_dictatorial = false,
 }
-local function configure_datadir(id, opts)
+local function check_and_fill_config(id, opts)
 	local strid = tostring(ffi.cast('luact_uuid_t *', id))
 	if not opts.datadir then
 		exception.raise('invalid', strid, 'config', 'options must contain "datadir"')
 	end
 	local p = fs.path(opts.datadir, tostring(pulpo.thread_id), "raft")
-	logger.notice('raft datadir', p, 'for group', strid)
-	return p
-end
-local function configure_serde(opts)
-	return serde[serde.kind[opts.serde]]
+	if not opts.replica_set then
+		opts.replica_set = {_M.manager_actor()}
+	end
+	return fs.path(opts.datadir, tostring(pulpo.thread_id), "raft"), assert(serde[serde.kind[opts.serde]])
 end
 local raft_manager
 _M.default_opts = default_opts
 function _M.new(id, fsm_factory, opts, ...)
+	assert(type(id) == 'string', 'invalid key type:'..type(id))
 	if not raft_bodymap[id] then
 		local ma = _M.manager_actor()
 		opts = util.merge_table(_M.default_opts, opts or {})
 		local fsm = (type(fsm_factory) == 'function' and fsm_factory(...) or fsm_factory)
-		local dir = configure_datadir(id, opts)
-		local sr = configure_serde(opts)
+		local dir, sr = check_and_fill_config(id, opts)
 		-- NOTE : this operation may *block* 100~1000 msec (eg. rocksdb store initialization) in some environment
 		-- create column_family which name is "id" in database at dir
 		-- TODO : use unified column family for raft stable storage. related data such as hardstate/log key will be prefixed by "id".
@@ -549,7 +589,7 @@ _M._find_body = find_body
 function _M.rpc(kind, id, ...)
 	local rft = raft_bodymap[id]
 	if not rft then
-		exception.raise('raft_not_found', id, kind)
+		exception.raise('raft_not_found', ffi.cast('luact_uuid_t *', id), kind)
 	end
 	-- rpc for consensus
 	if kind == APPEND_ENTRIES then

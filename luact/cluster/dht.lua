@@ -101,7 +101,6 @@ local default_opts = {
 	n_replica = range.DEFAULT_REPLICA,
 	storage = "rocksdb",
 	datadir = luact.DEFAULT_ROOT_DIR,
-	allow_same_node = true,
 	root_range_send_interval = 30,
 	replica_maintain_interval = 1.0,
 	collect_garbage_interval = 60 * 60,
@@ -110,18 +109,51 @@ local default_opts = {
 	range_prefetch_count = 8,
 	txn_heartbeat_interval = 5.0, -- 5sec
 	max_clock_skew = 0.25, -- 250 msec
+	replica_selector = 'different_thread', -- allow same node, if thread_id is different.
 }
-local function configure_datadir(opts)
-	if not opts.datadir then
-		exception.raise('invalid', 'config', 'options must contain "datadir"')
+local function check_and_fill_config(opts)
+	opts.datadir = fs.path(opts.datadir, tostring(pulpo.thread_id), "dht")
+	if type(opts.replica_selector) == 'string' then
+		local s = opts.replica_selector
+		if s == 'different_thread' then 
+			opts.replica_selector = function (mid, tid, selected)
+				if selected then
+					for i=1,#selected do
+						local tmp_mid, tmp_tid = uuid.machine_id(selected[i]), uuid.thread_id(selected[i])
+						if mid == tmp_mid and tid == tmp_tid then
+							return false
+						end
+					end
+				end
+				return true
+			end
+		elseif s == 'different_node' then
+			opts.replica_selector = function (mid, tid, selected)
+				if selected then
+					for i=1,#selected do
+						local tmp_mid = uuid.machine_id(selected[i])
+						if mid == tmp_mid then
+							return false
+						end
+					end
+				end
+				return true
+			end
+		else  
+			-- if you want to more special logic like different rack or datacenter, 
+			-- you check it by seeing machine_id (actually ipv4 address in VLAN, so you can give some rule for them) 
+			-- or, save metadata (like {machine_id}/dc == dc1) when you boot your node.
+			-- for which way, custom replica selector is useful.
+			opts.replica_selector = require(s)
+		end
 	end
-	return fs.path(opts.datadir, tostring(pulpo.thread_id), "dht")
 end
 function _M.initialize(parent_address, opts)
 	opts = util.merge_table(default_opts, opts)
 	local nodelist = parent_address and {actor.root_of(parent_address, 1)} or nil
 	-- initialize module wide shared variables
-	range_manager = range.get_manager(nodelist, configure_datadir(opts), opts)
+	check_and_fill_config(opts)
+	range_manager = range.get_manager(nodelist, opts.datadir, opts)
 	while not range_manager:initialized() do
 		io.write(pulpo.thread_id); io.stdout:flush()
 		luact.clock.sleep(1)

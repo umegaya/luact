@@ -762,7 +762,7 @@ function mvcc_mt:rawput_internal(stats, k, kl, v, vl, mk, mkl, meta, ml, ts, txn
 		-- This should not happen since range should check the existing
 		-- write intent before executing any Put action at MVCC level.
 		if meta.txn:valid() and (not (txn and meta.txn:same_origin(txn))) then
-			-- logger.info('txn_exists', ffi.string(k, kl), txn, meta.txn)
+			-- logger.warn('txn_exists', ffi.string(k, kl), txn, meta.txn)
 			return meta, false, exception.new('txn_exists', ffi.string(k, kl), meta.txn:clone())
 		end
 

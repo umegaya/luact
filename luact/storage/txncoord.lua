@@ -341,7 +341,7 @@ end
 -- resolve all transactional state and finish it.
 -- causion : this logic may execute on different node from calling end_txn.
 function txn_coord_mt:finish(txn, exist_txn, commit)
--- logger.report('txn_coord_mt:finish', commit, exist_txn, txn)
+-- logger.error('txn_coord_mt:finish', commit, exist_txn, txn)
 	local reply
 	if exist_txn then
 		-- Use the persisted transaction record as final transaction.
@@ -535,7 +535,7 @@ function _M.run_txn(opts_or_fn, ...)
 				if ok then 
 					return util.retry_pattern.STOP 
 				end
-				-- logger.report('run_txn: end_txn error', r)
+				logger.debug('run_txn: end_txn error', r)
 				-- fall through to error handling
 			else
 				return util.retry_pattern.STOP
@@ -560,7 +560,7 @@ function _M.run_txn(opts_or_fn, ...)
 		elseif r:is('txn_need_retry') then
 			return util.retry_pattern.RESTART
 		end
-		-- logger.warn('txn aborted by error', r)
+		logger.debug('txn aborted by error', r)
 		abort_txn(wtxn)
 		return util.retry_pattern.ABORT
 	end, wrap_txn(new_txn(opts.priority, opts.isolation)), opts.on_commit, fn, select(args_index, ...))

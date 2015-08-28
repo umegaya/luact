@@ -97,6 +97,7 @@ function buffer_mt:less_than_equals(k, kl)
 	end
 end
 function buffer_mt:__eq(key)
+	if not key then return false end
 	return self:equals(key:value_ptr(), key:length())
 end
 function buffer_mt:__lt(key)

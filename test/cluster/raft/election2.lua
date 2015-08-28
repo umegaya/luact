@@ -18,7 +18,7 @@ tools.start_luact(3, nil, function ()
 	
 	arb = actor.root_of(nil, luact.thread_id).arbiter('test_group', tools.new_fsm, {
 		replica_set = initial_rs,
-		debug_leader_uuid = actor.system_process_of(nil, leader_thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER),
+		preset_leader_uuid = actor.system_process_of(nil, leader_thread_id, luact.SYSTEM_PROCESS_RAFT_MANAGER),
 	}, luact.thread_id)
 	clock.sleep(2.5)
 	rft = raft._find_body('test_group')

@@ -287,6 +287,7 @@ function raft_state_container_index:stop_replication()
 			reps[k] = nil
 		end
 	end
+	self.replicators = {}
 end
 function raft_state_container_index:start_replication(activate, replica_set)
 	local leader_id = self:leader()
@@ -307,9 +308,9 @@ function raft_state_container_index:start_replication(activate, replica_set)
 				-- heartbeat is necessary because in our use case, 
 				-- typically need to prevent newly added node from causing election timeout.
 				if activate then
-					logger.info('start replicator', self:gid_for_log(), id)
+					logger.debug('start replicator', self:gid_for_log(), id)
 				else
-					logger.info('add replicator', self:gid_for_log(), id)
+					logger.debug('add replicator', self:gid_for_log(), id)
 				end
 			end
 		end
@@ -326,7 +327,7 @@ function raft_state_container_index:add_replica_set(msgid, replica_set, applied_
 	local self_actor = self.controller.manager
 	if applied_idx then
 		if applied_idx <= self.initial_replica_set_ver_idx then
-			logger.info('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
+			logger.debug('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
 			return
 		end
 		local add_self, changed
@@ -380,7 +381,7 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 	local self_actor = self.controller.manager
 	if applied_idx then
 		if applied_idx <= self.initial_replica_set_ver_idx then
-			logger.info('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
+			logger.debug('older replica_set log than current replica_set version', applied_idx, self.initial_replica_set_ver_idx)
 			return
 		end
 		local remove_self, changed
@@ -434,18 +435,15 @@ function raft_state_container_index:remove_replica_set(msgid, replica_set, appli
 end
 function raft_state_container_index:request_routing_id(timeout)
 ::RETRY::
-	if type(timeout) ~= 'number' then
-		logger.error('no number')
-	end
 	if self:is_leader() then 
 		return nil, timeout
 	elseif uuid.valid(self.state.leader_id) then
 		return self.state.leader_id, timeout
 	end
+	-- TODO : use event base leader change notification instead of sleep-polling.
 	if timeout > 0 then
 		local start = clock.get()
 		clock.sleep(0.5)
-		-- logger.info('wait for leader elected:', timeout, timeout - (clock.get() - start))
 		timeout = timeout - (clock.get() - start)
 		goto RETRY
 	end
@@ -577,7 +575,10 @@ function raft_state_container_index:read_snapshot_header(hd)
 	-- should use latest state (by self:read_state()) for term
 	-- self.state.current.term = hd.term
 	self.state.last_applied_idx = hd.index
-	self.initial_replica_set_ver_idx = hd.index
+	if self.initial_replica_set_ver_idx < hd.index then
+		logger.report('reset initial_replica_set_ver_idx from', self.initial_replica_set_ver_idx, 'to', hd.index)
+		self.initial_replica_set_ver_idx = hd.index
+	end
 	for i=1,hd.n_replica do
 		table.insert(self.replica_set, hd.replicas[i - 1])
 	end	
@@ -616,9 +617,6 @@ end
 
 
 -- module function
-local function compute_initial_replica_set(opts)
-	return opts.replica_set or {}
-end
 function _M.new(id, fsm, wal, snapshot, opts)
 	local r = setmetatable({
 		id = id,
@@ -629,7 +627,7 @@ function _M.new(id, fsm, wal, snapshot, opts)
 		wal = wal, -- logs index is self.offset_idx to self.offset_idx + #logs - 1
 		replicators = {}, -- replicators to replicate logs. initialized and sync'ed by replica_set
 		-- replica_set is array of actor (luact_uuid_t) which represents current replica set, include leader replica.
-		replica_set = compute_initial_replica_set(opts), 
+		replica_set = opts.replica_set, 
 		-- initial_replica_set_ver_idx is applied log index of raft instance which provide opts.replica_set.
 		-- this is used for skipping (add|remove)_replica_set log which is already outdated.
 		initial_replica_set_ver_idx = opts.replica_set and opts.initial_replica_set_ver_idx or 0, 

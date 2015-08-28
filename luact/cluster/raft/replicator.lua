@@ -87,6 +87,10 @@ function replicator_index:run(controller, actor, state, hbev)
 			t.self:fin()
 			return true
 		end,
+		[hbev] = function (t)
+			t.controller:stop_replicator(t.actor)
+			return true
+		end,
 		[state.ev_log] = function (t, tp, ...)
 			if tp == 'add' then
 				if not t.running then
@@ -96,15 +100,23 @@ function replicator_index:run(controller, actor, state, hbev)
 			elseif tp == 'stop' then
 				local obj = ({...})[2]
 				if (not obj) or (obj == self) then
+					local ok, r
 					if t.rep_thread then
-						logger.warn(state:gid_for_log(), 'stop repl thread to', t.actor, tostring(t.rep_thread[2]), coroutine.status(t.rep_thread[1]))
-						pcall(tentacle.cancel, t.rep_thread)
+						logger.warn(state:gid_for_log(), 'stop repl thread to', t.actor, t, tostring(t.rep_thread[1]), coroutine.status(t.rep_thread[1]))
+						ok, r = pcall(tentacle.cancel, t.rep_thread)
+						if not ok then
+							logger.error('cancel repl coroutine error:', r)
+						end
 					end
 					if t.hb_thread then
-						logger.warn(state:gid_for_log(), 'stop hb thread to', t.actor, tostring(t.hb_thread[2]), coroutine.status(t.hb_thread[1]))
-						pcall(tentacle.cancel, t.hb_thread)
+						logger.warn(state:gid_for_log(), 'stop hb thread to', t.actor, t, tostring(t.hb_thread[1]), coroutine.status(t.hb_thread[1]))
+						ok, r = pcall(tentacle.cancel, t.hb_thread)
+						if not ok then
+							logger.error('cancel hb coroutine error:', r)
+						end
 					end
 					t.self:stop_append()
+					return true
 				end
 			end
 		end,
@@ -215,12 +227,12 @@ function replicator_index:replicate(controller, actor, state)
 		self.next_idx = math.max(math.min(tonumber(self.next_idx)-1, tonumber(last_index)+1), 1)
 		self.match_idx = self.next_idx - 1
 		self.failures = self.failures + 1
-		logger.warn(state:gid_for_log(), util.sprintf("raft: AppendEntries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
+		logger.warn(state:gid_for_log(), util.sprintf("raft: append_entries to %s rejected, sending older logs (next: %llu)", 256, tostring(actor), self.next_idx))
 	end
 
 ::CHECK_MORE::
 	-- Check if there are more logs to replicate
-	-- logger.info('check more logs to replic', self.next_idx, state.wal:last_index())
+	-- logger.info('check more logs to replic', self.next_idx, state.wal:last_index(), leader_commit_idx)
 	if (self.next_idx <= state.wal:last_index()) or (leader_commit_idx < state:last_commit_index()) then
 		-- logger.info('more logs to replic', self.next_idx, state.wal:last_index())
 		goto START
@@ -235,7 +247,7 @@ function replicator_index:replicate(controller, actor, state)
 	if stop then
 		return true
 	elseif err then
-		logger.error(state:gid_for_log(), ("[ERR] raft: Failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
+		logger.error(state:gid_for_log(), ("[ERR] raft: failed to send snapshot to %x: %s"):format(uuid.addr(actor), err))
 		return
 	end
 	-- Check if there is more to replicate
@@ -278,7 +290,7 @@ function replicator_index:sync(controller, actor, state)
 		self:on_leader_auth_result(true)
 	else
 		self.failures = self.failures + 1
-		logger.warn(state:gid_for_log(), ("raft: InstallSnapshot to %x rejected"):format(uuid.addr(actor)))
+		logger.warn(state:gid_for_log(), ("raft: install_snapshot to %x rejected"):format(uuid.addr(actor)))
 	end
 	return false -- keep on checking replication log is exist.
 end
@@ -290,7 +302,12 @@ function replicator_index:run_heartbeat(actor, state)
 		-- logger.info('hb', actor, state:current_term(), state:leader(), state:last_commit_index())
 		ok, term, success, last_index = pcall(actor.rpc, rpc.APPEND_ENTRIES, state:group_id(), state:current_term(), state:leader())
 		if (not ok) or (not success) then
-			logger.warn(state:gid_for_log(), ("raft: Failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
+			if (not ok) and (term:is('raft_not_found')) then
+				-- it means target raft instance removed
+				logger.warn("raft: instance removed", state:gid_for_log(), "stop heartbeat for", actor)
+				break
+			end
+			logger.warn(state:gid_for_log(), ("raft: failed to heartbeat to %x:%x:%s"):format(uuid.addr(actor), uuid.thread_id(actor), term or "nil"))
 			failures = failures + 1
 			self:failure_cooldown(failures)
 		else

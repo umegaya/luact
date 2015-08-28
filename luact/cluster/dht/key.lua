@@ -4,7 +4,6 @@ local exception = require 'pulpo.exception'
 local buffer = require 'luact.util.buffer'
 local util = require 'pulpo.util'
 local const = require 'luact.cluster.dht.const'
-local kind = require 'luact.cluster.dht.kind'
 
 
 -- module table

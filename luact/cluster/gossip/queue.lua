@@ -94,7 +94,7 @@ end
 function iov_buffer_index:push(p, l)
 	self.list[self.used].iov_base = p
 	self.list[self.used].iov_len = l
-	-- print(self.used, self.list[self.used].iov_len)
+	-- logger.warn(self.used, self.list[self.used].iov_len)
 	self.used = self.used + 1
 end
 ffi.metatype('luact_gossip_iov_buffer_t', iov_buffer_mt)
@@ -127,7 +127,7 @@ function element_buffer_index:reserve(size)
 end
 function element_buffer_index:push(retransmit, buf)
 	for i=self.used-1,0,-1 do
-		if protocol.from_ptr(self.list[i].packet):try_invalidate(buf) then
+		if i < self.used and protocol.from_ptr(self.list[i].packet):try_invalidate(buf) then
 			self:remove(i)
 		end
 	end
@@ -178,6 +178,8 @@ end
 function send_queue_index:used()
 	return self.elembuf.used
 end
+-- pop pops packet from packet queue. and give user packet to lamport clock
+-- according to received order (earlier receive packet has earlier timestamp)
 function send_queue_index:pop(mship, mtu)
 	local byte_used = 0
 	self.iovbuf.used = 0
@@ -190,6 +192,9 @@ function send_queue_index:pop(mship, mtu)
 		else
 			local len = pkt:length()
 			if (byte_used + len) < mtu then
+				if (e.packet[0] == protocol.LUACT_GOSSIP_PROTO_USER) and (pkt.clock == 0) then
+					pkt.clock = mship.msg_checker:issue_clock()
+				end
 				self.iovbuf = protocol.from_ptr(e.packet):copy_to(self.iovbuf)
 				byte_used = byte_used + len
 				e.retransmit = e.retransmit - 1

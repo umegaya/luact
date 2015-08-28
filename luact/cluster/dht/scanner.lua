@@ -43,10 +43,15 @@ local function maintain_replica(self, gossiper, opts)
 		-- initial ranges should be processed in here.
 		local n_require = self.required_replica - self.replica_available
 		local list = gossip.nodelist(opts.gossip_port)
+		local rft = self:raft_body()
+		local selected = self:computed_raft_replicas()
 		for i=1, #list do
 			local n = list[i]
-			if not self:find_replica_by(n, opts.allow_same_node) then
-				local ok, rep = pcall(n.arbiter, n, self:arbiter_id(), _M.range_fsm_factory, nil, self)
+			if opts.replica_selector(n.machine_id, n.thread_id, selected) then
+				local ok, rep = pcall(n.arbiter, n, self:arbiter_id(), _M.range_fsm_factory, {
+					replica_set = rft:replica_set(),
+					initial_replica_set_ver_idx = rft:last_applied_index(),
+				}, self)
 				if ok then
 					table.insert(replica_added, rep)
 				else
@@ -95,8 +100,7 @@ local function maintain_replica(self, gossiper, opts)
 	end
 ::add_replica_set::
 	if #replica_added > 0 then
-		local rft = self:raft_body()
-		-- this eventually calls range:change_replica_set, which changes this range data.
+		local rft = self--:raft_body()
 		local ok, r = pcall(rft.add_replica_set, rft, replica_added)
 		if ok then
 			-- broadcast
@@ -108,14 +112,16 @@ end
 local function collect_garbage(self, gossiper, opts)
 end
 
-local function scanner(func, interval, rng, range_manager)
-	return tentacle(function (fn, intv, r, rm)
+local function scanner(func, interval, range_kind, range_key, range_manager)
+	-- use range_key instead of range itself because range address will change due to add_replica_set
+	return tentacle(function (fn, intv, kind, k, rm)
 		local opts, gossiper = rm.opts, rm.gossiper
 		while true do
+			local r = rm:find_range(k, #k, kind)
 			fn(r, gossiper, opts)
 			luact.clock.sleep(intv)
 		end
-	end, func, interval, rng, range_manager)
+	end, func, interval, range_kind, range_key, range_manager)
 end
 
 function _M.start(rng, range_manager)
@@ -130,10 +136,11 @@ function _M.start(rng, range_manager)
 	if scan_threads[key] then
 		_M.stop(rng)
 	end
+	local range_key = ffi.string(rng:cachekey())
 	local opts = range_manager.opts
 	scan_threads[key] = {
-		scanner(maintain_replica, opts.replica_maintain_interval, rng, range_manager),
-		scanner(collect_garbage, opts.collect_garbage_interval, rng, range_manager),
+		scanner(maintain_replica, opts.replica_maintain_interval, rng.kind, range_key, range_manager),
+		scanner(collect_garbage, opts.collect_garbage_interval, rng.kind, range_key, range_manager),
 	}
 	logger.info('scanner start', tostring(ffi.cast('luact_uuid_t *', key)))
 end

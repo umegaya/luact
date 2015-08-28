@@ -101,6 +101,7 @@ function gossip_index:receive(mship, payload, plen, from)
 		end
 		local data = protocol.from_ptr(payload)
 		payload = payload + data:length()
+		-- logger.warn('recv', data.type == 2 and data.subtype, data, from, plen, data:length())
 		plen = plen - data:length()
 		data:handle(mship, from)
 	end
@@ -126,7 +127,7 @@ function gossip_index:gossip(mship)
 		local vec, len = self.queue:pop(mship, mship.opts.mtu)
 		if vec and len then
 			local r = self.udp:writev(vec, len, n:address())
-			-- logger.info('sendgossip', n:address(), r)
+			--logger.info('sendgossip', n:address(), r)
 		end
 	end
 end
@@ -310,7 +311,7 @@ function membership_index:indirect_ping(redirect_to)
 end
 function membership_index:broadcast(buf, subtype, clock)
 	local packet
-	clock = clock or self.msg_checker:issue_clock()
+	clock = clock or 0
 	if type(buf) == 'string' then
 		packet = protocol.new_user(memory.strdup(buf), #buf, clock, subtype)
 	elseif type(buf) == 'cdata' then
@@ -377,7 +378,7 @@ function membership_index:handle_user_message(message, from)
 		self:emit('user', message.subtype, message.buf, message.len)
 		self:broadcast(msg, message.subtype, message.clock)
 	else
-		-- logger.warn('not fresh:', message.clock, self.msg_checker:now())
+		-- logger.warn('not fresh:', message.type or message.subtype, message, message.clock, self.msg_checker:now())
 	end
 end
 function membership_index:alive(nodedata, bootstrap)

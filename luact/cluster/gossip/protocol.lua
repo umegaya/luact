@@ -53,6 +53,8 @@ _M.types = {
 	[tonumber(LUACT_GOSSIP_PROTO_CHANGE)] = ffi.typeof('luact_gossip_proto_sys_t*'),
 	[tonumber(LUACT_GOSSIP_PROTO_USER)] = ffi.typeof('luact_gossip_proto_user_t*'),
 }
+_M.LUACT_GOSSIP_PROTO_USER = LUACT_GOSSIP_PROTO_USER
+_M.LUACT_GOSSIP_PROTO_CHANGE = LUACT_GOSSIP_PROTO_CHANGE
 
 
 -- proto_join
@@ -266,8 +268,8 @@ function _M.new_user(buf, len, clock, subtype)
 	p.type = LUACT_GOSSIP_PROTO_USER
 	p.subtype = subtype or 0
 	p.len = len
-	p.buf_p = ffi.cast('char *', buf)
 	p.clock = clock
+	p.buf_p = ffi.cast('char *', buf)
 	return p
 end
 function _M.destroy(p)
